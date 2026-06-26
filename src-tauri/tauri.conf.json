@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Greenbar Note",
+  "version": "0.1.0",
+  "identifier": "com.greenbarsystems.note",
+
+  "build": {
+    "beforeDevCommand": "npm run dev:solo",
+    "beforeBuildCommand": "npm run build:solo",
+    "frontendDist": "../dist-solo",
+    "devUrl": "http://localhost:5173/solo.html"
+  },
+
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Greenbar Note",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1100,
+        "minHeight": 720,
+        "center": true,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' tauri: http://tauri.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.anthropic.com; form-action 'self'; base-uri 'self'; frame-ancestors 'none';"
+    }
+  },
+
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "MedicalApp",
+    "copyright": "© Greenbar Systems",
+    "longDescription": "Ambient AI scribe for independent behavioral health and psychiatry practices. Listens to patient encounters, generates structured clinical notes, and requires physician sign-off before finalization. Audio stays on your device.",
+    "shortDescription": "Privacy-first AI scribe for behavioral health",
+    "externalBin": ["binaries/whisper-cpp"]
+  }
+}
