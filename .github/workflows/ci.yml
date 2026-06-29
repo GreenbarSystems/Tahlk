@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: web (build + guard + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # No committed lockfile yet (see review) -> npm install, not npm ci.
+      - run: npm install
+      - run: npm run build:solo
+      - run: npm run test:build   # static import-graph guard
+      - run: npm run test:js      # 28 unit tests
+
+  server:
+    name: server (tahlk-sync)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo build --manifest-path server/Cargo.toml --locked
+
+  # NOTE: the desktop Tauri build (src-tauri) is intentionally NOT in CI yet.
+  # It needs Linux WebKitGTK system deps, the committed icon set, AND the
+  # whisper.cpp sidecar binary (gitignored, placed manually). Wiring it up is
+  # coupled to the unresolved DLL-bundling-for-distribution decision — tracked
+  # as a P1 item, not gold-plated here.
