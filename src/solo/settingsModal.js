@@ -1,9 +1,10 @@
 // Settings modal — provider profile, API key, Whisper model management.
 
-import { kvGet, kvSet } from '../core/storageBackend.js';
+import { kvGet, kvSet, kvEnsure } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
 import { checkModelDownloaded, downloadModel } from '../scribe/transcriber.js';
+import * as telemetry from '../core/telemetry.js';
 import { toast, escapeHtml } from '../utils/format.js';
 
 const PROVIDER_KEY = keys.provider();
@@ -12,6 +13,9 @@ export async function renderSettings() {
   const provider = kvGet(PROVIDER_KEY) || {};
   const modelOk = await checkModelDownloaded().catch(() => false);
   const hasKey = await secretsRepo.hasApiKey().catch(() => false);
+  await kvEnsure([keys.diagEvents()]);          // load any persisted diagnostics for the count
+  const diagOn = telemetry.isEnabled();
+  const diagCount = telemetry.getEvents().length;
 
   return `
     <div class="settings-page">
@@ -68,6 +72,24 @@ export async function renderSettings() {
         ${hasKey ? '<button class="btn btn-ghost btn-danger" id="s-clear-apikey">Remove Key</button>' : ''}
       </section>
 
+      <section class="settings-section">
+        <h3>Diagnostics</h3>
+        <p class="settings-desc">
+          Off by default. When on, Tahlk records app diagnostics <strong>on this device only</strong>
+          — counts, durations, and error types. <strong>No patient data, transcripts, notes, or audio</strong>
+          are ever recorded, and nothing is sent anywhere automatically. You can export the log to share with support.
+        </p>
+        <label class="diag-toggle">
+          <input type="checkbox" id="s-diag-enabled" ${diagOn ? 'checked' : ''} />
+          <span>Record diagnostics on this device</span>
+        </label>
+        <div class="diag-actions">
+          <span class="settings-desc" id="s-diag-count">${diagCount} event${diagCount === 1 ? '' : 's'} stored</span>
+          <button class="btn btn-secondary btn-sm" id="s-diag-export" ${diagCount === 0 ? 'disabled' : ''}>Export Log</button>
+          <button class="btn btn-ghost btn-sm" id="s-diag-clear" ${diagCount === 0 ? 'disabled' : ''}>Clear Log</button>
+        </div>
+      </section>
+
       <section class="settings-section settings-section--danger">
         <h3>Privacy</h3>
         <p class="settings-desc">Audio recordings are stored in your OS app data directory and never leave this device. Transcripts and notes are stored in a local SQLite database. Nothing is sent to Tahlk servers.</p>
@@ -120,6 +142,30 @@ export function wireSettings() {
     } catch (e) {
       toast(`Could not remove API key: ${e.message || e}`);
     }
+  });
+
+  document.getElementById('s-diag-enabled')?.addEventListener('change', e => {
+    telemetry.setEnabled(e.target.checked);
+    toast(e.target.checked ? 'Diagnostics on (this device only).' : 'Diagnostics off.');
+  });
+
+  document.getElementById('s-diag-export')?.addEventListener('click', async () => {
+    try {
+      await telemetry.exportLog();
+      toast('Diagnostics log exported.');
+    } catch (err) {
+      toast(`Export failed: ${err.message || err}`);
+    }
+  });
+
+  document.getElementById('s-diag-clear')?.addEventListener('click', () => {
+    if (!confirm('Clear the on-device diagnostics log?')) return;
+    telemetry.clear();
+    const count = document.getElementById('s-diag-count');
+    if (count) count.textContent = '0 events stored';
+    document.getElementById('s-diag-export')?.setAttribute('disabled', '');
+    document.getElementById('s-diag-clear')?.setAttribute('disabled', '');
+    toast('Diagnostics log cleared.');
   });
 }
 

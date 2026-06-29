@@ -12,6 +12,8 @@ export const keys = {
   noteHistory:    id => `note_history_v1::${id}`,
   noteAudit:      id => `note_audit_v1::${id}`,
   customTemplate: id => `note_templates_v1::${id}`,
+  telemetryEnabled: () => 'note_settings_v1::telemetry_enabled',
+  diagEvents:       () => 'note_diag_v1::events', // not in EAGER_PREFIXES — loaded on demand
 };
 
 // Per-encounter keys pulled into cache lazily when an encounter is opened.

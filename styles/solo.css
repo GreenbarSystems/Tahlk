@@ -288,3 +288,9 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
   max-width: 400px; text-align: center; box-shadow: var(--shadow-md);
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Diagnostics (opt-in telemetry) controls */
+.diag-toggle { display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer; }
+.diag-toggle input { width: 16px; height: 16px; }
+.diag-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.diag-actions .settings-desc { margin: 0; }

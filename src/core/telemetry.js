@@ -1,0 +1,106 @@
+// On-device, opt-in, PHI-scrubbed diagnostics.
+//
+// Design constraints for a HIPAA-context app:
+//   - OFF by default. Nothing is recorded until the provider opts in.
+//   - PHI can never enter the log: track() keeps only numbers/booleans and a
+//     small allowlist of short, non-PHI string keys. Free-form strings (where a
+//     transcript/alias/note would hide) are dropped. To record a string you
+//     must consciously allowlist its key.
+//   - No automatic network egress. The log lives on this device; exporting it
+//     to share with support is an explicit user action.
+//
+// This makes field failures diagnosable without a telemetry backend or a
+// third-party SDK — both of which would be compliance review items here.
+
+import { kvGet, kvSet, kvEnsure } from './storageBackend.js';
+import { on } from './eventBus.js';
+import { invoke } from '../platform/tauri.js';
+import { keys } from '../data/keys.js';
+import { nowISO, todayISO } from '../utils/format.js';
+
+const MAX_EVENTS = 500;
+
+// String props are dropped unless their KEY is on this list — and even then
+// they're length-capped. None of these can carry PHI.
+const SAFE_STRING_KEYS = new Set(['code', 'kind', 'template', 'status', 'os', 'appVersion']);
+
+export function isEnabled() {
+  return kvGet(keys.telemetryEnabled()) === true;
+}
+
+export function setEnabled(on) {
+  kvSet(keys.telemetryEnabled(), !!on);
+}
+
+function scrubProps(props) {
+  const out = {};
+  if (!props || typeof props !== 'object') return out;
+  for (const [k, v] of Object.entries(props)) {
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    else if (typeof v === 'boolean') out[k] = v;
+    else if (typeof v === 'string' && SAFE_STRING_KEYS.has(k)) out[k] = v.slice(0, 64);
+    // objects, arrays, and non-allowlisted strings are intentionally dropped
+  }
+  return out;
+}
+
+function append(record) {
+  if (!isEnabled()) return; // opt-in gate — the single source of truth
+  const events = (kvGet(keys.diagEvents()) || []).slice();
+  events.push(record);
+  if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+  kvSet(keys.diagEvents(), events);
+}
+
+// Record a diagnostic event. `props` is scrubbed to non-PHI primitives.
+export function track(event, props) {
+  append({ t: nowISO(), event: String(event), ...scrubProps(props) });
+}
+
+// Record an error. Stores a stable kind + the error name + a truncated message
+// (the log is local and user-reviewed; these are system-level errors).
+export function recordError(kind, errOrMessage) {
+  const name = errOrMessage && errOrMessage.name ? String(errOrMessage.name) : 'Error';
+  const raw = typeof errOrMessage === 'string'
+    ? errOrMessage
+    : (errOrMessage && errOrMessage.message) || '';
+  append({ t: nowISO(), event: 'error', kind: String(kind), name, message: String(raw).slice(0, 200) });
+}
+
+export function getEvents() {
+  return kvGet(keys.diagEvents()) || [];
+}
+
+export function clear() {
+  kvSet(keys.diagEvents(), []);
+}
+
+// Write the log to a user-chosen file (explicit egress, reviewed by the user).
+export async function exportLog() {
+  const events = getEvents();
+  const content = JSON.stringify({ exportedAt: nowISO(), count: events.length, events }, null, 2);
+  await invoke('export_note_to_file', {
+    content,
+    suggestedName: `tahlk-diagnostics-${todayISO()}.txt`,
+  });
+}
+
+let _started = false;
+
+// Load any persisted log into cache, then subscribe to the event bus. track()
+// no-ops while disabled, so subscribing unconditionally is cheap and correct.
+export async function init() {
+  if (_started) return;
+  _started = true;
+  await kvEnsure([keys.diagEvents()]);
+  track('app_started');
+
+  on('scribe:recording_started',     () => track('recording_started'));
+  on('scribe:transcription_complete', d => track('transcription_complete', { chars: d?.transcript?.length || 0 }));
+  on('scribe:generation_complete',    d => track('note_generated', { chars: d?.note?.length || 0 }));
+  on('scribe:note_signed',           () => track('note_signed'));
+  on('scribe:note_exported',          d => track('note_exported', { kind: d?.format }));
+  on('scribe:transcription_error',    d => recordError('transcription', d?.error));
+  on('scribe:generation_error',       d => recordError('generation', d?.error));
+  on('scribe:audio_error',            d => recordError('audio', d?.error));
+}

@@ -3,6 +3,7 @@
 import { kvWarmup, kvGet, kvEnsure } from './core/storageBackend.js';
 import { encounterCacheKeys } from './data/keys.js';
 import { installCapabilities } from './core/capabilities.js';
+import * as telemetry from './core/telemetry.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
 import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
@@ -40,6 +41,7 @@ function installSoloCapabilities() {
 async function bootstrap() {
   await kvWarmup();
   installSoloCapabilities();
+  await telemetry.init();   // opt-in gated; subscribes to the bus, records nothing unless enabled
 
   if (!isOnboarded()) {
     document.getElementById('app').innerHTML = renderOnboarding();
