@@ -1,8 +1,9 @@
 // Export formatters — plain text, SimplePractice, TherapyNotes, clipboard.
 
-import { tauriInvoke } from '../core/storageBackend.js';
+import { invoke, clipboardWriteText } from '../platform/tauri.js';
 import { appendAudit } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
+import { keys } from '../data/keys.js';
 import { displayDateShort } from '../utils/format.js';
 
 // Plain text — safe paste into any EHR.
@@ -37,29 +38,21 @@ export function toTherapyNotes(note, encounter) {
   ].join('\n');
 }
 
-// Copy formatted text to system clipboard via Tauri.
+// Copy formatted text to the system clipboard.
 export async function copyToClipboard(text, encounterId, format) {
-  const { writeText } = window.__TAURI__?.['clipboard-manager'] ||
-    window.__TAURI__?.clipboardManager || {};
-
-  if (writeText) {
-    await writeText(text);
-  } else {
-    await navigator.clipboard.writeText(text);
-  }
-
-  appendAudit(`note_audit_v1::${encounterId}`, 'note_exported', { format, method: 'clipboard' });
+  await clipboardWriteText(text);
+  appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method: 'clipboard' });
   emit('scribe:note_exported', { encounterId, format });
 }
 
-// Save to a .txt file via Tauri file dialog.
+// Save to a .txt file via the native save dialog.
 export async function saveToFile(text, encounter, format) {
   const date = (encounter.encounter_date || '').slice(0, 10).replace(/-/g, '');
   const alias = encounter.patient_alias ? `_${encounter.patient_alias.replace(/\s+/g, '-')}` : '';
   const suggestedName = `note_${date}${alias}.txt`;
 
-  await tauriInvoke('export_note_to_file', { content: text, suggestedName });
+  await invoke('export_note_to_file', { content: text, suggestedName });
 
-  appendAudit(`note_audit_v1::${encounter.id}`, 'note_exported', { format, method: 'file' });
+  appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format, method: 'file' });
   emit('scribe:note_exported', { encounterId: encounter.id, format });
 }

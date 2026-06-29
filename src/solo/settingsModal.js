@@ -1,15 +1,17 @@
 // Settings modal — provider profile, API key, Whisper model management.
 
-import { kvGet, kvSet, tauriInvoke } from '../core/storageBackend.js';
+import { kvGet, kvSet } from '../core/storageBackend.js';
+import { secretsRepo } from '../data/secretsRepo.js';
+import { keys } from '../data/keys.js';
 import { checkModelDownloaded, downloadModel } from '../scribe/transcriber.js';
 import { toast, escapeHtml } from '../utils/format.js';
 
-const PROVIDER_KEY = 'note_provider_v1::profile';
+const PROVIDER_KEY = keys.provider();
 
 export async function renderSettings() {
   const provider = kvGet(PROVIDER_KEY) || {};
   const modelOk = await checkModelDownloaded().catch(() => false);
-  const hasKey = await tauriInvoke('has_api_key').catch(() => false);
+  const hasKey = await secretsRepo.hasApiKey().catch(() => false);
 
   return `
     <div class="settings-page">
@@ -103,7 +105,7 @@ export function wireSettings() {
     const val = document.getElementById('s-apikey')?.value.trim();
     if (!val || val === '••••••••••••') return;
     try {
-      await tauriInvoke('set_api_key', { key: val });
+      await secretsRepo.setApiKey(val);
       toast('API key saved.');
     } catch (e) {
       toast(`Could not save API key: ${e.message || e}`);
@@ -113,7 +115,7 @@ export function wireSettings() {
   document.getElementById('s-clear-apikey')?.addEventListener('click', async () => {
     if (!confirm('Remove the stored API key?')) return;
     try {
-      await tauriInvoke('clear_api_key');
+      await secretsRepo.clearApiKey();
       toast('API key removed.');
     } catch (e) {
       toast(`Could not remove API key: ${e.message || e}`);

@@ -1,43 +1,20 @@
-// Storage backend — Solo tier only uses TauriBackend (SQLite on disk).
-// The RemoteHttpBackend and HybridRouter are Group-tier concerns and
-// are never imported here, keeping this module group-free.
+// KV store + write-through cache (data-access layer).
+//
+// Talks to SQLite via the platform adapter. The Group-tier RemoteHttpBackend is
+// intentionally not imported here, keeping this module group-free. Per-encounter
+// key formats live in data/keys.js; warmup eagerly loads only the small,
+// app-wide prefixes below.
 
 import { toast } from '../utils/format.js';
-
-const IS_TAURI = typeof window !== 'undefined' && (
-  '__TAURI__' in window || '__TAURI_INTERNALS__' in window
-);
+import { invoke, isTauri } from '../platform/tauri.js';
 
 const _cache = new Map();
 
-// Small, app-wide key prefixes warmed eagerly at boot — provider profile,
-// settings/onboarding flag, and the custom template list. These are bounded
-// in size regardless of how many encounters exist.
 export const EAGER_PREFIXES = [
   'note_provider_v1',
   'note_settings_v1',
   'note_templates_v1',
 ];
-
-// Per-encounter keys (note_content / transcript / history / audit) are NOT
-// warmed at boot — they grow unbounded with encounter count. They are loaded
-// on demand via kvEnsure(encounterCacheKeys(id)) when an encounter is opened.
-export const encounterCacheKeys = id => [
-  `note_content_v1::${id}`,
-  `note_content_v1::transcript::${id}`,
-  `note_history_v1::${id}`,
-  `note_audit_v1::${id}`,
-];
-
-// ── Tauri invoke helper ────────────────────────────────────────────────────
-
-function _tauriInvoke(cmd, args) {
-  const t = window.__TAURI__;
-  if (t?.core?.invoke) return t.core.invoke(cmd, args);
-  if (t?.tauri?.invoke) return t.tauri.invoke(cmd, args);
-  if (typeof t?.invoke === 'function') return t.invoke(cmd, args);
-  return Promise.reject(new Error('Tauri invoke unavailable'));
-}
 
 // ── TauriBackend ───────────────────────────────────────────────────────────
 
@@ -47,7 +24,7 @@ const TauriBackend = {
   async warmup() {
     await Promise.all(EAGER_PREFIXES.map(async prefix => {
       try {
-        const rows = await _tauriInvoke('kv_list', { prefix });
+        const rows = await invoke('kv_list', { prefix });
         if (Array.isArray(rows)) {
           for (const row of rows) {
             if (Array.isArray(row) && row.length === 2) _cache.set(row[0], row[1]);
@@ -63,7 +40,7 @@ const TauriBackend = {
   async ensureKeys(keys) {
     await Promise.all(keys.filter(k => !_cache.has(k)).map(async k => {
       try {
-        const v = await _tauriInvoke('kv_get', { key: k });
+        const v = await invoke('kv_get', { key: k });
         _cache.set(k, v ?? null);
       } catch (e) {
         console.error('Tauri kv_get failed for ' + k, e);
@@ -77,7 +54,7 @@ const TauriBackend = {
 
   setSync(key, value) {
     _cache.set(key, value);
-    _tauriInvoke('kv_set', { key, value })
+    invoke('kv_set', { key, value })
       .catch(e => {
         console.error('Tauri kv_set failed for ' + key, e);
         toast(`Disk write failed — change may not be saved`, 4500);
@@ -90,7 +67,7 @@ const TauriBackend = {
   async setAsync(key, value) {
     _cache.set(key, value);
     try {
-      await _tauriInvoke('kv_set', { key, value });
+      await invoke('kv_set', { key, value });
     } catch (e) {
       console.error('Tauri kv_set failed for ' + key, e);
       toast(`Disk write failed — change may not be saved`, 4500);
@@ -100,7 +77,7 @@ const TauriBackend = {
 
   removeSync(key) {
     _cache.delete(key);
-    _tauriInvoke('kv_remove', { key })
+    invoke('kv_remove', { key })
       .catch(e => console.error('Tauri kv_remove failed for ' + key, e));
   },
 
@@ -176,7 +153,7 @@ const LocalStorageBackend = {
 
 // ── Active backend + public surface ───────────────────────────────────────
 
-const _backend = IS_TAURI ? TauriBackend : LocalStorageBackend;
+const _backend = isTauri ? TauriBackend : LocalStorageBackend;
 
 export function kvGet(key)          { return _backend.getSync(key); }
 export function kvSet(key, value)   { return _backend.setSync(key, value); }
@@ -187,8 +164,5 @@ export async function kvWarmup()    { await _backend.warmup(); }
 export async function kvEnsure(keys) { await _backend.ensureKeys(keys); }
 
 export function kvBackendInfo() {
-  return { kind: _backend.kind, isTauri: IS_TAURI };
+  return { kind: _backend.kind, isTauri };
 }
-
-// Direct Tauri IPC for commands beyond KV.
-export function tauriInvoke(cmd, args) { return _tauriInvoke(cmd, args); }

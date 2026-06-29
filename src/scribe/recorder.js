@@ -3,7 +3,7 @@
 // via the Tauri save_session_audio command. Audio never leaves the device.
 
 import { emit } from '../core/eventBus.js';
-import { tauriInvoke } from '../core/storageBackend.js';
+import { invoke } from '../platform/tauri.js';
 
 let _mediaRecorder = null;
 let _chunks = [];
@@ -61,7 +61,7 @@ export async function stopRecording(encounterId) {
           : await convertToWav(arrayBuffer);
 
         const base64 = await arrayBufferToBase64(wavBuffer);
-        const path = await tauriInvoke('save_session_audio', { encounterId, base64Data: base64 });
+        const path = await invoke('save_session_audio', { encounterId, base64Data: base64 });
 
         stopStream();
         emit('scribe:recording_stopped', { encounterId });

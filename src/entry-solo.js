@@ -1,6 +1,7 @@
 // Solo entry point — bootstraps storage, checks onboarding, renders the shell.
 
-import { kvWarmup, kvGet, kvEnsure, encounterCacheKeys } from './core/storageBackend.js';
+import { kvWarmup, kvGet, kvEnsure } from './core/storageBackend.js';
+import { encounterCacheKeys } from './data/keys.js';
 import { installCapabilities } from './core/capabilities.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';

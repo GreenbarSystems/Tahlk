@@ -1,6 +1,6 @@
 // Home screen — encounter list, quick-start, session stats.
 
-import { tauriInvoke } from '../core/storageBackend.js';
+import { encountersRepo } from '../data/encountersRepo.js';
 import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel } from '../utils/format.js';
 
 export async function renderHomeScreen() {
@@ -8,8 +8,8 @@ export async function renderHomeScreen() {
   // most-recent 50 rows. Run both in parallel. Previously "Total" was the
   // length of the capped 50-row fetch — wrong past 50 encounters.
   const [stats, encounters] = await Promise.all([
-    tauriInvoke('encounter_stats', { today: todayISO() }).catch(() => ({ total: 0, signed: 0, today: 0 })),
-    tauriInvoke('list_encounters', { limit: 50 }).catch(() => []),
+    encountersRepo.stats(todayISO()).catch(() => ({ total: 0, signed: 0, today: 0 })),
+    encountersRepo.list(50).catch(() => []),
   ]);
 
   return `
@@ -72,14 +72,14 @@ export async function wireHomeScreen(onOpenEncounter) {
       signed_at: null,
       signed_hash: null,
     };
-    await tauriInvoke('upsert_encounter', { encounter });
+    await encountersRepo.save(encounter);
     onOpenEncounter(encounter);
   });
 
   document.querySelectorAll('.encounter-row').forEach(row => {
     const open = async () => {
       const id = row.dataset.encounterId;
-      const encounter = await tauriInvoke('get_encounter', { id }).catch(() => null);
+      const encounter = await encountersRepo.get(id).catch(() => null);
       if (encounter) onOpenEncounter(encounter);
     };
     row.addEventListener('click', open);

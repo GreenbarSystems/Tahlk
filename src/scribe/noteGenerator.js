@@ -3,7 +3,7 @@
 // and is never accessible from JS. Returns the full note text.
 
 import { emit } from '../core/eventBus.js';
-import { tauriInvoke } from '../core/storageBackend.js';
+import { invoke, listen } from '../platform/tauri.js';
 import { getTemplate } from '../templates/templateLibrary.js';
 
 export async function generateNote(transcript, templateId, encounterId) {
@@ -16,16 +16,12 @@ export async function generateNote(transcript, templateId, encounterId) {
   // Anthropic. Bridge those onto the internal bus for live display, then
   // unlisten once generation settles. If the event API is unavailable the
   // command still returns the full assembled note (no progressive rendering).
-  const { listen } = window.__TAURI__?.event || {};
-  let unlisten;
-  if (listen) {
-    unlisten = await listen('scribe:note_chunk', e => {
-      emit('scribe:note_chunk', { text: e.payload, encounterId });
-    });
-  }
+  const unlisten = await listen('scribe:note_chunk', e => {
+    emit('scribe:note_chunk', { text: e.payload, encounterId });
+  });
 
   try {
-    const note = await tauriInvoke('generate_note', {
+    const note = await invoke('generate_note', {
       transcript,
       systemPrompt: template.systemPrompt,
     });

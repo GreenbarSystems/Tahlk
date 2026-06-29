@@ -1,11 +1,13 @@
 // First-run onboarding — collect provider info, trigger model download, enter API key.
 
-import { kvGet, kvSet, tauriInvoke } from '../core/storageBackend.js';
+import { kvGet, kvSet } from '../core/storageBackend.js';
+import { secretsRepo } from '../data/secretsRepo.js';
+import { keys } from '../data/keys.js';
 import { downloadModel, checkModelDownloaded } from '../scribe/transcriber.js';
 import { toast } from '../utils/format.js';
 
-const PROVIDER_KEY = 'note_provider_v1::profile';
-const ONBOARDED_KEY = 'note_settings_v1::onboarded';
+const PROVIDER_KEY = keys.provider();
+const ONBOARDED_KEY = keys.onboarded();
 
 export function isOnboarded() {
   return !!kvGet(ONBOARDED_KEY);
@@ -120,7 +122,7 @@ export async function wireOnboarding(onComplete) {
     });
     // Store the API key write-only — it never round-trips back to JS.
     try {
-      await tauriInvoke('set_api_key', { key: apiKey });
+      await secretsRepo.setApiKey(apiKey);
     } catch (e) {
       toast(`Could not save API key: ${e.message || e}`);
       return;

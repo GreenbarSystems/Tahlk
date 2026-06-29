@@ -1,6 +1,8 @@
 // Encounter panel — recording controls, transcription status, note editor, sign-off.
 
-import { kvGet, kvSet, tauriInvoke } from '../core/storageBackend.js';
+import { kvGet, kvSet } from '../core/storageBackend.js';
+import { encountersRepo } from '../data/encountersRepo.js';
+import { keys } from '../data/keys.js';
 import { on, emit } from '../core/eventBus.js';
 import { startRecording, stopRecording, isRecording, recordingDuration } from '../scribe/recorder.js';
 import { transcribe } from '../scribe/transcriber.js';
@@ -13,7 +15,7 @@ import {
 } from '../export/exportFormatter.js';
 import { toast, fmtDuration, displayDate, escapeHtml, statusLabel } from '../utils/format.js';
 
-const TRANSCRIPT_KEY = id => `note_content_v1::transcript::${id}`;
+const TRANSCRIPT_KEY = keys.noteTranscript;
 
 export function renderEncounterPanel(encounter) {
   const isSigned = encounter.status === 'signed';
@@ -169,7 +171,7 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   // Patient alias save on blur
   document.getElementById('patient-alias')?.addEventListener('change', async e => {
     currentEncounter.patient_alias = e.target.value.trim() || null;
-    await tauriInvoke('upsert_encounter', { encounter: currentEncounter });
+    await encountersRepo.save(currentEncounter);
     onEncounterUpdated(currentEncounter);
   });
 
@@ -185,7 +187,7 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   sub('scribe:audio_saved', async ({ path }) => {
     currentEncounter.audio_path = path;
     currentEncounter.status = 'recording_done';
-    await tauriInvoke('upsert_encounter', { encounter: currentEncounter });
+    await encountersRepo.save(currentEncounter);
     onEncounterUpdated(currentEncounter);
     document.getElementById('btn-transcribe')?.removeAttribute('disabled');
     toast('Recording saved to device.');
@@ -280,7 +282,7 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
       document.getElementById('btn-copy')?.removeAttribute('disabled');
       document.getElementById('btn-save-file')?.removeAttribute('disabled');
       currentEncounter.status = 'draft';
-      await tauriInvoke('upsert_encounter', { encounter: currentEncounter });
+      await encountersRepo.save(currentEncounter);
       onEncounterUpdated(currentEncounter);
       clearStatus();
     } catch (e) {

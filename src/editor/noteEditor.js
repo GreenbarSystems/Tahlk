@@ -1,107 +1,58 @@
-// Note editor — manages draft lifecycle, edit history chain, and sign-off.
-// All state lives in SQLite via kvGet/kvSet. The audit chain uses SHA-256
-// linking so post-sign edits are detectable.
+// Note editor use-cases — draft lifecycle and sign-off. Chain assembly lives in
+// domain/historyChain; encounter persistence goes through encountersRepo. This
+// module orchestrates: write content, append a chain entry, emit, audit.
 
-import { kvGet, kvSetAwait, tauriInvoke } from '../core/storageBackend.js';
+import { kvGet, kvSetAwait } from '../core/storageBackend.js';
 import { appendAudit } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
-import { computeNoteHash, hashHistoryEntry } from '../utils/contentHash.js';
-import { nowISO, genId } from '../utils/format.js';
+import { computeNoteHash } from '../utils/contentHash.js';
+import { appendHistoryEntry, loadHistory } from '../domain/historyChain.js';
+import { encountersRepo } from '../data/encountersRepo.js';
+import { keys } from '../data/keys.js';
+import { nowISO } from '../utils/format.js';
 
-const CONTENT_KEY = id => `note_content_v1::${id}`;
-const HISTORY_KEY = id => `note_history_v1::${id}`;
+// loadHistory is re-exported so existing consumers keep their import surface.
+export { loadHistory };
 
 export function loadDraft(encounterId) {
-  return kvGet(CONTENT_KEY(encounterId)) || null;
-}
-
-export function loadHistory(encounterId) {
-  return kvGet(HISTORY_KEY(encounterId)) || [];
+  return kvGet(keys.noteContent(encounterId)) || null;
 }
 
 // Store AI-generated draft and append a 'generated' history entry.
 export async function saveDraftGenerated(encounterId, noteContent, transcript) {
-  await kvSetAwait(CONTENT_KEY(encounterId), noteContent);
-
-  const history = loadHistory(encounterId);
-  const prevHash = history.length ? history[history.length - 1].entryHash ?? null : null;
+  await kvSetAwait(keys.noteContent(encounterId), noteContent);
   const contentHash = await computeNoteHash({ transcript, noteContent, signedBy: '', encounterId });
-
-  const entry = {
-    action: 'generated',
-    actor: 'AI (Tahlk)',
-    timestamp: nowISO(),
-    contentHash,
-    notes: '',
-  };
-  entry.prevHash = prevHash;
-  entry.entryHash = await hashHistoryEntry(entry, prevHash);
-
-  history.push(entry);
-  await kvSetAwait(HISTORY_KEY(encounterId), history);
-
+  const entry = await appendHistoryEntry(encounterId, { action: 'generated', actor: 'AI (Tahlk)', contentHash });
   emit('scribe:draft_saved', { encounterId });
   return entry;
 }
 
 // Save a physician edit and append an 'edited' history entry.
 export async function saveDraftEdited(encounterId, noteContent, transcript) {
-  await kvSetAwait(CONTENT_KEY(encounterId), noteContent);
-
-  const history = loadHistory(encounterId);
-  const prevHash = history.length ? history[history.length - 1].entryHash ?? null : null;
+  await kvSetAwait(keys.noteContent(encounterId), noteContent);
   const contentHash = await computeNoteHash({ transcript, noteContent, signedBy: '', encounterId });
-
-  const entry = {
-    action: 'edited',
-    actor: 'provider',
-    timestamp: nowISO(),
-    contentHash,
-    notes: '',
-  };
-  entry.prevHash = prevHash;
-  entry.entryHash = await hashHistoryEntry(entry, prevHash);
-
-  history.push(entry);
-  await kvSetAwait(HISTORY_KEY(encounterId), history);
-
-  appendAudit(`note_audit_v1::${encounterId}`, 'note_edited', { encounterId });
+  await appendHistoryEntry(encounterId, { action: 'edited', actor: 'provider', contentHash });
+  appendAudit(keys.noteAudit(encounterId), 'note_edited', { encounterId });
   emit('scribe:draft_saved', { encounterId });
 }
 
-// Sign the note — computes final hash, chains a 'signed' entry, marks encounter.
+// Sign the note — chains a durable 'signed' entry, THEN flips the encounter via
+// a targeted update (markSigned can't clobber alias/audio the way a full upsert
+// would). The chain is persisted first so a failure never marks an unsigned
+// encounter as signed.
 export async function signNote(encounterId, noteContent, transcript, providerName) {
   const contentHash = await computeNoteHash({ transcript, noteContent, signedBy: providerName, encounterId });
 
-  const history = loadHistory(encounterId);
-  const prevHash = history.length ? history[history.length - 1].entryHash ?? null : null;
-
-  const entry = {
+  await appendHistoryEntry(encounterId, {
     action: 'signed',
     actor: providerName || 'provider',
-    timestamp: nowISO(),
     contentHash,
     notes: `Attested by ${providerName || 'provider'}`,
-  };
-  entry.prevHash = prevHash;
-  entry.entryHash = await hashHistoryEntry(entry, prevHash);
-
-  // Persist the signed chain entry durably BEFORE flipping the encounter
-  // status. If the disk write fails this throws and the encounter is never
-  // marked signed — the tamper-evidence and the status stay consistent.
-  history.push(entry);
-  await kvSetAwait(HISTORY_KEY(encounterId), history);
-
-  // Flip the encounter to signed via a targeted update. A full upsert here
-  // would null out patient_alias / audio_path (this payload never carried
-  // them), corrupting the record at the exact moment of attestation.
-  await tauriInvoke('mark_encounter_signed', {
-    id: encounterId,
-    signedAt: nowISO(),
-    signedHash: contentHash,
   });
 
-  appendAudit(`note_audit_v1::${encounterId}`, 'note_signed', { encounterId, contentHash });
+  await encountersRepo.markSigned(encounterId, nowISO(), contentHash);
+
+  appendAudit(keys.noteAudit(encounterId), 'note_signed', { encounterId, contentHash });
   emit('scribe:note_signed', { encounterId, hash: contentHash });
   return contentHash;
 }
