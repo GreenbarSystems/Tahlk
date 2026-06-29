@@ -8,7 +8,7 @@
     "dev:solo": "vite --mode solo",
     "build:solo": "vite build --mode solo",
     "test:build": "node --test tests/build/test_solo_excludes_group.mjs",
-    "test:js": "node --test tests/js/test_contentHash.mjs tests/js/test_eventBus.mjs tests/js/test_exportFormatter.mjs tests/js/test_ui.mjs",
+    "test:js": "node --test tests/js/test_contentHash.mjs tests/js/test_eventBus.mjs tests/js/test_exportFormatter.mjs tests/js/test_ui.mjs tests/js/test_signoff.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:icons": "tauri icon path/to/source.png",
