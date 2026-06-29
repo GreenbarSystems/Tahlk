@@ -20,8 +20,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # No committed lockfile yet (see review) -> npm install, not npm ci.
-      - run: npm install
+          cache: npm
+      # Reproducible install from the committed lockfile.
+      - run: npm ci
       - run: npm run build:solo
       - run: npm run test:build   # static import-graph guard
       - run: npm run test:js      # 28 unit tests
