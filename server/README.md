@@ -1,5 +1,12 @@
 # tahlk-sync — Group-tier sync service
 
+> ⛔ **FROZEN — not under active development.** Parked per
+> [ADR 0001](../docs/adr/0001-freeze-group-tier-and-sync.md). It stays in CI so
+> it keeps compiling, but no new work lands here until the unfreeze criteria are
+> met (a signed Group customer **and** an audit-safe sync design). Focus is the
+> single-user Solo desktop app. Do not extend this without revisiting the ADR.
+
+
 Multi-tenant backend the Tahlk desktop app syncs to when a practice is on the
 Group/Enterprise tier. Minimal but production-shaped: layered, tenant-isolated,
 audit-preserving, and runnable with zero infrastructure (in-memory store/cache)
