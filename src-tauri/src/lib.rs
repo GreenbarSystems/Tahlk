@@ -207,6 +207,24 @@ fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, Str
         .map_err(|e| e.to_string())
 }
 
+// Home-screen counters via indexed COUNT(*) — O(index) instead of shipping rows
+// to JS and filtering. `today` is passed in so the comparison matches how
+// encounter_date is stored client-side.
+#[tauri::command]
+fn encounter_stats(state: State<DbState>, today: String) -> Result<Value, String> {
+    let conn = state.0.lock();
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM encounters", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let signed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM encounters WHERE status = 'signed'", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let today_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM encounters WHERE encounter_date = ?1", params![today], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "total": total, "signed": signed, "today": today_count }))
+}
+
 #[tauri::command]
 fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), String> {
     let conn = state.0.lock();
@@ -487,7 +505,8 @@ fn open_database(app: &AppHandle) -> rusqlite::Result<Connection> {
              signed_hash    TEXT
          );
          CREATE INDEX IF NOT EXISTS enc_date_idx ON encounters (encounter_date DESC);
-         CREATE INDEX IF NOT EXISTS enc_status_idx ON encounters (status);",
+         CREATE INDEX IF NOT EXISTS enc_status_idx ON encounters (status);
+         CREATE INDEX IF NOT EXISTS enc_created_idx ON encounters (created_at DESC);",
     )?;
     Ok(conn)
 }
@@ -513,6 +532,7 @@ pub fn run() {
             data_location,
             list_encounters,
             get_encounter,
+            encounter_stats,
             mark_encounter_signed,
             upsert_encounter,
             save_session_audio,

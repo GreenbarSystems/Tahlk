@@ -4,24 +4,28 @@ import { tauriInvoke } from '../core/storageBackend.js';
 import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel } from '../utils/format.js';
 
 export async function renderHomeScreen() {
-  const encounters = await tauriInvoke('list_encounters', { limit: 50 }).catch(() => []);
-  const todayCount = encounters.filter(e => e.encounter_date === todayISO()).length;
-  const signedCount = encounters.filter(e => e.status === 'signed').length;
+  // Counts come from indexed COUNT(*) (accurate at any scale); the list is the
+  // most-recent 50 rows. Run both in parallel. Previously "Total" was the
+  // length of the capped 50-row fetch — wrong past 50 encounters.
+  const [stats, encounters] = await Promise.all([
+    tauriInvoke('encounter_stats', { today: todayISO() }).catch(() => ({ total: 0, signed: 0, today: 0 })),
+    tauriInvoke('list_encounters', { limit: 50 }).catch(() => []),
+  ]);
 
   return `
     <div class="home-screen">
       <div class="home-top">
         <div class="home-stats">
           <div class="stat-card">
-            <div class="stat-num">${todayCount}</div>
+            <div class="stat-num">${stats.today}</div>
             <div class="stat-label">Today</div>
           </div>
           <div class="stat-card">
-            <div class="stat-num">${signedCount}</div>
+            <div class="stat-num">${stats.signed}</div>
             <div class="stat-label">Signed</div>
           </div>
           <div class="stat-card">
-            <div class="stat-num">${encounters.length}</div>
+            <div class="stat-num">${stats.total}</div>
             <div class="stat-label">Total</div>
           </div>
         </div>

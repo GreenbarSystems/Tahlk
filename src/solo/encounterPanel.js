@@ -129,6 +129,11 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   // in-flight edit (and its history entry) is never dropped.
   let _pendingNote = null;
   let _saveTimer;
+
+  // Streaming-token buffer — coalesce note_chunk deltas into one textarea write
+  // per animation frame instead of one (reflow-forcing) write per token.
+  let _chunkBuf = '';
+  let _chunkRaf = 0;
   async function flushPendingEdit() {
     if (_pendingNote == null) return;
     clearTimeout(_saveTimer);
@@ -148,6 +153,8 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   async function dispose() {
     if (_disposed) return;
     _disposed = true;
+    if (_chunkRaf) { cancelAnimationFrame(_chunkRaf); _chunkRaf = 0; }
+    _chunkBuf = '';
     await flushPendingEdit();
     _disposers.forEach(d => d());
     _disposers.length = 0;
@@ -212,11 +219,19 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     recordBtn.disabled = false;
   });
 
-  // Live note streaming — append each delta as it arrives.
+  // Live note streaming — buffer deltas and flush once per frame to avoid a
+  // reflow per token (and the O(n^2) string growth of value += per delta).
   sub('scribe:note_chunk', ({ text, encounterId }) => {
     if (encounterId !== currentEncounter.id) return;
-    const ta = document.getElementById('note-area');
-    if (ta) ta.value += text;
+    _chunkBuf += text;
+    if (_chunkRaf) return;
+    _chunkRaf = requestAnimationFrame(() => {
+      _chunkRaf = 0;
+      if (!_chunkBuf) return;
+      const ta = document.getElementById('note-area');
+      if (ta) ta.value += _chunkBuf;
+      _chunkBuf = '';
+    });
   });
 
   // Transcription
@@ -255,6 +270,10 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     if (noteArea) noteArea.value = '';   // cleared, then filled by streaming chunks
     try {
       const note = await generateNote(currentTranscript, templateId, currentEncounter.id);
+      // Streaming finished: cancel any pending frame and drop the buffered tail
+      // so the rAF flush can't append leftovers after the authoritative set.
+      if (_chunkRaf) { cancelAnimationFrame(_chunkRaf); _chunkRaf = 0; }
+      _chunkBuf = '';
       if (noteArea) noteArea.value = note; // reconcile with the full assembled note
       await saveDraftGenerated(currentEncounter.id, note, currentTranscript);
       document.getElementById('btn-sign')?.removeAttribute('disabled');

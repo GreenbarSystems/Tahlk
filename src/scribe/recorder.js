@@ -58,7 +58,7 @@ export async function stopRecording(encounterId) {
         const arrayBuffer = await blob.arrayBuffer();
         const wavBuffer = _mediaRecorder.mimeType.includes('wav')
           ? arrayBuffer
-          : await convertToWav(arrayBuffer, _stream.getAudioTracks()[0].getSettings());
+          : await convertToWav(arrayBuffer);
 
         const base64 = await arrayBufferToBase64(wavBuffer);
         const path = await tauriInvoke('save_session_audio', { encounterId, base64Data: base64 });
@@ -108,23 +108,28 @@ function arrayBufferToBase64(buf) {
   });
 }
 
-// Minimal WAV header writer — whisper.cpp requires PCM WAV.
-// If the browser recorded in a compressed format, we re-encode via AudioContext.
-async function convertToWav(compressedBuffer, trackSettings) {
-  const audioCtx = new OfflineAudioContext(1, 1, trackSettings.sampleRate || 16000);
-  const decoded = await audioCtx.decodeAudioData(compressedBuffer.slice(0));
-  const sampleRate = decoded.sampleRate;
-  const numChannels = decoded.numberOfChannels;
-  const numSamples = decoded.length;
+// whisper.cpp's native sample rate. Producing 16 kHz mono here — rather than
+// the ~48 kHz capture rate — shrinks the WAV, the IPC payload, and the on-disk
+// file by ~3x and avoids a redundant resample inside whisper.
+const TARGET_RATE = 16000;
 
-  const wavCtx = new OfflineAudioContext(1, numSamples, sampleRate);
+// Re-encode a compressed recording to 16 kHz mono PCM WAV. The decoded buffer
+// is freed as soon as rendering completes, bounding peak memory on long
+// sessions to roughly the 16 kHz signal rather than the full 48 kHz capture.
+async function convertToWav(compressedBuffer) {
+  const decodeCtx = new OfflineAudioContext(1, 1, TARGET_RATE);
+  const decoded = await decodeCtx.decodeAudioData(compressedBuffer.slice(0));
+
+  // Resample to 16 kHz mono during render (length scaled to the new rate).
+  const frames = Math.max(1, Math.ceil(decoded.duration * TARGET_RATE));
+  const wavCtx = new OfflineAudioContext(1, frames, TARGET_RATE);
   const source = wavCtx.createBufferSource();
   source.buffer = decoded;
   source.connect(wavCtx.destination);
   source.start();
   const rendered = await wavCtx.startRendering();
 
-  return encodeWav(rendered.getChannelData(0), sampleRate);
+  return encodeWav(rendered.getChannelData(0), TARGET_RATE);
 }
 
 function encodeWav(samples, sampleRate) {
