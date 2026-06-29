@@ -10,15 +10,23 @@ const IS_TAURI = typeof window !== 'undefined' && (
 
 const _cache = new Map();
 
-// All note_* key prefixes the warmup phase pre-fetches from SQLite.
-export const KEY_PREFIXES = [
-  'note_encounters_v1',
-  'note_content_v1',
-  'note_history_v1',
-  'note_templates_v1',
+// Small, app-wide key prefixes warmed eagerly at boot — provider profile,
+// settings/onboarding flag, and the custom template list. These are bounded
+// in size regardless of how many encounters exist.
+export const EAGER_PREFIXES = [
   'note_provider_v1',
   'note_settings_v1',
-  'note_audit_v1',
+  'note_templates_v1',
+];
+
+// Per-encounter keys (note_content / transcript / history / audit) are NOT
+// warmed at boot — they grow unbounded with encounter count. They are loaded
+// on demand via kvEnsure(encounterCacheKeys(id)) when an encounter is opened.
+export const encounterCacheKeys = id => [
+  `note_content_v1::${id}`,
+  `note_content_v1::transcript::${id}`,
+  `note_history_v1::${id}`,
+  `note_audit_v1::${id}`,
 ];
 
 // ── Tauri invoke helper ────────────────────────────────────────────────────
@@ -37,7 +45,7 @@ const TauriBackend = {
   kind: 'tauri',
 
   async warmup() {
-    await Promise.all(KEY_PREFIXES.map(async prefix => {
+    await Promise.all(EAGER_PREFIXES.map(async prefix => {
       try {
         const rows = await _tauriInvoke('kv_list', { prefix });
         if (Array.isArray(rows)) {
@@ -47,6 +55,18 @@ const TauriBackend = {
         }
       } catch (e) {
         console.error('Tauri kv_list failed for ' + prefix, e);
+      }
+    }));
+  },
+
+  // Load specific keys into the cache on demand (lazy per-encounter fetch).
+  async ensureKeys(keys) {
+    await Promise.all(keys.filter(k => !_cache.has(k)).map(async k => {
+      try {
+        const v = await _tauriInvoke('kv_get', { key: k });
+        _cache.set(k, v ?? null);
+      } catch (e) {
+        console.error('Tauri kv_get failed for ' + k, e);
       }
     }));
   },
@@ -97,7 +117,7 @@ const LocalStorageBackend = {
   kind: 'local',
 
   async warmup() {
-    KEY_PREFIXES.forEach(prefix => {
+    EAGER_PREFIXES.forEach(prefix => {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
         if (k && (k === prefix || k.startsWith(prefix + '::'))) {
@@ -107,6 +127,10 @@ const LocalStorageBackend = {
       }
     });
   },
+
+  // getSync already lazy-reads localStorage on a cache miss, so ensureKeys is
+  // a no-op here — kept for backend parity with TauriBackend.
+  async ensureKeys() {},
 
   getSync(key) {
     if (_cache.has(key)) return _cache.get(key);
@@ -160,6 +184,7 @@ export function kvSetAwait(key, value) { return _backend.setAsync(key, value); }
 export function kvRemove(key)       { return _backend.removeSync(key); }
 export function kvList(prefix)      { return _backend.listKeys(prefix); }
 export async function kvWarmup()    { await _backend.warmup(); }
+export async function kvEnsure(keys) { await _backend.ensureKeys(keys); }
 
 export function kvBackendInfo() {
   return { kind: _backend.kind, isTauri: IS_TAURI };

@@ -136,37 +136,51 @@ fn data_location(app: AppHandle) -> Result<String, String> {
 
 // ── Encounter queries ──────────────────────────────────────────────────────
 
+// Column order shared by list_encounters and get_encounter.
+const ENCOUNTER_COLS: &str =
+    "id, provider_id, encounter_date, patient_alias, status, \
+     audio_path, created_at, signed_at, signed_hash";
+
+fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id":             r.get::<_, String>(0)?,
+        "provider_id":    r.get::<_, String>(1)?,
+        "encounter_date": r.get::<_, String>(2)?,
+        "patient_alias":  r.get::<_, Option<String>>(3)?,
+        "status":         r.get::<_, String>(4)?,
+        "audio_path":     r.get::<_, Option<String>>(5)?,
+        "created_at":     r.get::<_, String>(6)?,
+        "signed_at":      r.get::<_, Option<String>>(7)?,
+        "signed_hash":    r.get::<_, Option<String>>(8)?,
+    }))
+}
+
 #[tauri::command]
 fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, String> {
     let conn = state.0.lock();
     let n = limit.unwrap_or(50);
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, provider_id, encounter_date, patient_alias, status, \
-                    audio_path, created_at, signed_at, signed_hash \
-             FROM encounters ORDER BY created_at DESC LIMIT ?1",
-        )
-        .map_err(|e| e.to_string())?;
+    let sql = format!(
+        "SELECT {ENCOUNTER_COLS} FROM encounters ORDER BY created_at DESC LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![n], |r| {
-            Ok(json!({
-                "id":             r.get::<_, String>(0)?,
-                "provider_id":    r.get::<_, String>(1)?,
-                "encounter_date": r.get::<_, String>(2)?,
-                "patient_alias":  r.get::<_, Option<String>>(3)?,
-                "status":         r.get::<_, String>(4)?,
-                "audio_path":     r.get::<_, Option<String>>(5)?,
-                "created_at":     r.get::<_, String>(6)?,
-                "signed_at":      r.get::<_, Option<String>>(7)?,
-                "signed_hash":    r.get::<_, Option<String>>(8)?,
-            }))
-        })
+        .query_map(params![n], encounter_row_to_json)
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row.map_err(|e| e.to_string())?);
     }
     Ok(out)
+}
+
+// Fetch a single encounter by id — avoids pulling the whole list to open one row.
+#[tauri::command]
+fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, String> {
+    let conn = state.0.lock();
+    let sql = format!("SELECT {ENCOUNTER_COLS} FROM encounters WHERE id = ?1");
+    conn.query_row(&sql, params![id], encounter_row_to_json)
+        .optional()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -437,6 +451,7 @@ pub fn run() {
             has_api_key,
             data_location,
             list_encounters,
+            get_encounter,
             upsert_encounter,
             save_session_audio,
             model_downloaded,

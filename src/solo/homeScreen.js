@@ -75,8 +75,7 @@ export async function wireHomeScreen(onOpenEncounter) {
   document.querySelectorAll('.encounter-row').forEach(row => {
     const open = async () => {
       const id = row.dataset.encounterId;
-      const encounters = await tauriInvoke('list_encounters', { limit: 200 }).catch(() => []);
-      const encounter = encounters.find(e => e.id === id);
+      const encounter = await tauriInvoke('get_encounter', { id }).catch(() => null);
       if (encounter) onOpenEncounter(encounter);
     };
     row.addEventListener('click', open);

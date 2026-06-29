@@ -60,7 +60,7 @@ export async function stopRecording(encounterId) {
           ? arrayBuffer
           : await convertToWav(arrayBuffer, _stream.getAudioTracks()[0].getSettings());
 
-        const base64 = arrayBufferToBase64(wavBuffer);
+        const base64 = await arrayBufferToBase64(wavBuffer);
         const path = await tauriInvoke('save_session_audio', { encounterId, base64Data: base64 });
 
         stopStream();
@@ -93,11 +93,19 @@ function bestMimeType() {
   return candidates.find(t => MediaRecorder.isTypeSupported(t)) || '';
 }
 
+// Base64-encode an ArrayBuffer without blocking the main thread. A WAV for a
+// long session is tens of MB; the previous char-by-char btoa loop froze the UI.
+// FileReader.readAsDataURL does the encoding natively and asynchronously.
 function arrayBufferToBase64(buf) {
-  const bytes = new Uint8Array(buf);
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result; // "data:...;base64,XXXX"
+      resolve(result.slice(result.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error || new Error('base64 encode failed'));
+    reader.readAsDataURL(new Blob([buf]));
+  });
 }
 
 // Minimal WAV header writer — whisper.cpp requires PCM WAV.
