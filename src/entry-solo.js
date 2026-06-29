@@ -10,6 +10,17 @@ import { renderTemplatesView } from './solo/templatesView.js';
 
 let _currentTab = 'sessions';
 let _openEncounter = null;
+let _panelDispose = null;   // teardown for the mounted encounter panel, if any
+
+// Dispose the encounter panel (drop bus subscriptions, flush pending edits)
+// before any navigation or re-render that would unmount it.
+async function disposePanel() {
+  if (_panelDispose) {
+    const d = _panelDispose;
+    _panelDispose = null;
+    await d();
+  }
+}
 
 async function bootstrap() {
   await kvWarmup();
@@ -35,7 +46,8 @@ async function renderApp() {
     <div class="toast" id="toast"><span id="toast-msg"></span></div>
   `;
 
-  wireHeaderNav(tab => {
+  wireHeaderNav(async tab => {
+    await disposePanel();
     _currentTab = tab;
     _openEncounter = null;
     renderApp();
@@ -50,9 +62,9 @@ async function renderMainContent() {
 
   if (_openEncounter) {
     main.innerHTML = renderEncounterPanel(_openEncounter);
-    wireEncounterPanel(
+    _panelDispose = wireEncounterPanel(
       _openEncounter,
-      () => { _openEncounter = null; renderApp(); },
+      () => { _panelDispose = null; _openEncounter = null; renderApp(); },
       updated => { _openEncounter = updated; },
     );
     return;

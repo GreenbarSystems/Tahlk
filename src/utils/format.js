@@ -5,6 +5,17 @@ export const nowISO = () => new Date().toISOString();
 export const genId = prefix =>
   `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
+// Escape a value for safe interpolation into innerHTML / attribute contexts.
+// All dynamic strings (patient input, AI output, custom template names) must
+// pass through this before being templated into the DOM.
+export const escapeHtml = v =>
+  String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 export const displayDate = v => {
   if (v == null || v === '') return '';
   const s = String(v);

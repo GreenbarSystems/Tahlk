@@ -64,6 +64,20 @@ const TauriBackend = {
       });
   },
 
+  // Durable write: resolves only once the value has reached SQLite.
+  // Throws on failure so callers whose correctness depends on persistence
+  // (the sign-off hash chain) can fail closed instead of silently diverging.
+  async setAsync(key, value) {
+    _cache.set(key, value);
+    try {
+      await _tauriInvoke('kv_set', { key, value });
+    } catch (e) {
+      console.error('Tauri kv_set failed for ' + key, e);
+      toast(`Disk write failed — change may not be saved`, 4500);
+      throw e;
+    }
+  },
+
   removeSync(key) {
     _cache.delete(key);
     _tauriInvoke('kv_remove', { key })
@@ -110,6 +124,16 @@ const LocalStorageBackend = {
     catch (e) { toast(`Storage error — NOT saved (${e?.name || 'unknown'})`, 4500); }
   },
 
+  async setAsync(key, value) {
+    _cache.set(key, value);
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      toast(`Storage error — NOT saved (${e?.name || 'unknown'})`, 4500);
+      throw e;
+    }
+  },
+
   removeSync(key) {
     _cache.delete(key);
     try { localStorage.removeItem(key); } catch {}
@@ -132,6 +156,7 @@ const _backend = IS_TAURI ? TauriBackend : LocalStorageBackend;
 
 export function kvGet(key)          { return _backend.getSync(key); }
 export function kvSet(key, value)   { return _backend.setSync(key, value); }
+export function kvSetAwait(key, value) { return _backend.setAsync(key, value); }
 export function kvRemove(key)       { return _backend.removeSync(key); }
 export function kvList(prefix)      { return _backend.listKeys(prefix); }
 export async function kvWarmup()    { await _backend.warmup(); }

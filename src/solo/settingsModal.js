@@ -1,15 +1,15 @@
 // Settings modal — provider profile, API key, Whisper model management.
 
-import { kvGet, kvSet } from '../core/storageBackend.js';
+import { kvGet, kvSet, tauriInvoke } from '../core/storageBackend.js';
 import { checkModelDownloaded, downloadModel } from '../scribe/transcriber.js';
-import { toast } from '../utils/format.js';
+import { toast, escapeHtml } from '../utils/format.js';
 
 const PROVIDER_KEY = 'note_provider_v1::profile';
 
 export async function renderSettings() {
   const provider = kvGet(PROVIDER_KEY) || {};
   const modelOk = await checkModelDownloaded().catch(() => false);
-  const hasKey = !!(kvGet('note_settings_v1::anthropic_api_key'));
+  const hasKey = await tauriInvoke('has_api_key').catch(() => false);
 
   return `
     <div class="settings-page">
@@ -19,11 +19,11 @@ export async function renderSettings() {
         <h3>Provider Profile</h3>
         <div class="field-row">
           <label>Full name</label>
-          <input type="text" id="s-name" value="${esc(provider.name || '')}" placeholder="Dr. Jane Smith" />
+          <input type="text" id="s-name" value="${escapeHtml(provider.name || '')}" placeholder="Dr. Jane Smith" />
         </div>
         <div class="field-row">
           <label>Credentials</label>
-          <input type="text" id="s-creds" value="${esc(provider.credentials || '')}" placeholder="MD, PMHNP-BC…" />
+          <input type="text" id="s-creds" value="${escapeHtml(provider.credentials || '')}" placeholder="MD, PMHNP-BC…" />
         </div>
         <div class="field-row">
           <label>Specialty</label>
@@ -99,25 +99,29 @@ export function wireSettings() {
     }
   });
 
-  document.getElementById('s-save-apikey')?.addEventListener('click', () => {
+  document.getElementById('s-save-apikey')?.addEventListener('click', async () => {
     const val = document.getElementById('s-apikey')?.value.trim();
     if (!val || val === '••••••••••••') return;
-    kvSet('note_settings_v1::anthropic_api_key', val);
-    toast('API key saved.');
+    try {
+      await tauriInvoke('set_api_key', { key: val });
+      toast('API key saved.');
+    } catch (e) {
+      toast(`Could not save API key: ${e.message || e}`);
+    }
   });
 
-  document.getElementById('s-clear-apikey')?.addEventListener('click', () => {
+  document.getElementById('s-clear-apikey')?.addEventListener('click', async () => {
     if (!confirm('Remove the stored API key?')) return;
-    kvSet('note_settings_v1::anthropic_api_key', null);
-    toast('API key removed.');
+    try {
+      await tauriInvoke('clear_api_key');
+      toast('API key removed.');
+    } catch (e) {
+      toast(`Could not remove API key: ${e.message || e}`);
+    }
   });
 }
 
 function specialtyLabel(v) {
   return { psychiatry: 'Psychiatry', 'behavioral-health': 'Behavioral Health / Therapy',
            psychology: 'Psychology', other: 'Other' }[v] || v;
-}
-
-function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }

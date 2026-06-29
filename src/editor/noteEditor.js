@@ -2,7 +2,7 @@
 // All state lives in SQLite via kvGet/kvSet. The audit chain uses SHA-256
 // linking so post-sign edits are detectable.
 
-import { kvGet, kvSet, tauriInvoke } from '../core/storageBackend.js';
+import { kvGet, kvSetAwait, tauriInvoke } from '../core/storageBackend.js';
 import { appendAudit } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
 import { computeNoteHash, hashHistoryEntry } from '../utils/contentHash.js';
@@ -21,7 +21,7 @@ export function loadHistory(encounterId) {
 
 // Store AI-generated draft and append a 'generated' history entry.
 export async function saveDraftGenerated(encounterId, noteContent, transcript) {
-  kvSet(CONTENT_KEY(encounterId), noteContent);
+  await kvSetAwait(CONTENT_KEY(encounterId), noteContent);
 
   const history = loadHistory(encounterId);
   const prevHash = history.length ? history[history.length - 1].entryHash ?? null : null;
@@ -38,7 +38,7 @@ export async function saveDraftGenerated(encounterId, noteContent, transcript) {
   entry.entryHash = await hashHistoryEntry(entry, prevHash);
 
   history.push(entry);
-  kvSet(HISTORY_KEY(encounterId), history);
+  await kvSetAwait(HISTORY_KEY(encounterId), history);
 
   emit('scribe:draft_saved', { encounterId });
   return entry;
@@ -46,7 +46,7 @@ export async function saveDraftGenerated(encounterId, noteContent, transcript) {
 
 // Save a physician edit and append an 'edited' history entry.
 export async function saveDraftEdited(encounterId, noteContent, transcript) {
-  kvSet(CONTENT_KEY(encounterId), noteContent);
+  await kvSetAwait(CONTENT_KEY(encounterId), noteContent);
 
   const history = loadHistory(encounterId);
   const prevHash = history.length ? history[history.length - 1].entryHash ?? null : null;
@@ -63,7 +63,7 @@ export async function saveDraftEdited(encounterId, noteContent, transcript) {
   entry.entryHash = await hashHistoryEntry(entry, prevHash);
 
   history.push(entry);
-  kvSet(HISTORY_KEY(encounterId), history);
+  await kvSetAwait(HISTORY_KEY(encounterId), history);
 
   appendAudit(`note_audit_v1::${encounterId}`, 'note_edited', { encounterId });
   emit('scribe:draft_saved', { encounterId });
@@ -86,8 +86,11 @@ export async function signNote(encounterId, noteContent, transcript, providerNam
   entry.prevHash = prevHash;
   entry.entryHash = await hashHistoryEntry(entry, prevHash);
 
+  // Persist the signed chain entry durably BEFORE flipping the encounter
+  // status. If the disk write fails this throws and the encounter is never
+  // marked signed — the tamper-evidence and the status stay consistent.
   history.push(entry);
-  kvSet(HISTORY_KEY(encounterId), history);
+  await kvSetAwait(HISTORY_KEY(encounterId), history);
 
   // Update encounter in DB.
   await tauriInvoke('upsert_encounter', {

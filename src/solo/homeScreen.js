@@ -1,7 +1,7 @@
 // Home screen — encounter list, quick-start, session stats.
 
 import { tauriInvoke } from '../core/storageBackend.js';
-import { genId, nowISO, todayISO, displayDateShort } from '../utils/format.js';
+import { genId, nowISO, todayISO, displayDateShort, escapeHtml } from '../utils/format.js';
 
 export async function renderHomeScreen() {
   const encounters = await tauriInvoke('list_encounters', { limit: 50 }).catch(() => []);
@@ -45,11 +45,11 @@ export async function renderHomeScreen() {
 
 function renderEncounterRow(e) {
   return `
-    <div class="encounter-row" data-encounter-id="${e.id}" tabindex="0" role="button">
-      <div class="enc-date">${displayDateShort(e.encounter_date)}</div>
-      <div class="enc-alias">${e.patient_alias || '—'}</div>
+    <div class="encounter-row" data-encounter-id="${escapeHtml(e.id)}" tabindex="0" role="button">
+      <div class="enc-date">${escapeHtml(displayDateShort(e.encounter_date))}</div>
+      <div class="enc-alias">${e.patient_alias ? escapeHtml(e.patient_alias) : '—'}</div>
       <div class="enc-status">
-        <span class="status-chip status-chip--${e.status}">${statusLabel(e.status)}</span>
+        <span class="status-chip status-chip--${escapeHtml(e.status)}">${statusLabel(e.status)}</span>
       </div>
     </div>
   `;

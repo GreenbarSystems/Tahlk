@@ -10,10 +10,25 @@ use tauri_plugin_shell::ShellExt;
 
 struct DbState(Mutex<Connection>);
 
+// Storage key for the Anthropic API key. Lives in the `secret_` namespace,
+// which the generic kv_* commands refuse to read or write — so the key is
+// write-only from JS (set via set_api_key, presence-checked via has_api_key)
+// and only ever read inside generate_note on the Rust side.
+const API_KEY_KV: &str = "secret_v1::anthropic_api_key";
+
+// Reject any attempt to reach the secret namespace through the generic KV API.
+fn guard_key(key: &str) -> Result<(), String> {
+    if key.starts_with("secret_") {
+        return Err("access denied: secret keys are not accessible via the KV API".into());
+    }
+    Ok(())
+}
+
 // ── KV store ──────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn kv_get(state: State<DbState>, key: String) -> Result<Option<Value>, String> {
+    guard_key(&key)?;
     let conn = state.0.lock();
     let row: Option<String> = conn
         .query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| r.get(0))
@@ -27,6 +42,7 @@ fn kv_get(state: State<DbState>, key: String) -> Result<Option<Value>, String> {
 
 #[tauri::command]
 fn kv_set(state: State<DbState>, key: String, value: Value) -> Result<(), String> {
+    guard_key(&key)?;
     let conn = state.0.lock();
     let json = serde_json::to_string(&value).map_err(|e| e.to_string())?;
     conn.execute(
@@ -43,6 +59,7 @@ fn kv_set(state: State<DbState>, key: String, value: Value) -> Result<(), String
 
 #[tauri::command]
 fn kv_remove(state: State<DbState>, key: String) -> Result<(), String> {
+    guard_key(&key)?;
     let conn = state.0.lock();
     conn.execute("DELETE FROM kv WHERE key = ?1", params![key])
         .map_err(|e| e.to_string())?;
@@ -53,8 +70,9 @@ fn kv_remove(state: State<DbState>, key: String) -> Result<(), String> {
 fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(String, Value)>, String> {
     let pattern = if prefix.is_empty() { String::from("%") } else { format!("{}%", prefix) };
     let conn = state.0.lock();
+    // Never surface secret_* keys through enumeration.
     let mut stmt = conn
-        .prepare("SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key")
+        .prepare("SELECT key, value FROM kv WHERE key LIKE ?1 AND key NOT LIKE 'secret\\_%' ESCAPE '\\' ORDER BY key")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![pattern], |r| {
@@ -70,6 +88,42 @@ fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(String, Value)>
         out.push((k, parsed));
     }
     Ok(out)
+}
+
+// ── API key (write-only secret) ────────────────────────────────────────────
+
+#[tauri::command]
+fn set_api_key(state: State<DbState>, key: String) -> Result<(), String> {
+    let conn = state.0.lock();
+    let json = serde_json::to_string(&Value::String(key)).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO kv (key, value, updated_at) \
+         VALUES (?1, ?2, strftime('%s', 'now')) \
+         ON CONFLICT(key) DO UPDATE SET \
+             value      = excluded.value, \
+             updated_at = excluded.updated_at",
+        params![API_KEY_KV, json],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_api_key(state: State<DbState>) -> Result<(), String> {
+    let conn = state.0.lock();
+    conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn has_api_key(state: State<DbState>) -> Result<bool, String> {
+    let conn = state.0.lock();
+    let exists: Option<i64> = conn
+        .query_row("SELECT 1 FROM kv WHERE key = ?1", params![API_KEY_KV], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(exists.is_some())
 }
 
 #[tauri::command]
@@ -253,7 +307,7 @@ async fn generate_note(
         let conn = state.0.lock();
         conn.query_row(
             "SELECT value FROM kv WHERE key = ?1",
-            params!["note_settings_v1::anthropic_api_key"],
+            params![API_KEY_KV],
             |r| r.get::<_, String>(0),
         )
         .optional()
@@ -378,6 +432,9 @@ pub fn run() {
             kv_set,
             kv_remove,
             kv_list,
+            set_api_key,
+            clear_api_key,
+            has_api_key,
             data_location,
             list_encounters,
             upsert_encounter,

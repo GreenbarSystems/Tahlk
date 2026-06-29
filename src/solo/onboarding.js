@@ -118,7 +118,13 @@ export async function wireOnboarding(onComplete) {
       credentials: document.getElementById('ob-creds')?.value.trim() || '',
       specialty:   document.getElementById('ob-specialty')?.value || 'psychiatry',
     });
-    kvSet('note_settings_v1::anthropic_api_key', apiKey);
+    // Store the API key write-only — it never round-trips back to JS.
+    try {
+      await tauriInvoke('set_api_key', { key: apiKey });
+    } catch (e) {
+      toast(`Could not save API key: ${e.message || e}`);
+      return;
+    }
     kvSet(ONBOARDED_KEY, true);
 
     onComplete();

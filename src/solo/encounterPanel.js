@@ -11,7 +11,7 @@ import {
   toPlainText, toSimplePractice, toTherapyNotes,
   copyToClipboard, saveToFile,
 } from '../export/exportFormatter.js';
-import { toast, fmtDuration, genId, nowISO, displayDate } from '../utils/format.js';
+import { toast, fmtDuration, displayDate, escapeHtml } from '../utils/format.js';
 
 const TRANSCRIPT_KEY = id => `note_content_v1::transcript::${id}`;
 
@@ -25,9 +25,9 @@ export function renderEncounterPanel(encounter) {
     <div class="panel encounter-panel" data-encounter-id="${encounter.id}">
       <div class="panel-header">
         <div class="panel-header-left">
-          <span class="panel-date">${encounter.encounter_date || ''}</span>
-          ${encounter.patient_alias ? `<span class="panel-alias">${encounter.patient_alias}</span>` : ''}
-          <span class="status-chip status-chip--${encounter.status}">${statusLabel(encounter.status)}</span>
+          <span class="panel-date">${escapeHtml(encounter.encounter_date || '')}</span>
+          ${encounter.patient_alias ? `<span class="panel-alias">${escapeHtml(encounter.patient_alias)}</span>` : ''}
+          <span class="status-chip status-chip--${escapeHtml(encounter.status)}">${statusLabel(encounter.status)}</span>
         </div>
         <button class="btn btn-ghost btn-sm" id="btn-close-panel">✕ Close</button>
       </div>
@@ -45,7 +45,7 @@ export function renderEncounterPanel(encounter) {
         </div>
         <div class="patient-alias-row">
           <label>Patient alias (optional)</label>
-          <input type="text" id="patient-alias" value="${encounter.patient_alias || ''}"
+          <input type="text" id="patient-alias" value="${escapeHtml(encounter.patient_alias || '')}"
                  placeholder="e.g. P-001 or first name only" maxlength="40" />
         </div>
       </section>
@@ -56,7 +56,7 @@ export function renderEncounterPanel(encounter) {
           <h3 class="section-title">Transcript</h3>
           <div class="section-actions" ${isSigned ? 'style="display:none"' : ''}>
             <select id="template-select">
-              ${templates.map(t => `<option value="${t.id}">${t.name}</option>`).join('')}
+              ${templates.map(t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join('')}
             </select>
             <button class="btn btn-secondary btn-sm" id="btn-transcribe"
                     ${!encounter.audio_path ? 'disabled title="Record audio first"' : ''}>
@@ -71,7 +71,7 @@ export function renderEncounterPanel(encounter) {
         <div class="status-banner" id="status-banner" style="display:none"></div>
         <textarea class="transcript-area" id="transcript-area"
                   placeholder="Transcript will appear here after transcription…"
-                  ${isSigned ? 'readonly' : ''}>${transcript}</textarea>
+                  ${isSigned ? 'readonly' : ''}>${escapeHtml(transcript)}</textarea>
       </section>
 
       <!-- Note editor -->
@@ -82,7 +82,7 @@ export function renderEncounterPanel(encounter) {
         </div>
         <textarea class="note-area" id="note-area"
                   placeholder="Clinical note will appear here after generation. Review and edit before signing."
-                  ${isSigned ? 'readonly' : ''}>${draft}</textarea>
+                  ${isSigned ? 'readonly' : ''}>${escapeHtml(draft)}</textarea>
       </section>
 
       <!-- Sign-off and export -->
@@ -106,7 +106,7 @@ export function renderEncounterPanel(encounter) {
           </div>
         </div>
         ${isSigned && encounter.signed_hash ? `
-          <p class="hash-display">SHA-256: <code>${encounter.signed_hash}</code></p>
+          <p class="hash-display">SHA-256: <code>${escapeHtml(encounter.signed_hash)}</code></p>
         ` : ''}
       </section>
     </div>
@@ -119,8 +119,45 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
 
   const providerProfile = kvGet('note_provider_v1::profile') || {};
 
-  // Close
-  document.getElementById('btn-close-panel')?.addEventListener('click', onClose);
+  // Collect event-bus subscriptions so they can be torn down when the panel
+  // closes. Without this, every panel open leaks handlers that fire against
+  // detached DOM nodes from prior encounters.
+  const _disposers = [];
+  const sub = (evt, fn) => { _disposers.push(on(evt, fn)); };
+
+  // Debounced note-edit buffer — flushed on close and before signing so an
+  // in-flight edit (and its history entry) is never dropped.
+  let _pendingNote = null;
+  let _saveTimer;
+  async function flushPendingEdit() {
+    if (_pendingNote == null) return;
+    clearTimeout(_saveTimer);
+    const v = _pendingNote;
+    _pendingNote = null;
+    try {
+      await saveDraftEdited(currentEncounter.id, v, currentTranscript);
+    } catch {
+      toast('Could not save your last edit.');
+    }
+  }
+
+  // Unmount: flush a pending edit, then drop every bus subscription. Safe to
+  // call more than once. Returned to the caller so the router can dispose the
+  // panel on ANY unmount path (close button, tab navigation, re-render).
+  let _disposed = false;
+  async function dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    await flushPendingEdit();
+    _disposers.forEach(d => d());
+    _disposers.length = 0;
+  }
+
+  // Close — dispose, then hand control back to the router.
+  document.getElementById('btn-close-panel')?.addEventListener('click', async () => {
+    await dispose();
+    onClose();
+  });
 
   // Patient alias save on blur
   document.getElementById('patient-alias')?.addEventListener('change', async e => {
@@ -134,11 +171,11 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   const recordLabel = document.getElementById('record-label');
   const recordTimer = document.getElementById('record-timer');
 
-  on('scribe:recording_tick', ({ duration }) => {
+  sub('scribe:recording_tick', ({ duration }) => {
     if (recordTimer) recordTimer.textContent = fmtDuration(duration);
   });
 
-  on('scribe:audio_saved', async ({ path }) => {
+  sub('scribe:audio_saved', async ({ path }) => {
     currentEncounter.audio_path = path;
     currentEncounter.status = 'recording_done';
     await tauriInvoke('upsert_encounter', { encounter: currentEncounter });
@@ -169,7 +206,7 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     }
   });
 
-  on('scribe:recording_stopped', () => {
+  sub('scribe:recording_stopped', () => {
     recordBtn?.classList.remove('btn-record--active');
     recordLabel.textContent = 'Re-record';
     recordBtn.disabled = false;
@@ -224,13 +261,12 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     }
   });
 
-  // Note edits
-  let _saveTimer;
+  // Note edits — buffer the value and debounce the durable save. The buffer
+  // is also flushed on close and before signing (see flushPendingEdit).
   document.getElementById('note-area')?.addEventListener('input', e => {
+    _pendingNote = e.target.value;
     clearTimeout(_saveTimer);
-    _saveTimer = setTimeout(async () => {
-      await saveDraftEdited(currentEncounter.id, e.target.value, currentTranscript);
-    }, 1500);
+    _saveTimer = setTimeout(flushPendingEdit, 1500);
   });
 
   // Sign
@@ -238,6 +274,9 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     const noteContent = document.getElementById('note-area')?.value || '';
     if (!noteContent.trim()) { toast('Note is empty — cannot sign.'); return; }
     if (!confirm('Sign and attest this note? The signed version will be locked.')) return;
+
+    // Persist any in-flight edit before sealing the chain.
+    await flushPendingEdit();
 
     try {
       await signNote(currentEncounter.id, noteContent, currentTranscript, providerProfile.name || 'Provider');
@@ -274,6 +313,8 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     await saveToFile(getFormattedNote(), currentEncounter, fmt);
     toast('Note saved to file.');
   });
+
+  return dispose;
 }
 
 function setStatus(msg) {
