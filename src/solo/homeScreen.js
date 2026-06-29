@@ -1,7 +1,6 @@
 // Home screen — encounter list, quick-start, session stats.
 
 import { encountersRepo } from '../data/encountersRepo.js';
-import { StatCard, EmptyState, Button } from '../ui/index.js';
 import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel } from '../utils/format.js';
 
 export async function renderHomeScreen() {
@@ -17,22 +16,32 @@ export async function renderHomeScreen() {
     <div class="home-screen">
       <div class="home-top">
         <div class="home-stats">
-          ${StatCard({ value: stats.today, label: 'Today' })}
-          ${StatCard({ value: stats.signed, label: 'Signed' })}
-          ${StatCard({ value: stats.total, label: 'Total' })}
+          <div class="stat-card">
+            <div class="stat-num">${stats.today}</div>
+            <div class="stat-label">Today</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">${stats.signed}</div>
+            <div class="stat-label">Signed</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">${stats.total}</div>
+            <div class="stat-label">Total</div>
+          </div>
         </div>
-        ${Button({ id: 'btn-new-session', variant: 'primary', size: 'lg', label: '+ New Session', className: 'btn-new-session' })}
+        <button class="btn btn-primary btn-lg btn-new-session" id="btn-new-session">
+          + New Session
+        </button>
       </div>
 
       <div class="encounter-list">
         <h3 class="list-title">Recent Sessions</h3>
-        ${encounters.length === 0
-          ? EmptyState({
-              icon: '🗒️',
-              title: 'No sessions yet',
-              description: 'Click “+ New Session” above to start your first recording.',
-            })
-          : encounters.map(e => renderEncounterRow(e)).join('')}
+        ${encounters.length === 0 ? `
+          <div class="empty-state">
+            <p>No sessions yet.</p>
+            <p>Click <strong>New Session</strong> to start your first recording.</p>
+          </div>
+        ` : encounters.map(e => renderEncounterRow(e)).join('')}
       </div>
     </div>
   `;
