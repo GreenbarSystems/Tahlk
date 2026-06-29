@@ -1,0 +1,17 @@
+[package]
+name = "tahlk-sync"
+version = "0.1.0"
+edition = "2021"
+description = "Tahlk Group-tier sync service — multi-tenant encounter + audit API"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+anyhow = "1"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = "0.3"
