@@ -12,6 +12,18 @@ export async function generateNote(transcript, templateId, encounterId) {
 
   emit('scribe:generation_started', { encounterId, templateId });
 
+  // Rust emits a `scribe:note_chunk` Tauri event per token as it streams from
+  // Anthropic. Bridge those onto the internal bus for live display, then
+  // unlisten once generation settles. If the event API is unavailable the
+  // command still returns the full assembled note (no progressive rendering).
+  const { listen } = window.__TAURI__?.event || {};
+  let unlisten;
+  if (listen) {
+    unlisten = await listen('scribe:note_chunk', e => {
+      emit('scribe:note_chunk', { text: e.payload, encounterId });
+    });
+  }
+
   try {
     const note = await tauriInvoke('generate_note', {
       transcript,
@@ -23,5 +35,7 @@ export async function generateNote(transcript, templateId, encounterId) {
     const msg = e.message || String(e);
     emit('scribe:generation_error', { error: msg, encounterId });
     throw new Error(msg);
+  } finally {
+    if (unlisten) unlisten();
   }
 }

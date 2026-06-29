@@ -312,6 +312,7 @@ async fn transcribe_audio(app: AppHandle, audio_path: String) -> Result<String, 
 
 #[tauri::command]
 async fn generate_note(
+    app: AppHandle,
     state: State<'_, DbState>,
     transcript: String,
     system_prompt: String,
@@ -337,6 +338,7 @@ async fn generate_note(
     let body = json!({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 2048,
+        "stream": true,
         "system": system_prompt,
         "messages": [
             {
@@ -362,15 +364,50 @@ async fn generate_note(
         return Err(format!("Anthropic API error {}: {}", status, text));
     }
 
-    let result: Value = resp.json().await.map_err(|e| e.to_string())?;
-    let note = result["content"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|c| c["text"].as_str())
-        .ok_or("Unexpected response format from Anthropic")?
-        .to_string();
+    // Parse the SSE stream: accumulate the full note while emitting each text
+    // delta as a `scribe:note_chunk` event for live display. The complete
+    // assembled note is returned regardless, so callers don't depend on the
+    // events having been observed.
+    use futures_util::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut byte_buf: Vec<u8> = Vec::new();
+    let mut full = String::new();
 
-    Ok(note)
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| format!("Stream error: {}", e))?;
+        byte_buf.extend_from_slice(&bytes);
+
+        // SSE fields are newline-delimited; process each complete line.
+        while let Some(pos) = byte_buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = byte_buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim();
+            let Some(data) = line.strip_prefix("data:") else { continue };
+            let data = data.trim();
+            if data.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            match v["type"].as_str() {
+                Some("content_block_delta") => {
+                    if let Some(t) = v["delta"]["text"].as_str() {
+                        full.push_str(t);
+                        let _ = app.emit("scribe:note_chunk", t);
+                    }
+                }
+                Some("error") => {
+                    let msg = v["error"]["message"].as_str().unwrap_or("unknown stream error");
+                    return Err(format!("Anthropic stream error: {}", msg));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if full.is_empty() {
+        return Err("Anthropic returned an empty response".into());
+    }
+    Ok(full)
 }
 
 // ── Export ─────────────────────────────────────────────────────────────────

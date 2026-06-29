@@ -212,6 +212,13 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     recordBtn.disabled = false;
   });
 
+  // Live note streaming — append each delta as it arrives.
+  sub('scribe:note_chunk', ({ text, encounterId }) => {
+    if (encounterId !== currentEncounter.id) return;
+    const ta = document.getElementById('note-area');
+    if (ta) ta.value += text;
+  });
+
   // Transcription
   document.getElementById('btn-transcribe')?.addEventListener('click', async () => {
     if (!currentEncounter.audio_path) return;
@@ -244,9 +251,11 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     if (!currentTranscript.trim()) return;
     const templateId = document.getElementById('template-select')?.value || 'soap-generic';
     setStatus('Generating clinical note…');
+    const noteArea = document.getElementById('note-area');
+    if (noteArea) noteArea.value = '';   // cleared, then filled by streaming chunks
     try {
       const note = await generateNote(currentTranscript, templateId, currentEncounter.id);
-      document.getElementById('note-area').value = note;
+      if (noteArea) noteArea.value = note; // reconcile with the full assembled note
       await saveDraftGenerated(currentEncounter.id, note, currentTranscript);
       document.getElementById('btn-sign')?.removeAttribute('disabled');
       document.getElementById('btn-copy')?.removeAttribute('disabled');
