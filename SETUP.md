@@ -28,19 +28,33 @@ First `tauri:dev` will take 2–5 minutes to compile Rust dependencies.
 
 ## Whisper.cpp Sidecar (local transcription)
 
-The app uses a whisper.cpp sidecar binary for on-device speech-to-text.
-You need to provide the pre-compiled binary:
+The app shells out to the `whisper-cli` binary from whisper.cpp for on-device
+speech-to-text. `src-tauri/binaries/` is gitignored (binaries don't belong in
+the repo), so each dev places the files locally:
 
-1. Download `whisper.cpp` for your platform from:
-   https://github.com/ggerganov/whisper.cpp/releases
+1. Download the pre-compiled release for your platform from:
+   https://github.com/ggml-org/whisper.cpp/releases
+   (Windows x64 CPU build: `whisper-bin-x64.zip` — verified against v1.9.1.)
 
-2. Rename to match Tauri's sidecar naming convention and place in:
-   - Windows: `src-tauri/binaries/whisper-cpp-x86_64-pc-windows-msvc.exe`
-   - macOS ARM: `src-tauri/binaries/whisper-cpp-aarch64-apple-darwin`
-   - macOS x86: `src-tauri/binaries/whisper-cpp-x86_64-apple-darwin`
+2. From the archive's `Release/` folder, copy `whisper-cli.exe` into
+   `src-tauri/binaries/`, renamed to Tauri's sidecar convention:
+   - Windows: `whisper-cpp-x86_64-pc-windows-msvc.exe`
+   - macOS ARM: `whisper-cpp-aarch64-apple-darwin`
+   - macOS x86: `whisper-cpp-x86_64-apple-darwin`
 
-3. The Whisper model (ggml-base.en.bin, 142 MB) is downloaded on first run
-   via Settings → Download Transcription Model.
+3. **Windows also needs the runtime DLLs** next to the renamed exe, or it
+   won't start: `whisper.dll`, `ggml.dll`, `ggml-base.dll`, and every
+   `ggml-cpu-*.dll` (the matching CPU backend is selected at runtime). Copy
+   them from the same `Release/` folder into `src-tauri/binaries/`.
+
+4. The Whisper model (`ggml-base.en.bin`, ~142 MB) downloads on first run via
+   onboarding / Settings → Download Transcription Model. It lands in the app
+   data dir (`%APPDATA%/com.tahlk.app/models/` on Windows); drop it there
+   manually to skip the in-app download.
+
+> Note: `externalBin` bundles only the exe for `tauri build`. Shipping a
+> distributable still needs the DLLs added as bundle resources placed beside
+> the sidecar — TODO before release. Dev (`tauri:dev`) runs fine as above.
 
 ## Anthropic API Key (note generation)
 
