@@ -11,7 +11,7 @@ import {
   toPlainText, toSimplePractice, toTherapyNotes,
   copyToClipboard, saveToFile,
 } from '../export/exportFormatter.js';
-import { toast, fmtDuration, displayDate, escapeHtml } from '../utils/format.js';
+import { toast, fmtDuration, displayDate, escapeHtml, statusLabel } from '../utils/format.js';
 
 const TRANSCRIPT_KEY = id => `note_content_v1::transcript::${id}`;
 
@@ -327,9 +327,4 @@ function setStatus(msg) {
 function clearStatus() {
   const el = document.getElementById('status-banner');
   if (el) el.style.display = 'none';
-}
-
-function statusLabel(status) {
-  return { recording: 'Recording', recording_done: 'Recorded', transcribing: 'Transcribing',
-           draft: 'Draft', signed: 'Signed', exported: 'Exported' }[status] || status;
 }

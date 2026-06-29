@@ -2,14 +2,17 @@
 //
 // Catalogue:
 //   scribe:recording_started   — mic opened, timer running
+//   scribe:recording_tick      — once/sec while recording. detail: { duration }
 //   scribe:recording_stopped   — MediaRecorder stopped, audio assembled
 //   scribe:audio_saved         — WAV written to disk. detail: { path, encounterId }
+//   scribe:audio_error         — capture/save failed. detail: { error, encounterId }
 //   scribe:transcription_started
 //   scribe:transcription_complete — detail: { transcript, encounterId }
 //   scribe:transcription_error    — detail: { error, encounterId }
 //   scribe:generation_started
 //   scribe:note_chunk          — streaming token. detail: { text }
 //   scribe:generation_complete — detail: { note, encounterId }
+//   scribe:generation_error    — note generation failed. detail: { error, encounterId }
 //   scribe:draft_saved         — detail: { encounterId }
 //   scribe:note_signed         — detail: { encounterId, hash }
 //   scribe:note_exported       — detail: { encounterId, format }

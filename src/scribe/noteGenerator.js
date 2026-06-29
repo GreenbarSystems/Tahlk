@@ -21,7 +21,7 @@ export async function generateNote(transcript, templateId, encounterId) {
     return note;
   } catch (e) {
     const msg = e.message || String(e);
-    emit('scribe:transcription_error', { error: msg, encounterId });
+    emit('scribe:generation_error', { error: msg, encounterId });
     throw new Error(msg);
   }
 }

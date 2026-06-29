@@ -201,7 +201,7 @@ fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), Strin
 // ── Audio ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn save_audio_chunk(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, String> {
+async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, String> {
     let data = BASE64.decode(base64_data.as_bytes()).map_err(|e| e.to_string())?;
     let audio_dir = app
         .path()
@@ -438,7 +438,7 @@ pub fn run() {
             data_location,
             list_encounters,
             upsert_encounter,
-            save_audio_chunk,
+            save_session_audio,
             model_downloaded,
             download_whisper_model,
             transcribe_audio,

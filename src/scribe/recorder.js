@@ -1,6 +1,6 @@
 // Audio capture via Web Audio API + MediaRecorder.
 // Audio chunks are assembled into a WAV blob then persisted to disk
-// via the Tauri save_audio_chunk command. Audio never leaves the device.
+// via the Tauri save_session_audio command. Audio never leaves the device.
 
 import { emit } from '../core/eventBus.js';
 import { tauriInvoke } from '../core/storageBackend.js';
@@ -61,7 +61,7 @@ export async function stopRecording(encounterId) {
           : await convertToWav(arrayBuffer, _stream.getAudioTracks()[0].getSettings());
 
         const base64 = arrayBufferToBase64(wavBuffer);
-        const path = await tauriInvoke('save_audio_chunk', { encounterId, base64Data: base64 });
+        const path = await tauriInvoke('save_session_audio', { encounterId, base64Data: base64 });
 
         stopStream();
         emit('scribe:recording_stopped', { encounterId });
@@ -69,7 +69,7 @@ export async function stopRecording(encounterId) {
         resolve(path);
       } catch (e) {
         stopStream();
-        emit('scribe:transcription_error', { error: e.message, encounterId });
+        emit('scribe:audio_error', { error: e.message, encounterId });
         reject(e);
       }
     };

@@ -6,20 +6,23 @@
 //
 // hashHistoryEntry + verifyHistoryChain implement a tamper-evident audit chain.
 
+// SHA-256 of a UTF-8 string, returned as a 64-char hex digest.
+// Async because SubtleCrypto is async.
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 // Compute SHA-256 fingerprint of a signed note.
-// Returns a 64-char hex string. Async because SubtleCrypto is async.
 export async function computeNoteHash({ transcript, noteContent, signedBy, encounterId }) {
-  const payload = JSON.stringify({
+  return sha256Hex(JSON.stringify({
     encounterId: encounterId || '',
     signedBy:    signedBy    || '',
     transcript:  transcript  || '',
     noteContent: noteContent || '',
-  });
-  const enc = new TextEncoder().encode(payload);
-  const buf = await crypto.subtle.digest('SHA-256', enc);
-  return Array.from(new Uint8Array(buf))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
+  }));
 }
 
 // ── History chain ─────────────────────────────────────────────────────────
@@ -38,12 +41,7 @@ export async function hashHistoryEntry(entry, prevHash) {
     contentHash: entry.contentHash     || '',
     notes:       entry.notes           || '',
   };
-  const json = JSON.stringify(payload, Object.keys(payload).sort());
-  const enc = new TextEncoder().encode(json);
-  const buf = await crypto.subtle.digest('SHA-256', enc);
-  return Array.from(new Uint8Array(buf))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
+  return sha256Hex(JSON.stringify(payload, Object.keys(payload).sort()));
 }
 
 export async function verifyHistoryChain(history) {

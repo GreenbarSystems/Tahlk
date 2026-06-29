@@ -1,7 +1,7 @@
 // Home screen — encounter list, quick-start, session stats.
 
 import { tauriInvoke } from '../core/storageBackend.js';
-import { genId, nowISO, todayISO, displayDateShort, escapeHtml } from '../utils/format.js';
+import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel } from '../utils/format.js';
 
 export async function renderHomeScreen() {
   const encounters = await tauriInvoke('list_encounters', { limit: 50 }).catch(() => []);
@@ -82,9 +82,4 @@ export async function wireHomeScreen(onOpenEncounter) {
     row.addEventListener('click', open);
     row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') open(); });
   });
-}
-
-function statusLabel(status) {
-  return { recording: 'Recording', recording_done: 'Recorded', draft: 'Draft',
-           signed: 'Signed', exported: 'Exported' }[status] || status;
 }

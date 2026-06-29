@@ -47,6 +47,18 @@ export const fmtDuration = secs => {
   return `${m}:${String(s).padStart(2, '0')}`;
 };
 
+// Human label for an encounter status. Single source of truth — both the
+// home list and the encounter panel render through this.
+const STATUS_LABELS = {
+  recording:       'Recording',
+  recording_done:  'Recorded',
+  transcribing:    'Transcribing',
+  draft:           'Draft',
+  signed:          'Signed',
+  exported:        'Exported',
+};
+export const statusLabel = status => STATUS_LABELS[status] || status;
+
 let _toastTimer;
 export function toast(msg, dur = 3200) {
   clearTimeout(_toastTimer);

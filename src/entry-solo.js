@@ -1,6 +1,7 @@
 // Solo entry point — bootstraps storage, checks onboarding, renders the shell.
 
-import { kvWarmup } from './core/storageBackend.js';
+import { kvWarmup, kvGet } from './core/storageBackend.js';
+import { installCapabilities } from './core/capabilities.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
 import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
@@ -22,8 +23,22 @@ async function disposePanel() {
   }
 }
 
+// Solo-tier capability impls. Read the provider profile live from storage on
+// every call so the audit log reflects the current identity — including right
+// after onboarding, before any re-warmup. (Group tier installs richer impls.)
+function installSoloCapabilities() {
+  installCapabilities({
+    currentProvider: () => kvGet('note_provider_v1::profile') || null,
+    currentUser: () => {
+      const p = kvGet('note_provider_v1::profile');
+      return p && p.name ? { name: p.name, id: 'solo' } : null;
+    },
+  });
+}
+
 async function bootstrap() {
   await kvWarmup();
+  installSoloCapabilities();
 
   if (!isOnboarded()) {
     document.getElementById('app').innerHTML = renderOnboarding();
