@@ -173,6 +173,30 @@ fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Valu
     Ok(out)
 }
 
+// Flip an encounter to signed, touching ONLY the sign columns. upsert_encounter
+// overwrites patient_alias/audio_path from its payload, so using it for sign-off
+// (which doesn't resend those) would null them out — corrupting the record at
+// the moment of attestation. This targeted update cannot clobber other columns.
+#[tauri::command]
+fn mark_encounter_signed(
+    state: State<DbState>,
+    id: String,
+    signed_at: String,
+    signed_hash: String,
+) -> Result<(), String> {
+    let conn = state.0.lock();
+    let n = conn
+        .execute(
+            "UPDATE encounters SET status = 'signed', signed_at = ?2, signed_hash = ?3 WHERE id = ?1",
+            params![id, signed_at, signed_hash],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("encounter {} not found", id));
+    }
+    Ok(())
+}
+
 // Fetch a single encounter by id — avoids pulling the whole list to open one row.
 #[tauri::command]
 fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, String> {
@@ -489,6 +513,7 @@ pub fn run() {
             data_location,
             list_encounters,
             get_encounter,
+            mark_encounter_signed,
             upsert_encounter,
             save_session_audio,
             model_downloaded,

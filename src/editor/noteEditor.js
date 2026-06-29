@@ -92,17 +92,13 @@ export async function signNote(encounterId, noteContent, transcript, providerNam
   history.push(entry);
   await kvSetAwait(HISTORY_KEY(encounterId), history);
 
-  // Update encounter in DB.
-  await tauriInvoke('upsert_encounter', {
-    encounter: {
-      id: encounterId,
-      provider_id: 'solo',
-      encounter_date: new Date().toISOString().slice(0, 10),
-      status: 'signed',
-      created_at: nowISO(),
-      signed_at: nowISO(),
-      signed_hash: contentHash,
-    },
+  // Flip the encounter to signed via a targeted update. A full upsert here
+  // would null out patient_alias / audio_path (this payload never carried
+  // them), corrupting the record at the exact moment of attestation.
+  await tauriInvoke('mark_encounter_signed', {
+    id: encounterId,
+    signedAt: nowISO(),
+    signedHash: contentHash,
   });
 
   appendAudit(`note_audit_v1::${encounterId}`, 'note_signed', { encounterId, contentHash });
