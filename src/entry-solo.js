@@ -3,6 +3,9 @@
 import { kvWarmup, kvGet, kvEnsure } from './core/storageBackend.js';
 import { encounterCacheKeys } from './data/keys.js';
 import { installCapabilities } from './core/capabilities.js';
+import { loadHistory } from './domain/historyChain.js';
+import { verifyHistoryChain } from './utils/contentHash.js';
+import { toast } from './utils/format.js';
 import * as telemetry from './core/telemetry.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
@@ -82,6 +85,17 @@ async function renderMainContent() {
     // Lazily pull this encounter's note/transcript/history/audit into cache
     // before the panel renders synchronously from it.
     await kvEnsure(encounterCacheKeys(_openEncounter.id));
+
+    // Verify the tamper-evident chain when opening a signed note. Detects
+    // post-sign alteration of the audit history (the chain was always built
+    // but never checked — this enforces it).
+    if (_openEncounter.status === 'signed') {
+      const integrity = await verifyHistoryChain(loadHistory(_openEncounter.id));
+      if (!integrity.ok) {
+        toast('⚠ Integrity check failed for this signed note — its audit chain may have been altered.', 6000);
+      }
+    }
+
     main.innerHTML = renderEncounterPanel(_openEncounter);
     _panelDispose = wireEncounterPanel(
       _openEncounter,
