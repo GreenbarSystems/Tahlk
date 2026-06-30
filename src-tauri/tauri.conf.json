@@ -60,6 +60,10 @@
       "binaries/ggml-cpu-skylakex.dll": "ggml-cpu-skylakex.dll",
       "binaries/ggml-cpu-sse42.dll": "ggml-cpu-sse42.dll",
       "binaries/ggml-cpu-x64.dll": "ggml-cpu-x64.dll"
+    },
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
     }
   }
 }
