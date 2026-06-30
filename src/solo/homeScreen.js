@@ -7,14 +7,17 @@ import { tauriInvoke } from '../core/storageBackend.js';
 import { genId, nowISO, todayISO, displayDateShort } from '../utils/format.js';
 import { providerId } from '../core/capabilities.js';
 import { listPatients, getPatient, savePatient } from './patients.js';
+import { loadCodingFlags } from '../scribe/codingFlags.js';
 
 let _encounters = [];
-let _selected = { type: 'today' };
+let _selected    = { type: 'today' };
+let _searchQuery = '';
 
 export async function renderHomeScreen() {
-  _encounters = await tauriInvoke('list_encounters', { limit: 200 }).catch(() => []);
+  _encounters  = await tauriInvoke('list_encounters', { limit: 200 }).catch(() => []);
   syncPatientsFromAliases();            // adopt any aliased sessions as patient records
-  _selected = { type: 'today' };
+  _selected    = { type: 'today' };
+  _searchQuery = '';
 
   return `
     <div class="home-screen">
@@ -23,6 +26,8 @@ export async function renderHomeScreen() {
         ${statCard(awaitingCount(), 'Awaiting review')}
         ${statCard(completedCount(), 'Completed')}
       </div>
+
+      ${renderFlagInbox()}
 
       <div class="split">
         <aside class="split-nav"><div class="nav-list">${renderNav()}</div></aside>
@@ -65,10 +70,13 @@ function renderNav() {
 function renderRightPane() {
   if (_selected.type === 'add-patient') return renderAddPatient();
 
-  const patient = _selected.type === 'patient' ? getPatient(_selected.id) : null;
-  const list = patient ? sessionsFor(patient) : recentSessions();
-  const title = patient ? patient.name : 'Recent sessions';
-  const subParts = patient ? [patient.mrn && `MRN ${patient.mrn}`, patient.dob && `DOB ${patient.dob}`].filter(Boolean) : [];
+  const patient    = _selected.type === 'patient' ? getPatient(_selected.id) : null;
+  const allList    = patient ? sessionsFor(patient) : recentSessions();
+  const showSearch = !patient;
+  const list       = showSearch ? filterBySearch(allList) : allList;
+  const title      = patient ? patient.name : 'Recent sessions';
+  const subParts   = patient
+    ? [patient.mrn && `MRN ${patient.mrn}`, patient.dob && `DOB ${patient.dob}`].filter(Boolean) : [];
 
   return `
     <div class="pane-head">
@@ -78,10 +86,27 @@ function renderRightPane() {
       </div>
       <button class="btn btn-primary btn-sm" id="btn-new-session">+ New Session</button>
     </div>
+
+    ${showSearch ? `
+      <div class="search-bar-row">
+        <div class="search-bar">
+          <span class="search-icon">⌕</span>
+          <input type="text" id="session-search" class="search-input"
+                 placeholder="Search patient, date, or status…"
+                 value="${esc(_searchQuery)}" autocomplete="off" spellcheck="false" />
+          ${_searchQuery ? `<button class="search-clear" id="search-clear" title="Clear search">✕</button>` : ''}
+        </div>
+        ${_searchQuery ? `<span class="search-count">${list.length} result${list.length !== 1 ? 's' : ''}</span>` : ''}
+      </div>` : ''}
+
     ${list.length ? `<div class="encounter-list">${list.map(e => renderEncounterRow(e, !!patient)).join('')}</div>` : `
       <div class="empty-state">
-        <p>No sessions${patient ? ' for this patient yet' : ' yet'}.</p>
-        <p>Click <strong>+ New Session</strong> to start a recording.</p>
+        ${_searchQuery
+          ? `<p>No sessions match <strong>"${esc(_searchQuery)}"</strong>.</p>
+             <p><button class="btn btn-ghost btn-sm" id="search-clear-inline">Clear search</button></p>`
+          : `<p>No sessions${patient ? ' for this patient yet' : ' yet'}.</p>
+             <p>Click <strong>+ New Session</strong> to start a recording.</p>`
+        }
       </div>`}
   `;
 }
@@ -147,6 +172,17 @@ function recentSessions() {
     String(b.created_at || '').localeCompare(String(a.created_at || '')));
 }
 
+function filterBySearch(list) {
+  const q = _searchQuery.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(e =>
+    (e.patient_alias  || '').toLowerCase().includes(q) ||
+    (e.encounter_date || '').includes(q) ||
+    displayDateShort(e.encounter_date || '').toLowerCase().includes(q) ||
+    (e.status         || '').toLowerCase().includes(q)
+  );
+}
+
 function newCount() {
   return _encounters.filter(e => e.status === 'new' || e.status === 'recording' || e.status === 'recording_done').length;
 }
@@ -157,6 +193,40 @@ function awaitingCount() {
 
 function completedCount() {
   return _encounters.filter(e => e.status === 'signed' || e.status === 'exported').length;
+}
+
+function flaggedEncounters() {
+  return _encounters
+    .filter(e => e.status === 'draft')
+    .map(e => ({ encounter: e, gaps: (loadCodingFlags(e.id)?.documentation_gaps || []) }))
+    .filter(({ gaps }) => gaps.length > 0);
+}
+
+function renderFlagInbox() {
+  const items = flaggedEncounters();
+  if (!items.length) return '';
+  return `
+    <div class="flag-inbox">
+      <div class="flag-inbox-header">
+        <span class="flag-inbox-title">Documentation Gaps</span>
+        <span class="flag-inbox-count">${items.length}</span>
+      </div>
+      <div class="flag-inbox-list">
+        ${items.map(({ encounter: e, gaps }) => `
+          <div class="flag-inbox-row" data-encounter-id="${esc(e.id)}" role="button" tabindex="0">
+            <div class="fir-left">
+              <span class="fir-alias">${esc(e.patient_alias || 'Unknown patient')}</span>
+              <span class="fir-date">${displayDateShort(e.encounter_date)}</span>
+            </div>
+            <div class="fir-gaps">
+              ${gaps.slice(0, 2).map(g => `
+                <span class="fir-gap fir-gap--${g.severity || 'warning'}">${g.severity === 'error' ? '✕' : '⚠'} ${esc(g.issue)}</span>`).join('')}
+              ${gaps.length > 2 ? `<span class="fir-more">+${gaps.length - 2} more</span>` : ''}
+            </div>
+            <span class="fir-action">Review →</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
 }
 
 // Adopt any session whose patient_alias has no matching patient record as a new
@@ -175,6 +245,18 @@ function syncPatientsFromAliases() {
 export async function wireHomeScreen(onOpenEncounter) {
   wireNav(onOpenEncounter);
   wireRight(onOpenEncounter);
+  wireFlagInbox(onOpenEncounter);
+}
+
+function wireFlagInbox(onOpenEncounter) {
+  document.querySelectorAll('.flag-inbox-row').forEach(row => {
+    const open = () => {
+      const enc = _encounters.find(e => e.id === row.dataset.encounterId);
+      if (enc) onOpenEncounter(enc);
+    };
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') open(); });
+  });
 }
 
 function rerender(onOpenEncounter) {
@@ -241,6 +323,23 @@ function wireRight(onOpenEncounter) {
     _selected = { type: 'today' };
     rerender(onOpenEncounter);
   });
+
+  // Search
+  document.getElementById('session-search')?.addEventListener('input', e => {
+    _searchQuery = e.target.value;
+    rerender(onOpenEncounter);
+    // Restore focus + caret position after rerender
+    const input = document.getElementById('session-search');
+    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  });
+
+  const clearSearch = () => {
+    _searchQuery = '';
+    rerender(onOpenEncounter);
+    document.getElementById('session-search')?.focus();
+  };
+  document.getElementById('search-clear')?.addEventListener('click', clearSearch);
+  document.getElementById('search-clear-inline')?.addEventListener('click', clearSearch);
 
   // Session rows.
   document.querySelectorAll('#split-main .encounter-row').forEach(row => {

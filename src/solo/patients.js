@@ -20,8 +20,16 @@ export function getPatient(id) {
 }
 
 export function savePatient(p) {
-  const id = p.id || genId('pt');
-  const rec = { mrn: '', dob: '', notes: '', ...p, id };
+  const id       = p.id || genId('pt');
+  const existing = p.id ? kvGet(KEY(id)) : null;
+  const now      = new Date().toISOString();
+  const rec = {
+    mrn: '', dob: '', notes: '',
+    ...p,
+    id,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
   kvSet(KEY(id), rec);
   return rec;
 }

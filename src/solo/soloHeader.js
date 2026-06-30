@@ -1,10 +1,13 @@
 // Top nav bar — Sessions | Templates | Settings
 
-export function renderHeader(activeTab) {
+// extraTabs: optional array of {id, label} inserted before Settings.
+// Used by the Group build to inject the Practice tab without forking this file.
+export function renderHeader(activeTab, extraTabs = []) {
   const tabs = [
     { id: 'sessions',  label: 'Sessions'  },
     { id: 'patients',  label: 'Patients'  },
     { id: 'templates', label: 'Templates' },
+    ...extraTabs,
     { id: 'settings',  label: 'Settings'  },
   ];
   const tabsHtml = tabs.map(t => `

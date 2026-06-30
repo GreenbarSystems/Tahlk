@@ -5,12 +5,17 @@ import { on, emit } from '../core/eventBus.js';
 import { startRecording, stopRecording, isRecording, recordingDuration } from '../scribe/recorder.js';
 import { transcribe } from '../scribe/transcriber.js';
 import { generateNote } from '../scribe/noteGenerator.js';
+import { extractCodingFlags, loadCodingFlags, renderFlagsCard, wireFlagsCard } from '../scribe/codingFlags.js';
 import { loadDraft, loadHistory, saveDraftGenerated, saveDraftEdited, signNote } from '../editor/noteEditor.js';
 import { listTemplates } from '../templates/templateLibrary.js';
 import {
   exportFormatsFor, formatNote,
   copyToClipboard, saveToFile,
 } from '../export/exportFormatter.js';
+import {
+  saveToPdf, archiveToCloud, getCloudPdfUrl, getLocalArchiveStatus,
+} from '../export/pdfExport.js';
+import { isAuthenticated } from '../core/auth.js';
 import { toast, fmtDuration, genId, nowISO, displayDate } from '../utils/format.js';
 
 const TRANSCRIPT_KEY = id => `note_content_v1::transcript::${id}`;
@@ -21,6 +26,7 @@ export function renderEncounterPanel(encounter) {
   const transcript = kvGet(TRANSCRIPT_KEY(encounter.id)) || '';
   const provider = kvGet('note_provider_v1::profile') || {};
   const templates = listTemplates(provider.specialty);
+  const archiveStatus = getLocalArchiveStatus(encounter.id);
 
   return `
     <div class="panel encounter-panel" data-encounter-id="${encounter.id}">
@@ -86,6 +92,15 @@ export function renderEncounterPanel(encounter) {
                   ${isSigned ? 'readonly' : ''}>${draft}</textarea>
       </section>
 
+      <!-- Coding flags -->
+      <section class="section flags-section" id="flags-section" ${!draft ? 'style="display:none"' : ''}>
+        <div class="section-header">
+          <h3 class="section-title">Coding Suggestions</h3>
+          <span class="flags-beta-badge">AI</span>
+        </div>
+        <div id="flags-content">${draft ? renderFlagsCard(loadCodingFlags(encounter.id)) : ''}</div>
+      </section>
+
       <!-- Sign-off and export -->
       <section class="section actions-section">
         <div class="actions-row">
@@ -101,11 +116,27 @@ export function renderEncounterPanel(encounter) {
               ${exportFormatsFor(provider.specialty).map(f => `<option value="${f.id}">${f.label}</option>`).join('')}
             </select>
             <button class="btn btn-secondary" id="btn-copy" ${!draft ? 'disabled' : ''}>Copy</button>
-            <button class="btn btn-secondary" id="btn-save-file" ${!draft ? 'disabled' : ''}>Save File</button>
+            <button class="btn btn-secondary" id="btn-save-file" ${!draft ? 'disabled' : ''}>Save .txt</button>
+            <button class="btn btn-secondary btn-pdf" id="btn-export-pdf" ${!draft ? 'disabled' : ''}>Export PDF</button>
           </div>
         </div>
         ${isSigned && encounter.signed_hash ? `
           <p class="hash-display">SHA-256: <code>${encounter.signed_hash}</code></p>
+        ` : ''}
+        ${isSigned && isAuthenticated() ? `
+          <div class="cloud-archive-row" id="cloud-archive-row">
+            ${archiveStatus.s3Key ? `
+              <div class="archive-meta">
+                <span class="archive-status archive-status--done">☁ Archived to Cloud</span>
+                ${archiveStatus.archivedAt
+                  ? `<span class="archive-date">${new Date(archiveStatus.archivedAt).toLocaleString()}</span>`
+                  : ''}
+              </div>
+              <button class="btn btn-ghost btn-sm" id="btn-view-cloud-pdf">View →</button>
+            ` : `
+              <button class="btn btn-secondary btn-sm" id="btn-archive-cloud">☁ Archive to Cloud</button>
+            `}
+          </div>
         ` : ''}
       </section>
     </div>
@@ -117,6 +148,9 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   let currentTranscript = kvGet(TRANSCRIPT_KEY(encounter.id)) || '';
 
   const providerProfile = kvGet('note_provider_v1::profile') || {};
+
+  // Wire any flags already rendered (draft/signed encounter reopened)
+  wireFlagsCard();
 
   // Close
   document.getElementById('btn-close-panel')?.addEventListener('click', onClose);
@@ -218,10 +252,27 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
       document.getElementById('btn-sign')?.removeAttribute('disabled');
       document.getElementById('btn-copy')?.removeAttribute('disabled');
       document.getElementById('btn-save-file')?.removeAttribute('disabled');
+      document.getElementById('btn-export-pdf')?.removeAttribute('disabled');
       currentEncounter.status = 'draft';
       await tauriInvoke('upsert_encounter', { encounter: currentEncounter });
       onEncounterUpdated(currentEncounter);
       clearStatus();
+
+      // Extract coding flags asynchronously — non-blocking
+      setStatus('Extracting coding suggestions…');
+      const flags = await extractCodingFlags(
+        note, currentTranscript, providerProfile.specialty, currentEncounter.id
+      );
+      clearStatus();
+      if (flags) {
+        const section = document.getElementById('flags-section');
+        const content = document.getElementById('flags-content');
+        if (section && content) {
+          content.innerHTML = renderFlagsCard(flags);
+          section.style.display = '';
+          wireFlagsCard();
+        }
+      }
     } catch (e) {
       clearStatus();
       toast(e.message || 'Note generation failed.');
@@ -275,6 +326,60 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     const fmt = document.getElementById('export-format')?.value || 'plain';
     await saveToFile(getFormattedNote(), currentEncounter, fmt);
     toast('Note saved to file.');
+  });
+
+  document.getElementById('btn-export-pdf')?.addEventListener('click', async () => {
+    const note = document.getElementById('note-area')?.value || '';
+    if (!note.trim()) { toast('No note to export.'); return; }
+    try {
+      await saveToPdf(note, currentEncounter, providerProfile);
+      toast('PDF saved.');
+    } catch (e) {
+      toast(e.message || 'PDF export failed.');
+    }
+  });
+
+  // ── Cloud archive (signed notes only, cloud account required) ──────────────
+
+  async function _openCloudPdf() {
+    try {
+      const url = await getCloudPdfUrl(currentEncounter.id);
+      await tauriInvoke('open_url', { url });
+    } catch (e) {
+      toast(e.message || 'Could not open archived PDF.');
+    }
+  }
+
+  document.getElementById('btn-view-cloud-pdf')?.addEventListener('click', _openCloudPdf);
+
+  document.getElementById('btn-archive-cloud')?.addEventListener('click', async () => {
+    const note = document.getElementById('note-area')?.value || '';
+    if (!note.trim()) { toast('No note content to archive.'); return; }
+    const btn = document.getElementById('btn-archive-cloud');
+    btn.disabled = true;
+    btn.textContent = '☁ Archiving…';
+    try {
+      await archiveToCloud(note, currentEncounter, providerProfile);
+      const row = document.getElementById('cloud-archive-row');
+      if (row) {
+        const status = getLocalArchiveStatus(currentEncounter.id);
+        row.innerHTML = `
+          <div class="archive-meta">
+            <span class="archive-status archive-status--done">☁ Archived to Cloud</span>
+            ${status.archivedAt
+              ? `<span class="archive-date">${new Date(status.archivedAt).toLocaleString()}</span>`
+              : ''}
+          </div>
+          <button class="btn btn-ghost btn-sm" id="btn-view-cloud-pdf">View →</button>
+        `;
+        document.getElementById('btn-view-cloud-pdf')?.addEventListener('click', _openCloudPdf);
+      }
+      toast('PDF archived to Tahlk Cloud.');
+    } catch (e) {
+      toast(e.message || 'Archive failed.');
+      btn.disabled = false;
+      btn.textContent = '☁ Archive to Cloud';
+    }
   });
 }
 

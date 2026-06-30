@@ -1,62 +1,76 @@
 // Group (Pro/Firm) entry point.
-// Installs Group-tier capabilities (active provider/user from the practice roster),
-// then boots the shared app shell. Reuses the shared core + app UI; Group-specific
-// UI (roster switcher, practice dashboard) grows under src/group/. The Solo build
-// never imports this module — enforced by tests/build/test_solo_excludes_group.mjs.
+// Installs Group-tier capabilities, syncs the cloud provider roster, then
+// boots the full app shell with the Practice tab and roster switcher.
 
-import { installCapabilities, currentProvider } from './core/capabilities.js';
-import { kvWarmup } from './core/storageBackend.js';
+import { installCapabilities } from './core/capabilities.js';
+import { kvWarmup }            from './core/storageBackend.js';
+import { initAuth }            from './core/auth.js';
+import { startSyncLoop }       from './core/syncEngine.js';
+import { on }                  from './core/eventBus.js';
+
 import { ensureRosterSeeded, groupCapabilities } from './group/groupCapabilities.js';
+import { syncRosterFromCloud }                   from './group/rosterSync.js';
+import { renderRosterSwitcher, wireRosterSwitcher } from './group/rosterSwitcher.js';
+import { renderPracticePanel, wirePracticePanel }   from './group/practicePanel.js';
 
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
-import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
-import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
-import { renderEncounterPanel, wireEncounterPanel } from './solo/encounterPanel.js';
-import { renderSettings, wireSettings } from './solo/settingsModal.js';
-import { renderTemplatesView } from './solo/templatesView.js';
+import { renderHeader, wireHeaderNav }                    from './solo/soloHeader.js';
+import { renderHomeScreen, wireHomeScreen }               from './solo/homeScreen.js';
+import { renderEncounterPanel, wireEncounterPanel }       from './solo/encounterPanel.js';
+import { renderSettings, wireSettings }                   from './solo/settingsModal.js';
+import { renderTemplatesView }                            from './solo/templatesView.js';
+import { renderPatientsView, wirePatientsView }           from './solo/patientsView.js';
 
-let _currentTab = 'sessions';
-let _openEncounter = null;
+const GROUP_EXTRA_TABS = [{ id: 'practice', label: 'Practice' }];
+
+let _currentTab      = 'sessions';
+let _openEncounter   = null;
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 async function bootstrap() {
   await kvWarmup();
+  await initAuth();               // restore cloud auth state + enc key
   installCapabilities(groupCapabilities());
 
   if (!isOnboarded()) {
     document.getElementById('app').innerHTML = renderOnboarding();
-    await wireOnboarding(() => {
-      ensureRosterSeeded();            // seed roster from the just-entered profile
+    await wireOnboarding(async () => {
+      ensureRosterSeeded();
+      await syncRosterFromCloud();
       _currentTab = 'sessions';
       renderApp();
     });
     return;
   }
 
-  ensureRosterSeeded();               // existing install: seed from saved profile if empty
+  ensureRosterSeeded();
+  await syncRosterFromCloud();    // updates local roster from cloud org providers
   renderApp();
+  startSyncLoop();
+
+  // Re-render the full app when the active provider changes so the roster
+  // switcher highlights the new selection and encounter filters refresh.
+  on('group:provider_changed', () => renderApp());
 }
 
-// Minimal Group marker so the build is visibly the Pro/Firm tier and the active
-// provider (via the capability seam) is shown. Replaced by the roster switcher next.
-function renderGroupBanner() {
-  const p = currentProvider();
-  return `
-    <div style="display:flex;gap:16px;align-items:center;padding:6px 16px;
-                background:var(--navy,#16263f);color:#fff;font-size:12px;font-weight:600;">
-      <span>Group · Pro / Firm</span>
-      <span style="font-weight:400;">Active provider: <strong>${p?.name || '—'}</strong></span>
-    </div>
-  `;
-}
+// ── Shell ─────────────────────────────────────────────────────────────────────
 
 async function renderApp() {
   const root = document.getElementById('app');
+
   root.innerHTML = `
-    ${renderGroupBanner()}
-    ${renderHeader(_currentTab)}
+    ${renderRosterSwitcher()}
+    ${renderHeader(_currentTab, GROUP_EXTRA_TABS)}
     <main class="app-main" id="main-content"></main>
     <div class="toast" id="toast"><span id="toast-msg"></span></div>
   `;
+
+  wireRosterSwitcher(tab => {
+    _currentTab = tab;
+    _openEncounter = null;
+    renderApp();
+  });
 
   wireHeaderNav(tab => {
     _currentTab = tab;
@@ -87,8 +101,17 @@ async function renderMainContent() {
       _openEncounter = encounter;
       renderMainContent();
     });
+  } else if (_currentTab === 'patients') {
+    main.innerHTML = await renderPatientsView();
+    wirePatientsView(encounter => {
+      _openEncounter = encounter;
+      renderMainContent();
+    });
   } else if (_currentTab === 'templates') {
     main.innerHTML = renderTemplatesView();
+  } else if (_currentTab === 'practice') {
+    main.innerHTML = await renderPracticePanel();
+    await wirePracticePanel();
   } else if (_currentTab === 'settings') {
     main.innerHTML = await renderSettings();
     wireSettings();

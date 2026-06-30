@@ -3,7 +3,7 @@
 // sidecar binary. Audio stays on-device; no network call is made.
 
 import { emit } from '../core/eventBus.js';
-import { tauriInvoke } from '../core/storageBackend.js';
+import { tauriInvoke, kvGet } from '../core/storageBackend.js';
 
 export async function checkModelDownloaded() {
   return tauriInvoke('model_downloaded', {});
@@ -30,6 +30,11 @@ export async function transcribe(audioPath, encounterId) {
   emit('scribe:transcription_started', { encounterId });
   try {
     const transcript = await tauriInvoke('transcribe_audio', { audioPath });
+    // Delete audio file after transcription unless the user has opted out
+    const keepAudio = kvGet('note_settings_v1::keep_audio_after_transcription');
+    if (!keepAudio) {
+      tauriInvoke('delete_file', { path: audioPath }).catch(() => {});
+    }
     emit('scribe:transcription_complete', { transcript, encounterId });
     return transcript;
   } catch (e) {

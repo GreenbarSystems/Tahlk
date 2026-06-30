@@ -1,6 +1,8 @@
 // Solo entry point — bootstraps storage, checks onboarding, renders the shell.
 
 import { kvWarmup } from './core/storageBackend.js';
+import { initAuth } from './core/auth.js';
+import { startSyncLoop } from './core/syncEngine.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
 import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
@@ -14,6 +16,7 @@ let _openEncounter = null;
 
 async function bootstrap() {
   await kvWarmup();
+  await initAuth();   // restore auth state + enc key from KV (no-op if not logged in)
 
   if (!isOnboarded()) {
     document.getElementById('app').innerHTML = renderOnboarding();
@@ -25,6 +28,7 @@ async function bootstrap() {
   }
 
   renderApp();
+  startSyncLoop(); // no-op until the user has cloud credentials
 }
 
 async function renderApp() {

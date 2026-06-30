@@ -1,0 +1,38 @@
+{
+  "name": "tahlk-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:migrate": "prisma migrate deploy",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3",
+    "@aws-sdk/s3-request-presigner": "^3",
+    "resend": "^4",
+    "@fastify/cookie": "^10",
+    "@fastify/cors": "^10",
+    "@fastify/helmet": "^12",
+    "@fastify/rate-limit": "^10",
+    "@prisma/client": "^6",
+    "bcryptjs": "^2",
+    "fastify": "^5",
+    "jose": "^5",
+    "nanoid": "^5",
+    "stripe": "^22.3.0",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2",
+    "@types/node": "^22",
+    "prisma": "^6",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}

@@ -342,6 +342,40 @@ async fn export_note_to_file(app: AppHandle, content: String, suggested_name: St
     }
 }
 
+// ── Shell utilities ────────────────────────────────────────────────────────
+
+// Open a URL in the user's default system browser (used for Stripe checkout/portal).
+#[tauri::command]
+async fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    app.shell().open(&url, None).map_err(|e| e.to_string())
+}
+
+// ── File utilities ────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn delete_file(path: String) -> Result<(), String> {
+    tokio::fs::remove_file(&path).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn export_pdf_file(app: AppHandle, data: String, suggested_name: String) -> Result<(), String> {
+    let bytes = BASE64.decode(data.as_bytes()).map_err(|e| e.to_string())?;
+
+    let path = app
+        .dialog()
+        .file()
+        .set_file_name(&suggested_name)
+        .add_filter("PDF Document", &["pdf"])
+        .blocking_save_file();
+
+    match path {
+        Some(p) => tokio::fs::write(p.to_string(), bytes)
+            .await
+            .map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
 // ── Database init ──────────────────────────────────────────────────────────
 
 fn open_database(app: &AppHandle) -> rusqlite::Result<Connection> {
@@ -402,6 +436,9 @@ pub fn run() {
             transcribe_audio,
             generate_note,
             export_note_to_file,
+            delete_file,
+            export_pdf_file,
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

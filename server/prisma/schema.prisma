@@ -1,0 +1,158 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Tier {
+  SOLO
+  PRO
+  FIRM
+}
+
+model Organization {
+  id               String    @id @default(cuid())
+  name             String
+  tier             Tier      @default(SOLO)
+  stripeCustomerId String?   @unique
+  stripeSubId      String?   @unique
+  baaSignedAt      DateTime?
+  baaSignedBy      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  providers  Provider[]
+  encounters Encounter[]
+  patients   Patient[]
+  auditLogs  AuditLog[]
+  invites    ProviderInvite[]
+}
+
+model Provider {
+  id           String   @id @default(cuid())
+  orgId        String
+  email        String   @unique
+  passwordHash String
+  name         String?
+  credentials  String?
+  specialty    String?
+  role         String   @default("provider") // provider | admin
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  org           Organization        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+  encounters    Encounter[]
+  resetTokens   PasswordResetToken[]
+}
+
+model RefreshToken {
+  id         String    @id @default(cuid())
+  providerId String
+  tokenHash  String    @unique // SHA-256 of raw token — raw never stored
+  deviceId   String
+  deviceName String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+}
+
+// Encounters store note/transcript/flags as client-side AES-256-GCM ciphertext.
+// The server is zero-knowledge for PHI — it cannot decrypt any clinical content.
+model Encounter {
+  id              String    @id // client-generated cuid
+  orgId           String
+  providerId      String
+  patientId       String?
+  encounterDate   DateTime?
+  status          String    @default("new")
+  noteEnc         String?   // AES-256-GCM encrypted note (base64url)
+  transcriptEnc   String?   // AES-256-GCM encrypted transcript (base64url)
+  flagsEnc        String?   // AES-256-GCM encrypted coding flags (base64url)
+  signedAt        DateTime?
+  signedHash      String?   // SHA-256 of plaintext note — set client-side at signing
+  signedBy        String?
+  pdfS3Key        String?
+  clientUpdatedAt DateTime
+  syncedAt        DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+
+  org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  provider Provider     @relation(fields: [providerId], references: [id])
+  patient  Patient?     @relation(fields: [patientId], references: [id])
+
+  @@index([orgId, providerId])
+  @@index([orgId, syncedAt])
+}
+
+// Patient records — name encrypted client-side. MRN/DOB stored unencrypted for
+// server-side search (MVP). Encrypt these in Phase 2 when search moves client-side.
+model Patient {
+  id              String   @id // client-generated cuid
+  orgId           String
+  nameEnc         String?  // AES-256-GCM encrypted
+  mrn             String?
+  dob             String?
+  notesEnc        String?  // AES-256-GCM encrypted
+  clientUpdatedAt DateTime
+  syncedAt        DateTime @default(now())
+  createdAt       DateTime @default(now())
+
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  encounters Encounter[]
+
+  @@index([orgId])
+}
+
+// One-time token for password reset — raw token emailed, only SHA-256 hash stored.
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  providerId String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+}
+
+// Org admin invites a provider by email. Raw token emailed; only hash stored.
+model ProviderInvite {
+  id         String    @id @default(cuid())
+  orgId      String
+  email      String
+  tokenHash  String    @unique
+  role       String    @default("provider")
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  orgId       String
+  providerId  String?
+  encounterId String?
+  action      String
+  meta        Json?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt])
+  @@index([encounterId])
+}
