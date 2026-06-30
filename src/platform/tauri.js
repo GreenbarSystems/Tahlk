@@ -43,3 +43,14 @@ export async function clipboardWriteText(text) {
   }
   throw new Error('Clipboard unavailable');
 }
+
+// Read the current clipboard text. Returns null if unavailable.
+export async function clipboardReadText() {
+  const t = runtime();
+  const readText = t?.['clipboard-manager']?.readText || t?.clipboardManager?.readText;
+  if (readText) return readText();
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+    return navigator.clipboard.readText();
+  }
+  return null;
+}

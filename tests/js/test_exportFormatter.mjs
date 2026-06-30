@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toPlainText, toSimplePractice, toTherapyNotes } from '../../src/export/exportFormatter.js';
+import { toPlainText, toSimplePractice, toTherapyNotes, exportFilename } from '../../src/export/exportFormatter.js';
 
 const encounter = {
   id: 'enc-1',
@@ -33,4 +33,16 @@ test('toTherapyNotes carries the note date and attestation footer', () => {
   const out = toTherapyNotes('Body', encounter);
   assert.match(out, /Note Date: 6\/29\/2026/);
   assert.match(out, /Reviewed and attested by provider/);
+});
+
+test('exportFilename never includes the patient alias (PHI minimization)', () => {
+  const name = exportFilename({ id: 'enc-1', encounter_date: '2026-06-29', patient_alias: 'John Doe' });
+  assert.equal(name, 'note_20260629_enc-1.txt');
+  assert.doesNotMatch(name, /John|Doe/);
+});
+
+test('exportFilename is filesystem-safe with odd input', () => {
+  const name = exportFilename({ id: '../evil', encounter_date: '' });
+  assert.doesNotMatch(name, /[\\/]/);
+  assert.match(name, /^note_undated_evil\.txt$/);
 });

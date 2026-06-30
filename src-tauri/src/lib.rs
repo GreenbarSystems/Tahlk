@@ -407,7 +407,15 @@ async fn generate_note(
     let key = read_api_key(&state)
         .ok_or("Anthropic API key not set. Open Settings to add your key.")?;
 
-    let client = Client::new();
+    // TLS: reqwest validates the server certificate against the system trust
+    // store by default; we additionally pin the floor to TLS 1.2. Certificate
+    // pinning is intentionally NOT used — Anthropic rotates its certs/CAs, so
+    // pinning a third-party API would cause outages on rotation; the residual
+    // rogue-CA MITM risk is accepted (low for a desktop client). [audit L4]
+    let client = Client::builder()
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .build()
+        .map_err(|e| e.to_string())?;
     let body = json!({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 2048,

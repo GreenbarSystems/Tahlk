@@ -1,10 +1,13 @@
 // Export formatters — plain text, SimplePractice, TherapyNotes, clipboard.
 
-import { invoke, clipboardWriteText } from '../platform/tauri.js';
+import { invoke, clipboardWriteText, clipboardReadText } from '../platform/tauri.js';
 import { appendAudit } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
 import { keys } from '../data/keys.js';
 import { displayDateShort } from '../utils/format.js';
+
+// How long copied PHI is allowed to linger on the clipboard before auto-clear.
+const CLIPBOARD_CLEAR_MS = 90_000;
 
 // Plain text — safe paste into any EHR.
 export function toPlainText(note, encounter) {
@@ -38,20 +41,38 @@ export function toTherapyNotes(note, encounter) {
   ].join('\n');
 }
 
-// Copy formatted text to the system clipboard.
+// Copy formatted text to the system clipboard. The note is PHI, so schedule an
+// auto-clear — but only wipe the clipboard if it still holds what we wrote, so
+// we never clobber something the user copied in the meantime.
+let _clipboardClearTimer;
 export async function copyToClipboard(text, encounterId, format) {
   await clipboardWriteText(text);
+
+  clearTimeout(_clipboardClearTimer);
+  _clipboardClearTimer = setTimeout(async () => {
+    try {
+      const current = await clipboardReadText();
+      if (current === text) await clipboardWriteText('');
+    } catch { /* clipboard unavailable — nothing to clear */ }
+  }, CLIPBOARD_CLEAR_MS);
+
   appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method: 'clipboard' });
   emit('scribe:note_exported', { encounterId, format });
 }
 
+// Build a non-PHI export filename. The patient alias is intentionally NOT used:
+// it may contain a real name, and filenames leak via listings, backups, and
+// recent-files. The encounter id is a non-PHI slug; identification lives in the
+// note content, not the filename.
+export function exportFilename(encounter) {
+  const date = (encounter.encounter_date || '').slice(0, 10).replace(/-/g, '');
+  const id = String(encounter.id || '').replace(/[^A-Za-z0-9_-]/g, '');
+  return `note_${date || 'undated'}_${id || 'note'}.txt`;
+}
+
 // Save to a .txt file via the native save dialog.
 export async function saveToFile(text, encounter, format) {
-  const date = (encounter.encounter_date || '').slice(0, 10).replace(/-/g, '');
-  const alias = encounter.patient_alias ? `_${encounter.patient_alias.replace(/\s+/g, '-')}` : '';
-  const suggestedName = `note_${date}${alias}.txt`;
-
-  await invoke('export_note_to_file', { content: text, suggestedName });
+  await invoke('export_note_to_file', { content: text, suggestedName: exportFilename(encounter) });
 
   appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format, method: 'file' });
   emit('scribe:note_exported', { encounterId: encounter.id, format });
