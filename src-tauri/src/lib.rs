@@ -290,8 +290,24 @@ fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), Strin
 
 // ── Audio ──────────────────────────────────────────────────────────────────
 
+// Encounter ids are client-generated (genId: "enc-<base36>-<rand>"). Validate
+// the shape before using one to build a filesystem path, so a crafted id like
+// "../../evil" cannot escape the audio directory (path-traversal hardening —
+// the WebView is a privilege boundary, even though it's our own frontend).
+fn safe_id(id: &str) -> Result<(), String> {
+    let ok = !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if ok {
+        Ok(())
+    } else {
+        Err("invalid encounter id".into())
+    }
+}
+
 #[tauri::command]
 async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, String> {
+    safe_id(&encounter_id)?;
     let data = BASE64.decode(base64_data.as_bytes()).map_err(|e| e.to_string())?;
     let audio_dir = app
         .path()
@@ -330,6 +346,22 @@ async fn transcribe_audio(app: AppHandle, audio_path: String) -> Result<String, 
     let model = model_path(&app)?;
     if !tokio::fs::try_exists(&model).await.unwrap_or(false) {
         return Err("Whisper model not downloaded. Open Settings → Download Transcription Model.".into());
+    }
+
+    // Confine transcription to the app's audio directory. The output .txt path is
+    // derived from audio_path, so an unconstrained path would let the WebView
+    // read an arbitrary file AND write a .txt next to it (arbitrary write).
+    let audio_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("audio");
+    let canon = std::path::Path::new(&audio_path)
+        .canonicalize()
+        .map_err(|_| "audio file not found".to_string())?;
+    let dir_canon = audio_dir.canonicalize().map_err(|e| e.to_string())?;
+    if !canon.starts_with(&dir_canon) {
+        return Err("audio path is outside the session audio directory".into());
     }
 
     let output_base = audio_path.trim_end_matches(".wav").to_string();
@@ -557,5 +589,17 @@ mod tests {
         assert_eq!(entry.get_password().unwrap(), "sk-ant-test-value");
         entry.delete_credential().unwrap();
         assert!(entry.get_password().is_err(), "credential should be gone after delete");
+    }
+
+    #[test]
+    fn safe_id_accepts_real_ids_rejects_traversal() {
+        assert!(super::safe_id("enc-l9k3a-x7q2").is_ok());
+        assert!(super::safe_id("enc_123").is_ok());
+        // path-traversal / separator / drive attempts must be rejected
+        assert!(super::safe_id("../../evil").is_err());
+        assert!(super::safe_id("a/b").is_err());
+        assert!(super::safe_id("a\\b").is_err());
+        assert!(super::safe_id("C:evil").is_err());
+        assert!(super::safe_id("").is_err());
     }
 }
