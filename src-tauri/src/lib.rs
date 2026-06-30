@@ -273,8 +273,10 @@ async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: S
 // ── Whisper transcription ──────────────────────────────────────────────────
 
 fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("models");
-    Ok(dir.join("ggml-base.en.bin"))
+    app.path()
+        .resource_dir()
+        .map_err(|e| e.to_string())
+        .map(|d| d.join("ggml-base.en.bin"))
 }
 
 #[tauri::command]
@@ -282,35 +284,10 @@ async fn model_downloaded(app: AppHandle) -> Result<bool, String> {
     Ok(tokio::fs::try_exists(model_path(&app)?).await.unwrap_or(false))
 }
 
+// Retained for API compatibility; model ships with the app so this is a no-op.
 #[tauri::command]
 async fn download_whisper_model(app: AppHandle) -> Result<(), String> {
-    let model_file = model_path(&app)?;
-    if tokio::fs::try_exists(&model_file).await.unwrap_or(false) {
-        return Ok(());
-    }
-    tokio::fs::create_dir_all(model_file.parent().unwrap()).await.map_err(|e| e.to_string())?;
-
-    let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
-    let client = Client::new();
-    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("Download failed: {}", resp.status()));
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let _ = app.emit("whisper:download_progress", json!({ "downloaded": 0, "total": total }));
-
-    let mut downloaded: u64 = 0;
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    use futures_util::StreamExt;
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| e.to_string())?;
-        downloaded += bytes.len() as u64;
-        buf.extend_from_slice(&bytes);
-        let _ = app.emit("whisper:download_progress", json!({ "downloaded": downloaded, "total": total }));
-    }
-    tokio::fs::write(&model_file, &buf).await.map_err(|e| e.to_string())?;
-    let _ = app.emit("whisper:download_complete", json!({}));
+    let _ = app;
     Ok(())
 }
 

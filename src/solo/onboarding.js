@@ -1,10 +1,10 @@
-// First-run onboarding — collect provider info, trigger model download, enter API key.
+// First-run onboarding — collect provider info and API key.
 
 import { kvGet, kvSet } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
-import { downloadModel, checkModelDownloaded } from '../scribe/transcriber.js';
 import { toast } from '../utils/format.js';
+import { LOGO_SVG_LG } from './logoSvg.js';
 
 const PROVIDER_KEY = keys.provider();
 const ONBOARDED_KEY = keys.onboarded();
@@ -17,7 +17,7 @@ export function renderOnboarding() {
   return `
     <div class="onboarding-backdrop">
       <div class="onboarding-card">
-        <div class="onboarding-logo">✦ Tahlk</div>
+        <div class="onboarding-logo">${LOGO_SVG_LG}<span>Tahlk</span></div>
         <h1 class="onboarding-title">Welcome. Let's get you set up.</h1>
         <p class="onboarding-sub">Takes about 3 minutes. Your data stays on this device.</p>
 
@@ -48,23 +48,9 @@ export function renderOnboarding() {
             </div>
           </div>
 
-          <!-- Step 2: Whisper model -->
-          <div class="onboarding-step" id="step-model">
-            <div class="step-num">2</div>
-            <div class="step-body">
-              <h3>Download transcription model</h3>
-              <p class="step-desc">A 142 MB local speech model (Whisper base.en). Downloads once; runs entirely on this device. No audio leaves your computer.</p>
-              <div id="model-status" class="model-status"></div>
-              <button class="btn btn-secondary" id="ob-download-model">Download Model</button>
-              <div class="progress-bar" id="model-progress" style="display:none">
-                <div class="progress-fill" id="model-progress-fill"></div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Step 3: Anthropic API key -->
+          <!-- Step 2: Anthropic API key -->
           <div class="onboarding-step" id="step-apikey">
-            <div class="step-num">3</div>
+            <div class="step-num">2</div>
             <div class="step-body">
               <h3>Note generation API key</h3>
               <p class="step-desc">Tahlk uses Claude (Anthropic) to turn transcripts into clinical notes. Enter your Anthropic API key — stored locally on this device only, never sent to Tahlk servers.</p>
@@ -87,27 +73,6 @@ export function renderOnboarding() {
 }
 
 export async function wireOnboarding(onComplete) {
-  // Check model status on load.
-  const modelOk = await checkModelDownloaded().catch(() => false);
-  const statusEl = document.getElementById('model-status');
-  if (statusEl) statusEl.textContent = modelOk ? '✓ Model ready' : 'Not downloaded yet';
-
-  document.getElementById('ob-download-model')?.addEventListener('click', async () => {
-    const bar = document.getElementById('model-progress');
-    const fill = document.getElementById('model-progress-fill');
-    if (bar) bar.style.display = 'block';
-
-    try {
-      await downloadModel(pct => {
-        if (fill) fill.style.width = `${Math.round(pct * 100)}%`;
-      });
-      if (statusEl) statusEl.textContent = '✓ Model ready';
-      toast('Transcription model downloaded successfully.');
-    } catch (e) {
-      toast(`Download failed: ${e.message || e}`);
-    }
-  });
-
   document.getElementById('ob-finish')?.addEventListener('click', async () => {
     const name = document.getElementById('ob-name')?.value.trim();
     if (!name) { toast('Provider name is required.'); return; }

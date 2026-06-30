@@ -1,5 +1,7 @@
 // Top nav bar — Sessions | Templates | Settings
 
+import { LOGO_SVG } from './logoSvg.js';
+
 export function renderHeader(activeTab) {
   const tabs = [
     { id: 'sessions',  label: 'Sessions' },
@@ -8,13 +10,14 @@ export function renderHeader(activeTab) {
   ];
   const tabsHtml = tabs.map(t => `
     <button class="nav-tab ${t.id === activeTab ? 'nav-tab--active' : ''}"
-            data-tab="${t.id}">${t.label}</button>
+            data-tab="${t.id}"
+            ${t.id === activeTab ? 'aria-current="page"' : ''}>${t.label}</button>
   `).join('');
 
   return `
     <header class="app-header">
       <div class="header-brand">
-        <span class="header-logo">✦</span>
+        ${LOGO_SVG}
         <span class="header-name">Tahlk</span>
         <span class="header-badge">Beta</span>
       </div>

@@ -60,12 +60,21 @@ const STATUS_LABELS = {
 export const statusLabel = status => STATUS_LABELS[status] || status;
 
 let _toastTimer;
-export function toast(msg, dur = 3200) {
+let _toastHovered = false;
+export function toast(msg, dur = 3800) {
   clearTimeout(_toastTimer);
   const el = document.getElementById('toast');
   const msgEl = document.getElementById('toast-msg');
   if (!el || !msgEl) { console.warn('toast:', msg); return; }
   msgEl.textContent = msg;
+  el.setAttribute('role', 'status');
   el.classList.add('show');
-  _toastTimer = setTimeout(() => el.classList.remove('show'), dur);
+
+  const dismiss = () => el.classList.remove('show');
+
+  // Pause dismiss on hover so users can finish reading longer messages.
+  el.onmouseenter = () => { _toastHovered = true; clearTimeout(_toastTimer); };
+  el.onmouseleave = () => { _toastHovered = false; _toastTimer = setTimeout(dismiss, 1200); };
+
+  _toastTimer = setTimeout(() => { if (!_toastHovered) dismiss(); }, dur);
 }

@@ -15,23 +15,23 @@ export async function renderHomeScreen() {
   return `
     <div class="home-screen">
       <div class="home-top">
-        <div class="home-stats">
-          <div class="stat-card">
-            <div class="stat-num">${stats.today}</div>
-            <div class="stat-label">Today</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-num">${stats.signed}</div>
-            <div class="stat-label">Signed</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-num">${stats.total}</div>
-            <div class="stat-label">Total</div>
-          </div>
-        </div>
         <button class="btn btn-primary btn-lg btn-new-session" id="btn-new-session">
           + New Session
         </button>
+        <div class="home-stats">
+          <div class="stat-item">
+            <span class="stat-num">${stats.today}</span>
+            <span class="stat-label">Today</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-num">${stats.signed}</span>
+            <span class="stat-label">Signed</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-num">${stats.total}</span>
+            <span class="stat-label">Total</span>
+          </div>
+        </div>
       </div>
 
       <div class="encounter-list">
@@ -48,13 +48,18 @@ export async function renderHomeScreen() {
 }
 
 function renderEncounterRow(e) {
+  const dateStr   = escapeHtml(displayDateShort(e.encounter_date));
+  const aliasStr  = e.patient_alias ? escapeHtml(e.patient_alias) : '';
+  const statusStr = statusLabel(e.status);
+  const label     = [statusStr, dateStr, aliasStr].filter(Boolean).join(', ');
   return `
-    <div class="encounter-row" data-encounter-id="${escapeHtml(e.id)}" tabindex="0" role="button">
-      <div class="enc-date">${escapeHtml(displayDateShort(e.encounter_date))}</div>
-      <div class="enc-alias">${e.patient_alias ? escapeHtml(e.patient_alias) : '—'}</div>
+    <div class="encounter-row" data-encounter-id="${escapeHtml(e.id)}"
+         tabindex="0" role="button" aria-label="${label}">
       <div class="enc-status">
-        <span class="status-chip status-chip--${escapeHtml(e.status)}">${statusLabel(e.status)}</span>
+        <span class="status-chip status-chip--${escapeHtml(e.status)}">${statusStr}</span>
       </div>
+      <div class="enc-date">${dateStr}</div>
+      <div class="enc-alias">${aliasStr || '<span class="enc-no-alias">—</span>'}</div>
     </div>
   `;
 }

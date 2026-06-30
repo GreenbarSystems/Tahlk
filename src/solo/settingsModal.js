@@ -3,7 +3,6 @@
 import { kvGet, kvSet, kvEnsure } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
-import { checkModelDownloaded, downloadModel } from '../scribe/transcriber.js';
 import * as telemetry from '../core/telemetry.js';
 import { toast, escapeHtml } from '../utils/format.js';
 
@@ -11,7 +10,6 @@ const PROVIDER_KEY = keys.provider();
 
 export async function renderSettings() {
   const provider = kvGet(PROVIDER_KEY) || {};
-  const modelOk = await checkModelDownloaded().catch(() => false);
   const hasKey = await secretsRepo.hasApiKey().catch(() => false);
   await kvEnsure([keys.diagEvents()]);          // load any persisted diagnostics for the count
   const diagOn = telemetry.isEnabled();
@@ -46,14 +44,8 @@ export async function renderSettings() {
         <h3>Transcription Model (Whisper)</h3>
         <p class="settings-desc">Local speech recognition — runs on this device. No audio sent to any server.</p>
         <div class="model-status-row">
-          <span class="model-status-icon">${modelOk ? '✓' : '✗'}</span>
-          <span>${modelOk ? 'Whisper base.en model ready' : 'Model not downloaded'}</span>
-        </div>
-        <button class="btn btn-secondary" id="s-download-model" ${modelOk ? 'disabled' : ''}>
-          ${modelOk ? 'Model Downloaded' : 'Download Model (142 MB)'}
-        </button>
-        <div class="progress-bar" id="s-model-progress" style="display:none">
-          <div class="progress-fill" id="s-model-fill"></div>
+          <span class="model-status-icon">✓</span>
+          <span>Whisper base.en — included with Tahlk</span>
         </div>
       </section>
 
@@ -109,19 +101,18 @@ export function wireSettings() {
     toast('Profile saved.');
   });
 
-  document.getElementById('s-download-model')?.addEventListener('click', async () => {
-    const bar  = document.getElementById('s-model-progress');
-    const fill = document.getElementById('s-model-fill');
-    if (bar) bar.style.display = 'block';
-    try {
-      await downloadModel(pct => { if (fill) fill.style.width = `${Math.round(pct * 100)}%`; });
-      toast('Model downloaded.');
-      document.getElementById('s-download-model').disabled = true;
-      document.getElementById('s-download-model').textContent = 'Model Downloaded';
-    } catch (e) {
-      toast(`Download failed: ${e.message || e}`);
-    }
-  });
+  const apiKeyInput = document.getElementById('s-apikey');
+  if (apiKeyInput) {
+    apiKeyInput.addEventListener('focus', () => {
+      if (apiKeyInput.value === '••••••••••••') apiKeyInput.value = '';
+    });
+    apiKeyInput.addEventListener('blur', async () => {
+      if (!apiKeyInput.value.trim()) {
+        const hasKey = await secretsRepo.hasApiKey().catch(() => false);
+        if (hasKey) apiKeyInput.value = '••••••••••••';
+      }
+    });
+  }
 
   document.getElementById('s-save-apikey')?.addEventListener('click', async () => {
     const val = document.getElementById('s-apikey')?.value.trim();

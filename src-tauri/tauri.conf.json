@@ -41,10 +41,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "category": "MedicalApp",
+    "category": "Medical",
     "copyright": "© Tahlk",
     "longDescription": "Ambient AI scribe for independent behavioral health and psychiatry practices. Listens to patient encounters, generates structured clinical notes, and requires physician sign-off before finalization. Audio stays on your device.",
     "shortDescription": "Privacy-first AI scribe for behavioral health",
-    "externalBin": ["binaries/whisper-cpp"]
+    "externalBin": ["binaries/whisper-cpp"],
+    "resources": ["resources/ggml-base.en.bin"]
   }
 }
