@@ -10,11 +10,55 @@ use tauri_plugin_shell::ShellExt;
 
 struct DbState(Mutex<Connection>);
 
-// Storage key for the Anthropic API key. Lives in the `secret_` namespace,
-// which the generic kv_* commands refuse to read or write — so the key is
-// write-only from JS (set via set_api_key, presence-checked via has_api_key)
-// and only ever read inside generate_note on the Rust side.
+// The Anthropic API key lives in the OS secure store (Windows Credential
+// Manager / macOS Keychain / Linux Secret Service) via the `keyring` crate —
+// never in the app database. It is write-only from JS (set via set_api_key,
+// presence-checked via has_api_key) and read only inside generate_note.
+//
+// API_KEY_KV is the LEGACY SQLite location. It is no longer written; it is read
+// once and migrated into the keychain (then deleted) so existing installs stop
+// keeping the key in plaintext on disk.
 const API_KEY_KV: &str = "secret_v1::anthropic_api_key";
+const KEYRING_SERVICE: &str = "com.tahlk.app";
+const KEYRING_USER: &str = "anthropic_api_key";
+
+fn keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())
+}
+
+// Read the API key, keychain-first. If absent there but present in the legacy
+// SQLite location, migrate it into the keychain and delete the plaintext copy.
+fn read_api_key(state: &DbState) -> Option<String> {
+    if let Ok(entry) = keyring_entry() {
+        if let Ok(pw) = entry.get_password() {
+            if !pw.is_empty() {
+                return Some(pw);
+            }
+        }
+    }
+
+    // Legacy fallback + one-time migration off plaintext disk.
+    let legacy: Option<String> = {
+        let conn = state.0.lock();
+        conn.query_row("SELECT value FROM kv WHERE key = ?1", params![API_KEY_KV], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_str().map(str::to_string))
+    };
+    if let Some(key) = legacy {
+        if let Ok(entry) = keyring_entry() {
+            let _ = entry.set_password(&key);
+        }
+        let conn = state.0.lock();
+        let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
+        return Some(key);
+    }
+    None
+}
 
 // Reject any attempt to reach the secret namespace through the generic KV API.
 fn guard_key(key: &str) -> Result<(), String> {
@@ -94,36 +138,26 @@ fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(String, Value)>
 
 #[tauri::command]
 fn set_api_key(state: State<DbState>, key: String) -> Result<(), String> {
+    keyring_entry()?.set_password(&key).map_err(|e| e.to_string())?;
+    // Remove any legacy plaintext copy so the key no longer lives on disk.
     let conn = state.0.lock();
-    let json = serde_json::to_string(&Value::String(key)).map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO kv (key, value, updated_at) \
-         VALUES (?1, ?2, strftime('%s', 'now')) \
-         ON CONFLICT(key) DO UPDATE SET \
-             value      = excluded.value, \
-             updated_at = excluded.updated_at",
-        params![API_KEY_KV, json],
-    )
-    .map_err(|e| e.to_string())?;
+    let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
     Ok(())
 }
 
 #[tauri::command]
 fn clear_api_key(state: State<DbState>) -> Result<(), String> {
+    if let Ok(entry) = keyring_entry() {
+        let _ = entry.delete_credential(); // ignore "no entry"
+    }
     let conn = state.0.lock();
-    conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV])
-        .map_err(|e| e.to_string())?;
+    let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
     Ok(())
 }
 
 #[tauri::command]
 fn has_api_key(state: State<DbState>) -> Result<bool, String> {
-    let conn = state.0.lock();
-    let exists: Option<i64> = conn
-        .query_row("SELECT 1 FROM kv WHERE key = ?1", params![API_KEY_KV], |r| r.get(0))
-        .optional()
-        .map_err(|e| e.to_string())?;
-    Ok(exists.is_some())
+    Ok(read_api_key(&state).is_some())
 }
 
 #[tauri::command]
@@ -336,22 +370,10 @@ async fn generate_note(
     transcript: String,
     system_prompt: String,
 ) -> Result<String, String> {
-    // Read API key — drop the lock before awaiting.
-    let api_key: Option<String> = {
-        let conn = state.0.lock();
-        conn.query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![API_KEY_KV],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.as_str().map(str::to_string))
-    };
-
-    let key = api_key.ok_or("Anthropic API key not set. Open Settings to add your key.")?;
+    // Read the key from the OS keychain (locks drop inside read_api_key — no
+    // lock is held across the await below).
+    let key = read_api_key(&state)
+        .ok_or("Anthropic API key not set. Open Settings to add your key.")?;
 
     let client = Client::new();
     let body = json!({
@@ -521,4 +543,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    // Round-trips a credential through the real OS secure store to confirm the
+    // keyring backend works on this platform. Uses a dedicated service name and
+    // cleans up after itself, so it never touches a real saved key.
+    #[test]
+    fn keyring_roundtrip() {
+        let entry = keyring::Entry::new("com.tahlk.app.test", "roundtrip").unwrap();
+        entry.set_password("sk-ant-test-value").unwrap();
+        assert_eq!(entry.get_password().unwrap(), "sk-ant-test-value");
+        entry.delete_credential().unwrap();
+        assert!(entry.get_password().is_err(), "credential should be gone after delete");
+    }
 }

@@ -39,6 +39,10 @@ base64 = "0.22"
 # Stream utilities for chunked model download.
 futures-util = "0.3"
 
+# OS secure store for the Anthropic API key (Windows Credential Manager /
+# macOS Keychain / Linux Secret Service) — keeps the key off plaintext disk.
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
