@@ -93,19 +93,28 @@ jobs:
       - run: npm ci
       - run: npm run build:solo
 
-      # tauri-build validates externalBin existence for the current target
-      # triple on every cargo invocation (not only at bundle time). The real
-      # whisper.cpp sidecar is gitignored and placed manually for local
-      # builds; in CI we drop a zero-byte placeholder just so build.rs is
-      # satisfied. `cargo check` never executes it.
-      - name: Stub whisper sidecar for CI
+      # tauri-build validates externalBin AND resources paths on every
+      # cargo invocation (not only at bundle time), regardless of target.
+      # The real whisper.cpp sidecar, model, and Windows DLLs are gitignored
+      # and placed manually for local builds. In CI we drop zero-byte
+      # placeholders so build.rs is satisfied. `cargo check` never reads
+      # them; only the tauri bundler would, and bundling stays manual
+      # until the DLL-bundling decision lands.
+      - name: Stub whisper sidecar + resources for CI
         run: |
-          mkdir -p src-tauri/binaries
+          mkdir -p src-tauri/binaries src-tauri/resources
+          # externalBin: needs the target-triple suffix.
           touch src-tauri/binaries/whisper-cpp-x86_64-unknown-linux-gnu
           chmod +x src-tauri/binaries/whisper-cpp-x86_64-unknown-linux-gnu
+          # resources map from tauri.conf.json.
+          touch src-tauri/resources/ggml-base.en.bin
+          for dll in whisper.dll ggml.dll ggml-base.dll \
+                     ggml-cpu-alderlake.dll ggml-cpu-cannonlake.dll \
+                     ggml-cpu-cascadelake.dll ggml-cpu-haswell.dll \
+                     ggml-cpu-icelake.dll ggml-cpu-sandybridge.dll \
+                     ggml-cpu-skylakex.dll ggml-cpu-sse42.dll \
+                     ggml-cpu-x64.dll; do
+            touch "src-tauri/binaries/$dll"
+          done
 
-      # `cargo check` type-checks the desktop crate + all deps without
-      # invoking the tauri bundler, so the gitignored Windows DLL resources
-      # are not required. Full bundling / distribution stays a manual step
-      # until the DLL-bundling decision lands.
       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
