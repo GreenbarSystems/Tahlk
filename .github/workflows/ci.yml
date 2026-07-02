@@ -42,7 +42,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-audit
       # Scan both Rust lockfiles (desktop app + sync service).
-      - run: cargo audit --file src-tauri/Cargo.lock
+      #
+      # Ignored advisories on src-tauri:
+      #   RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — both are DoS bugs in
+      #   quick-xml < 0.41.0. quick-xml is pulled in transitively via
+      #   tauri -> plist and via wayland-scanner; neither has a released
+      #   version yet that bumps to ≥ 0.41.0, so we can't cargo update our
+      #   way out. Revisit on the next Tauri release and drop the ignores
+      #   once quick-xml ≥ 0.41.0 resolves through the tree.
+      - run: |
+          cargo audit --file src-tauri/Cargo.lock \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
       - run: cargo audit --file server/Cargo.lock
 
   server:
