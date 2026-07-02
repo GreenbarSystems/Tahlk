@@ -56,8 +56,46 @@ jobs:
           workspaces: server
       - run: cargo build --manifest-path server/Cargo.toml --locked
 
-  # NOTE: the desktop Tauri build (src-tauri) is intentionally NOT in CI yet.
-  # It needs Linux WebKitGTK system deps, the committed icon set, AND the
-  # whisper.cpp sidecar binary (gitignored, placed manually). Wiring it up is
-  # coupled to the unresolved DLL-bundling-for-distribution decision — tracked
-  # as a P1 item, not gold-plated here.
+  desktop:
+    name: desktop (src-tauri check)
+    # Pinned to 22.04 because libwebkit2gtk-4.1-dev is straightforward here;
+    # 24.04 needs extra steps for that package.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 Linux system deps (WebKitGTK 4.1, appindicator, rsvg).
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            file \
+            wget
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Build the web frontend so frontendDist (../dist-solo) exists for
+      # tauri-build validation.
+      - run: npm ci
+      - run: npm run build:solo
+
+      # `cargo check` type-checks the desktop crate + all deps without
+      # invoking the tauri bundler, so the gitignored whisper sidecar
+      # (externalBin) and Windows DLL resources are not required. Full
+      # bundling / distribution stays a manual step until the DLL-bundling
+      # decision lands.
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
