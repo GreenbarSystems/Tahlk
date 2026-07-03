@@ -4,13 +4,19 @@
 import { kvGet, kvSet, kvList } from '../core/storageBackend.js';
 import { genId } from '../utils/format.js';
 
-import psychEval     from './data/psych-eval.json'     assert { type: 'json' };
-import medMgmt      from './data/med-mgmt.json'       assert { type: 'json' };
-import crisisAssess from './data/crisis-assess.json'  assert { type: 'json' };
-import therapyProgress from './data/therapy-progress.json' assert { type: 'json' };
-import soapGeneric  from './data/soap-generic.json'   assert { type: 'json' };
+import psychEval        from './data/psych-eval.json'          assert { type: 'json' };
+import medMgmt         from './data/med-mgmt.json'            assert { type: 'json' };
+import crisisAssess    from './data/crisis-assess.json'       assert { type: 'json' };
+import therapyProgress from './data/therapy-progress.json'   assert { type: 'json' };
+import soapGeneric     from './data/soap-generic.json'        assert { type: 'json' };
+import podiatryEval    from './data/podiatry-eval.json'       assert { type: 'json' };
+import podiatryFollowup from './data/podiatry-followup.json'  assert { type: 'json' };
+import podiatryProc    from './data/podiatry-procedure.json'  assert { type: 'json' };
 
-const BUILT_IN = [psychEval, medMgmt, crisisAssess, therapyProgress, soapGeneric];
+const BUILT_IN = [
+  psychEval, medMgmt, crisisAssess, therapyProgress, soapGeneric,
+  podiatryEval, podiatryFollowup, podiatryProc,
+];
 const BUILT_IN_MAP = new Map(BUILT_IN.map(t => [t.id, t]));
 
 // Returns a template by id — built-in first, then custom.
