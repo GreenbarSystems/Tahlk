@@ -13,6 +13,7 @@ export const keys = {
   noteAudit:      id => `note_audit_v1::${id}`,
   customTemplate: id => `note_templates_v1::${id}`,
   telemetryEnabled: () => 'note_settings_v1::telemetry_enabled',
+  audioRetention:   () => 'note_settings_v1::audio_retention',
   diagEvents:       () => 'note_diag_v1::events', // not in EAGER_PREFIXES — loaded on demand
 };
 

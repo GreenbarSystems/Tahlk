@@ -7,7 +7,8 @@ import { on, emit } from '../core/eventBus.js';
 import { startRecording, stopRecording, isRecording, recordingDuration } from '../scribe/recorder.js';
 import { transcribe } from '../scribe/transcriber.js';
 import { generateNote } from '../scribe/noteGenerator.js';
-import { loadDraft, loadHistory, saveDraftGenerated, saveDraftEdited, signNote } from '../editor/noteEditor.js';
+import { loadDraft, loadHistory, saveDraftGenerated, saveDraftEdited, signNote, purgeAudio } from '../editor/noteEditor.js';
+import { getAudioRetention } from '../domain/retention.js';
 import { listTemplates } from '../templates/templateLibrary.js';
 import {
   toPlainText, toSimplePractice, toTherapyNotes,
@@ -122,6 +123,9 @@ export function renderEncounterPanel(encounter) {
                     </select>
                     <button class="btn btn-secondary btn-sm" id="btn-copy">Copy</button>
                     <button class="btn btn-secondary btn-sm" id="btn-save-file">Save File</button>
+                    ${encounter.audio_path
+                      ? '<button class="btn btn-ghost btn-danger btn-sm" id="btn-purge-audio" title="Delete the recorded audio from this device">Delete Audio</button>'
+                      : ''}
                   </div>
                 </div>
                 ${encounter.signed_hash ? `
@@ -359,8 +363,25 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     try {
       await signNote(currentEncounter.id, noteContent, currentTranscript, providerProfile.name || 'Provider');
       currentEncounter.status = 'signed';
+
+      // Best-effort audio purge if the provider opted into delete-on-sign.
+      // Runs AFTER the successful sign so a purge failure cannot roll back
+      // attestation; purgeAudio itself never throws.
+      if (getAudioRetention() === 'delete_on_sign' && currentEncounter.audio_path) {
+        const { removed, error } = await purgeAudio(currentEncounter.id, { reason: 'delete_on_sign' });
+        if (error) {
+          toast(`Note signed. Audio purge failed: ${error}`);
+        } else if (removed) {
+          toast('Note signed. Audio deleted from device.');
+        } else {
+          toast('Note signed. Audio was already gone.');
+        }
+        currentEncounter.audio_path = null;
+      } else {
+        toast('Note signed and attested.');
+      }
+
       onEncounterUpdated(currentEncounter);
-      toast('Note signed and attested.');
       // Re-render panel as signed
       document.getElementById('btn-sign')?.remove();
       document.getElementById('note-area').readOnly = true;
@@ -370,6 +391,23 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
       if (signBtn) { signBtn.disabled = false; signBtn.textContent = 'Sign & Attest Note'; }
       toast(e.message || 'Sign failed.');
     }
+  });
+
+  // Manual audio purge — available on signed encounters that still have a .wav.
+  document.getElementById('btn-purge-audio')?.addEventListener('click', async () => {
+    if (!confirm('Delete the recorded audio for this encounter? The signed note and transcript are unaffected. This cannot be undone.')) return;
+    const purgeBtn = document.getElementById('btn-purge-audio');
+    if (purgeBtn) purgeBtn.disabled = true;
+    const { removed, error } = await purgeAudio(currentEncounter.id, { reason: 'manual' });
+    if (error) {
+      toast(`Delete failed: ${error}`);
+      if (purgeBtn) purgeBtn.disabled = false;
+      return;
+    }
+    currentEncounter.audio_path = null;
+    onEncounterUpdated(currentEncounter);
+    purgeBtn?.remove();
+    toast(removed ? 'Audio deleted from device.' : 'Audio was already gone.');
   });
 
   // Export

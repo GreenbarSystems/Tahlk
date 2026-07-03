@@ -6,6 +6,7 @@ import { keys } from '../data/keys.js';
 import * as telemetry from '../core/telemetry.js';
 import { toast, escapeHtml } from '../utils/format.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
+import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
 
 const PROVIDER_KEY = keys.provider();
 
@@ -15,6 +16,7 @@ export async function renderSettings() {
   await kvEnsure([keys.diagEvents()]);          // load any persisted diagnostics for the count
   const diagOn = telemetry.isEnabled();
   const diagCount = telemetry.getEvents().length;
+  const retention = getAudioRetention();
 
   return `
     <div class="settings-page">
@@ -81,6 +83,22 @@ export async function renderSettings() {
           <button class="btn btn-secondary btn-sm" id="s-diag-export" ${diagCount === 0 ? 'disabled' : ''}>Export Log</button>
           <button class="btn btn-ghost btn-sm" id="s-diag-clear" ${diagCount === 0 ? 'disabled' : ''}>Clear Log</button>
         </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Audio Retention</h3>
+        <p class="settings-desc">
+          Choose what happens to session recordings after you sign a note. The signed note, transcript,
+          and audit trail are kept in both modes — only the raw .wav file is affected.
+        </p>
+        <label class="retention-option">
+          <input type="radio" name="s-audio-retention" value="keep" ${retention === 'keep' ? 'checked' : ''} />
+          <span><strong>Keep recordings</strong> — audio stays on this device so you can re-transcribe later. (Default.)</span>
+        </label>
+        <label class="retention-option">
+          <input type="radio" name="s-audio-retention" value="delete_on_sign" ${retention === 'delete_on_sign' ? 'checked' : ''} />
+          <span><strong>Delete on sign</strong> — immediately delete the .wav from disk after each sign-off. Minimizes at-rest audio.</span>
+        </label>
       </section>
 
       <section class="settings-section settings-section--danger">
@@ -158,6 +176,20 @@ export function wireSettings() {
     document.getElementById('s-diag-export')?.setAttribute('disabled', '');
     document.getElementById('s-diag-clear')?.setAttribute('disabled', '');
     toast('Diagnostics log cleared.');
+  });
+
+  document.querySelectorAll('input[name="s-audio-retention"]').forEach(el => {
+    el.addEventListener('change', e => {
+      if (!e.target.checked) return;
+      try {
+        setAudioRetention(e.target.value);
+        toast(e.target.value === 'delete_on_sign'
+          ? 'Audio will be deleted immediately after each sign-off.'
+          : 'Audio will be kept on this device.');
+      } catch (err) {
+        toast(`Could not update retention: ${err.message || err}`);
+      }
+    });
   });
 }
 

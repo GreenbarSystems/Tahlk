@@ -357,6 +357,11 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 .diag-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
 .diag-actions .settings-desc { margin: 0; }
 
+.retention-option { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; cursor: pointer; line-height: 1.4; }
+.retention-option input { width: 16px; height: 16px; margin-top: 2px; flex-shrink: 0; }
+.retention-option span { color: var(--gray-700); }
+.retention-option strong { color: inherit; }
+
 /* ── UX: focus, feedback, loading ────────────────────────────────────── */
 
 /* Inline spinner used inside buttons during async ops */

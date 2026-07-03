@@ -231,6 +231,24 @@ fn mark_encounter_signed(
     Ok(())
 }
 
+// Null out audio_path on a single encounter row without touching any other
+// column — mirrors mark_encounter_signed's scoping so an audio-purge cannot
+// clobber patient_alias or sign-off fields.
+#[tauri::command]
+fn clear_encounter_audio_path(state: State<DbState>, id: String) -> Result<(), String> {
+    let conn = state.0.lock();
+    let n = conn
+        .execute(
+            "UPDATE encounters SET audio_path = NULL WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("encounter {} not found", id));
+    }
+    Ok(())
+}
+
 // Fetch a single encounter by id — avoids pulling the whole list to open one row.
 #[tauri::command]
 fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, String> {
@@ -318,6 +336,26 @@ async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: S
     let path = audio_dir.join(format!("{}.wav", encounter_id));
     tokio::fs::write(&path, &data).await.map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+// Delete an encounter's saved audio file. Idempotent: returns Ok(false) if
+// the file was already gone, Ok(true) if a file was removed. safe_id() and
+// deriving the path from app_data_dir keeps this scoped to files this app
+// created — the WebView cannot pass an arbitrary path.
+#[tauri::command]
+async fn delete_session_audio(app: AppHandle, encounter_id: String) -> Result<bool, String> {
+    safe_id(&encounter_id)?;
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("audio")
+        .join(format!("{}.wav", encounter_id));
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 // ── Whisper transcription ──────────────────────────────────────────────────
@@ -575,6 +613,8 @@ pub fn run() {
             mark_encounter_signed,
             upsert_encounter,
             save_session_audio,
+            delete_session_audio,
+            clear_encounter_audio_path,
             model_downloaded,
             download_whisper_model,
             transcribe_audio,

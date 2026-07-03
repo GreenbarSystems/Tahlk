@@ -12,4 +12,9 @@ export const encountersRepo = {
   save:  encounter    => invoke('upsert_encounter', { encounter }),
   markSigned: (id, signedAt, signedHash) =>
     invoke('mark_encounter_signed', { id, signedAt, signedHash }),
+  // Delete the .wav file on disk. Idempotent: resolves to `true` if a file
+  // was removed, `false` if nothing was there. Does NOT touch the DB row —
+  // callers pair this with clearAudioPath so the row and disk stay in sync.
+  deleteAudio:     encounterId => invoke('delete_session_audio', { encounterId }),
+  clearAudioPath:  id          => invoke('clear_encounter_audio_path', { id }),
 };
