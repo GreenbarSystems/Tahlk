@@ -6,8 +6,6 @@ function soloDefaults() {
     recordAudit: () => {},
     currentProvider: () => null,
     currentUser: () => null,
-    firstRun: () => false,
-    hasGroupFeatures: () => false,
   };
 }
 
@@ -24,5 +22,3 @@ export function resetCapabilities() {
 export const recordAudit    = (...args) => _caps.recordAudit(...args);
 export const currentProvider = ()       => _caps.currentProvider();
 export const currentUser    = ()        => _caps.currentUser();
-export const firstRun       = ()        => _caps.firstRun();
-export const hasGroupFeatures = ()      => _caps.hasGroupFeatures();
