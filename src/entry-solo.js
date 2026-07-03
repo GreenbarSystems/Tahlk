@@ -10,7 +10,7 @@ import * as telemetry from './core/telemetry.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
 import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
-import { renderEncounterPanel, wireEncounterPanel } from './solo/encounterPanel.js';
+import { renderEncounterPanel, wireEncounterPanel } from './solo/encounter/index.js';
 import { renderSettings, wireSettings } from './solo/settingsModal.js';
 import { renderTemplatesView } from './solo/templatesView.js';
 
