@@ -14,10 +14,13 @@ import podiatryFollowup from './data/podiatry-followup.json'         assert { ty
 import podiatryProc    from './data/podiatry-procedure.json'         assert { type: 'json' };
 import podiatryDfe     from './data/podiatry-diabetic-foot-exam.json' assert { type: 'json' };
 import podiatryWound   from './data/podiatry-wound-care.json'        assert { type: 'json' };
+import podiatryRfc     from './data/podiatry-routine-foot-care.json'  assert { type: 'json' };
+import podiatryOrthotic from './data/podiatry-orthotic.json'         assert { type: 'json' };
 
 const BUILT_IN = [
   psychEval, medMgmt, crisisAssess, therapyProgress, soapGeneric,
   podiatryEval, podiatryFollowup, podiatryProc, podiatryDfe, podiatryWound,
+  podiatryRfc, podiatryOrthotic,
 ];
 const BUILT_IN_MAP = new Map(BUILT_IN.map(t => [t.id, t]));
 
