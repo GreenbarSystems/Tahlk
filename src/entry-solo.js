@@ -1,7 +1,7 @@
 // Solo entry point — bootstraps storage, checks onboarding, renders the shell.
 
 import { kvWarmup, kvGet, kvEnsure } from './core/storageBackend.js';
-import { encounterCacheKeys } from './data/keys.js';
+import { encounterCacheKeys, keys } from './data/keys.js';
 import { installCapabilities } from './core/capabilities.js';
 import { loadHistory } from './domain/historyChain.js';
 import { verifyHistoryChain } from './utils/contentHash.js';
@@ -33,9 +33,9 @@ async function disposePanel() {
 // after onboarding, before any re-warmup. (Group tier installs richer impls.)
 function installSoloCapabilities() {
   installCapabilities({
-    currentProvider: () => kvGet('note_provider_v1::profile') || null,
+    currentProvider: () => kvGet(keys.provider()) || null,
     currentUser: () => {
-      const p = kvGet('note_provider_v1::profile');
+      const p = kvGet(keys.provider());
       return p && p.name ? { name: p.name, id: 'solo' } : null;
     },
   });

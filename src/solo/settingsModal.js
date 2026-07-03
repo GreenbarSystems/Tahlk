@@ -5,6 +5,7 @@ import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
 import * as telemetry from '../core/telemetry.js';
 import { toast, escapeHtml } from '../utils/format.js';
+import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 
 const PROVIDER_KEY = keys.provider();
 
@@ -32,8 +33,8 @@ export async function renderSettings() {
         <div class="field-row">
           <label>Specialty</label>
           <select id="s-specialty">
-            ${['psychiatry','behavioral-health','psychology','podiatry','other'].map(v =>
-              `<option value="${v}" ${provider.specialty === v ? 'selected' : ''}>${specialtyLabel(v)}</option>`
+            ${PICKER_SPECIALTIES.map(s =>
+              `<option value="${s.value}" ${provider.specialty === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`
             ).join('')}
           </select>
         </div>
@@ -160,7 +161,3 @@ export function wireSettings() {
   });
 }
 
-function specialtyLabel(v) {
-  return { psychiatry: 'Psychiatry', 'behavioral-health': 'Behavioral Health / Therapy',
-           psychology: 'Psychology', podiatry: 'Podiatry', other: 'Other' }[v] || v;
-}

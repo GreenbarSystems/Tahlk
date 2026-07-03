@@ -3,7 +3,8 @@
 import { kvGet, kvSet } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
-import { toast } from '../utils/format.js';
+import { toast, escapeHtml } from '../utils/format.js';
+import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { LOGO_SVG_LG } from './logoSvg.js';
 
 const PROVIDER_KEY = keys.provider();
@@ -39,11 +40,9 @@ export function renderOnboarding() {
               <div class="field-row">
                 <label>Specialty</label>
                 <select id="ob-specialty">
-                  <option value="psychiatry">Psychiatry</option>
-                  <option value="behavioral-health">Behavioral Health / Therapy</option>
-                  <option value="psychology">Psychology</option>
-                  <option value="podiatry">Podiatry</option>
-                  <option value="other">Other</option>
+                  ${PICKER_SPECIALTIES.map(s =>
+                    `<option value="${s.value}">${escapeHtml(s.label)}</option>`
+                  ).join('')}
                 </select>
               </div>
             </div>

@@ -141,7 +141,7 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   let currentEncounter = { ...encounter };
   let currentTranscript = kvGet(TRANSCRIPT_KEY(encounter.id)) || '';
 
-  const providerProfile = kvGet('note_provider_v1::profile') || {};
+  const providerProfile = kvGet(keys.provider()) || {};
 
   // Collect event-bus subscriptions so they can be torn down when the panel
   // closes. Without this, every panel open leaks handlers that fire against

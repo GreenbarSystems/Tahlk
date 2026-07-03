@@ -2,6 +2,7 @@
 
 import { listTemplates } from '../templates/templateLibrary.js';
 import { escapeHtml } from '../utils/format.js';
+import { specialtyLabel } from '../domain/specialties.js';
 
 export function renderTemplatesView() {
   const templates = listTemplates();
@@ -29,8 +30,3 @@ function renderTemplateCard(t) {
   `;
 }
 
-function specialtyLabel(v) {
-  return { psychiatry: 'Psychiatry', 'behavioral-health': 'Behavioral Health',
-           psychology: 'Psychology', podiatry: 'Podiatry', general: 'General',
-           other: 'Other' }[v] || v;
-}
