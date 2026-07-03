@@ -47,19 +47,7 @@
     "shortDescription": "Privacy-first AI scribe for behavioral health",
     "externalBin": ["binaries/whisper-cpp"],
     "resources": {
-      "resources/ggml-base.en.bin": "ggml-base.en.bin",
-      "binaries/whisper.dll": "whisper.dll",
-      "binaries/ggml.dll": "ggml.dll",
-      "binaries/ggml-base.dll": "ggml-base.dll",
-      "binaries/ggml-cpu-alderlake.dll": "ggml-cpu-alderlake.dll",
-      "binaries/ggml-cpu-cannonlake.dll": "ggml-cpu-cannonlake.dll",
-      "binaries/ggml-cpu-cascadelake.dll": "ggml-cpu-cascadelake.dll",
-      "binaries/ggml-cpu-haswell.dll": "ggml-cpu-haswell.dll",
-      "binaries/ggml-cpu-icelake.dll": "ggml-cpu-icelake.dll",
-      "binaries/ggml-cpu-sandybridge.dll": "ggml-cpu-sandybridge.dll",
-      "binaries/ggml-cpu-skylakex.dll": "ggml-cpu-skylakex.dll",
-      "binaries/ggml-cpu-sse42.dll": "ggml-cpu-sse42.dll",
-      "binaries/ggml-cpu-x64.dll": "ggml-cpu-x64.dll"
+      "resources/ggml-base.en.bin": "ggml-base.en.bin"
     },
     "windows": {
       "digestAlgorithm": "sha256",

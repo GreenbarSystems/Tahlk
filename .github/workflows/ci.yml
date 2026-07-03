@@ -105,13 +105,15 @@ jobs:
       - run: npm run build:solo
 
       # tauri-build validates externalBin AND resources paths on every
-      # cargo invocation (not only at bundle time), regardless of target.
-      # The real whisper.cpp sidecar, model, and Windows DLLs are gitignored
-      # and placed manually for local builds. In CI we drop zero-byte
-      # placeholders so build.rs is satisfied. `cargo check` never reads
-      # them; only the tauri bundler would, and bundling stays manual
-      # until the DLL-bundling decision lands.
-      - name: Stub whisper sidecar + resources for CI
+      # cargo invocation (not only at bundle time). The real whisper.cpp
+      # sidecar and model are gitignored and placed manually for local
+      # builds; in CI we drop zero-byte placeholders so build.rs is
+      # satisfied. `cargo check` never reads them; only the tauri bundler
+      # would, and bundling stays manual.
+      #
+      # Windows-only DLLs live in tauri.windows.conf.json and are merged
+      # only when targeting Windows, so no stubs are needed on Linux CI.
+      - name: Stub whisper sidecar + model for CI
         run: |
           mkdir -p src-tauri/binaries src-tauri/resources
           # externalBin: needs the target-triple suffix.
@@ -119,13 +121,5 @@ jobs:
           chmod +x src-tauri/binaries/whisper-cpp-x86_64-unknown-linux-gnu
           # resources map from tauri.conf.json.
           touch src-tauri/resources/ggml-base.en.bin
-          for dll in whisper.dll ggml.dll ggml-base.dll \
-                     ggml-cpu-alderlake.dll ggml-cpu-cannonlake.dll \
-                     ggml-cpu-cascadelake.dll ggml-cpu-haswell.dll \
-                     ggml-cpu-icelake.dll ggml-cpu-sandybridge.dll \
-                     ggml-cpu-skylakex.dll ggml-cpu-sse42.dll \
-                     ggml-cpu-x64.dll; do
-            touch "src-tauri/binaries/$dll"
-          done
 
       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
