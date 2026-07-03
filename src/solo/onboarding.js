@@ -42,6 +42,7 @@ export function renderOnboarding() {
                   <option value="psychiatry">Psychiatry</option>
                   <option value="behavioral-health">Behavioral Health / Therapy</option>
                   <option value="psychology">Psychology</option>
+                  <option value="podiatry">Podiatry</option>
                   <option value="other">Other</option>
                 </select>
               </div>

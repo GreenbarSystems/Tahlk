@@ -9,13 +9,15 @@ import medMgmt         from './data/med-mgmt.json'            assert { type: 'js
 import crisisAssess    from './data/crisis-assess.json'       assert { type: 'json' };
 import therapyProgress from './data/therapy-progress.json'   assert { type: 'json' };
 import soapGeneric     from './data/soap-generic.json'        assert { type: 'json' };
-import podiatryEval    from './data/podiatry-eval.json'       assert { type: 'json' };
-import podiatryFollowup from './data/podiatry-followup.json'  assert { type: 'json' };
-import podiatryProc    from './data/podiatry-procedure.json'  assert { type: 'json' };
+import podiatryEval    from './data/podiatry-eval.json'              assert { type: 'json' };
+import podiatryFollowup from './data/podiatry-followup.json'         assert { type: 'json' };
+import podiatryProc    from './data/podiatry-procedure.json'         assert { type: 'json' };
+import podiatryDfe     from './data/podiatry-diabetic-foot-exam.json' assert { type: 'json' };
+import podiatryWound   from './data/podiatry-wound-care.json'        assert { type: 'json' };
 
 const BUILT_IN = [
   psychEval, medMgmt, crisisAssess, therapyProgress, soapGeneric,
-  podiatryEval, podiatryFollowup, podiatryProc,
+  podiatryEval, podiatryFollowup, podiatryProc, podiatryDfe, podiatryWound,
 ];
 const BUILT_IN_MAP = new Map(BUILT_IN.map(t => [t.id, t]));
 

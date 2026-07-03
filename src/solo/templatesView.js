@@ -31,5 +31,6 @@ function renderTemplateCard(t) {
 
 function specialtyLabel(v) {
   return { psychiatry: 'Psychiatry', 'behavioral-health': 'Behavioral Health',
-           psychology: 'Psychology', general: 'General', other: 'Other' }[v] || v;
+           psychology: 'Psychology', podiatry: 'Podiatry', general: 'General',
+           other: 'Other' }[v] || v;
 }

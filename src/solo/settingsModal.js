@@ -32,7 +32,7 @@ export async function renderSettings() {
         <div class="field-row">
           <label>Specialty</label>
           <select id="s-specialty">
-            ${['psychiatry','behavioral-health','psychology','other'].map(v =>
+            ${['psychiatry','behavioral-health','psychology','podiatry','other'].map(v =>
               `<option value="${v}" ${provider.specialty === v ? 'selected' : ''}>${specialtyLabel(v)}</option>`
             ).join('')}
           </select>
@@ -162,5 +162,5 @@ export function wireSettings() {
 
 function specialtyLabel(v) {
   return { psychiatry: 'Psychiatry', 'behavioral-health': 'Behavioral Health / Therapy',
-           psychology: 'Psychology', other: 'Other' }[v] || v;
+           psychology: 'Psychology', podiatry: 'Podiatry', other: 'Other' }[v] || v;
 }
