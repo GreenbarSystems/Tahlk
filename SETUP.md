@@ -224,6 +224,45 @@ the first launch after upgrading will:
 If step 5 crashes, the next launch will find both files: it refuses to
 overwrite an existing encrypted DB and requires manual intervention.
 
+### Backup hygiene after the upgrade (audit L3)
+
+The migration deletes the plaintext DB on the *local disk*, but any
+backup taken **before** the upgrade retains a full plaintext copy —
+including the Anthropic API key that the pre-encryption build stored
+in the `kv` table. Backup surfaces to check:
+
+- **macOS Time Machine** — `~/Library/Application Support/tahlk/`
+  snapshots contain plaintext `tahlk.db`. Old hourly snapshots roll off
+  after 24 h, daily after a month; a weekly may live for the life of
+  the backup disk.
+- **Windows File History / OneDrive Known-Folder-Move** — `%APPDATA%\tahlk\`
+  copies live in `FileHistory\` and in the OneDrive cloud tier
+  respectively.
+- **iCloud Drive / Dropbox / Google Drive** — if a user ever pointed
+  their app-data dir at a synced folder (unsupported but observed),
+  the sync provider has a durable copy.
+- **Homebrew / Time Capsule / NAS snapshots** — same shape as Time
+  Machine.
+
+**Required user action after the SQLCipher upgrade:**
+
+1. **Rotate the Anthropic API key.** Any backup taken before the
+   upgrade still contains the key in plaintext. Generate a new key in
+   the Anthropic console, paste it into Settings → API key, then
+   revoke the old key. This is the only step that meaningfully
+   forecloses the exposure.
+2. **Prune old plaintext backups** if the backup medium supports it
+   (Time Machine: `sudo tmutil delete <snapshot>`; OneDrive: version
+   history → "Delete all versions"; iCloud: not user-controllable —
+   accept the residual risk or migrate off).
+3. **Verify FDE** on the primary device and on any device that has
+   ever held a backup. FDE is what covers the residual plaintext
+   fragments that wear-leveling and snapshot immutability leave behind.
+
+The app cannot do any of this automatically — backup providers do not
+expose destructive APIs to third-party apps, and a plaintext file
+under wear-leveled flash is not reliably erasable in software.
+
 ### What is NOT yet encrypted
 
 - **Audio WAV files** in the `sessions/` subdirectory of app-data. These
