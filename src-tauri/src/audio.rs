@@ -64,6 +64,11 @@ pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, bas
     tokio::fs::create_dir_all(&audio_dir).await.map_err(AppError::storage_from)?;
     let path = audio_dir.join(format!("{}.wav", encounter_id));
     tokio::fs::write(&path, &data).await.map_err(AppError::storage_from)?;
+    // M1: `tokio::fs::write` (like `File::create`) leaves the file at the
+    // process umask default — typically 0644 on Unix, which lets any other
+    // local user read raw PHI audio. Clamp to owner-only 0600. No-op on
+    // Windows (see perms.rs).
+    crate::perms::chmod_0600_unix(&path);
     Ok(path.to_string_lossy().into_owned())
 }
 
