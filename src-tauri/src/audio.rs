@@ -11,6 +11,20 @@ use tauri::{AppHandle, Manager};
 
 use crate::errors::AppError;
 
+/// Hard ceiling on decoded audio bytes accepted by `save_session_audio`.
+/// 512 MiB ≈ 6 hours of 16 kHz mono PCM — comfortably above any real clinical
+/// session, comfortably below the point where a single write would evict most
+/// laptops from their page cache. The base64-encoded string is capped
+/// separately (see [`MAX_BASE64_LEN`]) so an attacker can't force the decoder
+/// to allocate a giant intermediate buffer before the size check runs.
+pub(crate) const MAX_AUDIO_BYTES: usize = 512 * 1024 * 1024;
+
+/// Cap on the base64 STRING length. Base64 expands 3 raw bytes into 4 ASCII
+/// bytes plus up to two `=` padding chars, so the encoded form is at most
+/// `ceil(MAX_AUDIO_BYTES / 3) * 4`. A small slack of `+ 8` covers padding and
+/// avoids off-by-one rejection of borderline-legal inputs.
+pub(crate) const MAX_BASE64_LEN: usize = (MAX_AUDIO_BYTES / 3) * 4 + 8;
+
 pub(crate) fn safe_id(id: &str) -> Result<(), AppError> {
     let ok = !id.is_empty()
         && id.len() <= 128
@@ -25,11 +39,23 @@ pub(crate) fn safe_id(id: &str) -> Result<(), AppError> {
 #[tauri::command]
 pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, AppError> {
     safe_id(&encounter_id)?;
+    // H1 defense: reject over-long base64 BEFORE handing it to the decoder.
+    // The decoder would otherwise allocate a Vec<u8> proportional to the
+    // encoded length — a multi-GB string from a compromised WebView could OOM
+    // the app or fill the disk. We check the encoded form first (cheap: string
+    // length) and then verify the decoded length as belt-and-braces in case a
+    // future base64 config accepts input we didn't anticipate.
+    if base64_data.len() > MAX_BASE64_LEN {
+        return Err(AppError::invalid("audio payload too large"));
+    }
     // Bad base64 from JS is a frontend-invariant violation, so surface it as
     // InvalidInput rather than an opaque internal error.
     let data = BASE64
         .decode(base64_data.as_bytes())
         .map_err(|e| AppError::invalid(format!("base64 decode: {}", e)))?;
+    if data.len() > MAX_AUDIO_BYTES {
+        return Err(AppError::invalid("audio payload too large"));
+    }
     let audio_dir = app
         .path()
         .app_data_dir()
@@ -63,6 +89,8 @@ pub(crate) async fn delete_session_audio(app: AppHandle, encounter_id: String) -
 
 #[cfg(test)]
 mod tests {
+    use super::{MAX_AUDIO_BYTES, MAX_BASE64_LEN};
+
     #[test]
     fn safe_id_accepts_real_ids_rejects_traversal() {
         assert!(super::safe_id("enc-l9k3a-x7q2").is_ok());
@@ -73,5 +101,18 @@ mod tests {
         assert!(super::safe_id("a\\b").is_err());
         assert!(super::safe_id("C:evil").is_err());
         assert!(super::safe_id("").is_err());
+    }
+
+    #[test]
+    fn size_constants_stay_in_sync() {
+        // If MAX_AUDIO_BYTES is bumped without bumping MAX_BASE64_LEN, the
+        // string-length check would start rejecting payloads that the byte
+        // check would happily accept — confusing UX for anyone hitting the
+        // ceiling. Pin the relationship in tests so a future edit that
+        // touches one but not the other trips CI.
+        assert!(MAX_BASE64_LEN >= (MAX_AUDIO_BYTES / 3) * 4);
+        // Some slack for padding is fine, but not runaway slack — the whole
+        // point is to reject before decode allocates.
+        assert!(MAX_BASE64_LEN <= (MAX_AUDIO_BYTES / 3) * 4 + 32);
     }
 }

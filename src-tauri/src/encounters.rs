@@ -5,7 +5,7 @@
 //! that the caller didn't intend to touch — critical for the attestation
 //! moment, and for keeping audio retention orthogonal to note content.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::State;
 
@@ -13,10 +13,92 @@ use crate::db::{encounter_row_to_json, ENCOUNTER_COLS};
 use crate::errors::AppError;
 use crate::DbState;
 
+/// Reject an upsert that would mutate a signed encounter in any way other
+/// than a `patient_alias` typo fix.
+///
+/// The write flow is: JS calls `upsert_encounter` — without this guard, a
+/// compromised WebView (or a bad refactor) could send `{ id, status: 'draft',
+/// signed_at: null, signed_hash: null }` and demote a signed row back to a
+/// draft, then re-sign it against different content. That would silently
+/// break the tamper-evident hash chain, because the chain only surfaces on
+/// audit — nobody watches it in real time.
+///
+/// Rules once `status='signed'`:
+///   * `status`, `signed_at`, `signed_hash`, `created_at`, `provider_id`,
+///     `encounter_date`, `audio_path` all become immutable.
+///   * `patient_alias` MAY change (providers correct typos post-sign).
+///
+/// The check runs inside the same transaction as the write so a concurrent
+/// legitimate sign-off between check and write cannot open a race window.
+pub(crate) fn enforce_signed_immutability(
+    conn: &Connection,
+    incoming: &Value,
+) -> Result<(), AppError> {
+    let id = incoming["id"].as_str().unwrap_or("");
+    if id.is_empty() {
+        return Ok(()); // upsert will fail on its own; nothing to guard.
+    }
+    let existing: Option<(String, Option<String>, Option<String>, String, String, String, Option<String>)> = conn
+        .query_row(
+            "SELECT status, signed_at, signed_hash, created_at, provider_id, encounter_date, audio_path \
+             FROM encounters WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .optional()?;
+    let Some((status, signed_at, signed_hash, created_at, provider_id, encounter_date, audio_path)) = existing else {
+        return Ok(()); // brand-new row; nothing to compare against.
+    };
+    if status != "signed" {
+        return Ok(()); // draft rows remain fully mutable by design.
+    }
+
+    // Signed row — verify the incoming payload leaves the frozen fields
+    // unchanged. `as_str()` returns None for null/missing; comparing against
+    // `Option<&str>` handles both shapes uniformly.
+    let want_status       = incoming["status"].as_str();
+    let want_signed_at    = incoming["signed_at"].as_str();
+    let want_signed_hash  = incoming["signed_hash"].as_str();
+    let want_created_at   = incoming["created_at"].as_str();
+    let want_provider_id  = incoming["provider_id"].as_str();
+    let want_enc_date     = incoming["encounter_date"].as_str();
+    let want_audio_path   = incoming["audio_path"].as_str();
+
+    let unchanged = want_status == Some(status.as_str())
+        && want_signed_at.map(str::to_string) == signed_at
+        && want_signed_hash.map(str::to_string) == signed_hash
+        && want_created_at == Some(created_at.as_str())
+        && want_provider_id == Some(provider_id.as_str())
+        && want_enc_date == Some(encounter_date.as_str())
+        && want_audio_path.map(str::to_string) == audio_path;
+
+    if !unchanged {
+        return Err(AppError::invalid(
+            "cannot modify a signed encounter (only patient_alias may change)",
+        ));
+    }
+    Ok(())
+}
+
+/// Clamp a caller-supplied `LIMIT` into a sane range.
+///
+/// Without a ceiling, `list_encounters(Some(i64::MAX))` would deserialize
+/// every row into a `Vec<Value>` in memory — an easy DoS from any JS-layer
+/// foothold (or a UI bug), and a footgun as the table grows. 1000 is the same
+/// ceiling the sync server uses (`api.rs::LIST_WINDOW`), keeping desktop
+/// paging parity with the server.
+///
+/// The floor of 1 turns pathological inputs (0, negatives) into a "give me
+/// one row" query instead of a silent empty result — easier for callers to
+/// notice and fix.
+pub(crate) fn clamp_list_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(50).clamp(1, 1000)
+}
+
 #[tauri::command]
 pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, AppError> {
     let conn = state.0.lock();
-    let n = limit.unwrap_or(50);
+    let n = clamp_list_limit(limit);
     let sql = format!(
         "SELECT {ENCOUNTER_COLS} FROM encounters ORDER BY created_at DESC LIMIT ?1"
     );
@@ -97,8 +179,13 @@ pub(crate) fn encounter_stats(state: State<DbState>, today: String) -> Result<Va
 
 #[tauri::command]
 pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), AppError> {
-    let conn = state.0.lock();
-    conn.execute(
+    let mut conn = state.0.lock();
+    // Wrap the check + write in a single transaction so a legitimate
+    // concurrent sign-off between check and write cannot squeeze in and
+    // convert this call from "upsert draft" into "demote signed".
+    let tx = conn.transaction()?;
+    enforce_signed_immutability(&tx, &encounter)?;
+    tx.execute(
         "INSERT INTO encounters (id, provider_id, encounter_date, patient_alias, status, \
                                  audio_path, created_at, signed_at, signed_hash) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
@@ -120,5 +207,186 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
             encounter["signed_hash"].as_str(),
         ],
     )?;
+    tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit-level coverage for the signed-row immutability guard. We drive
+    //! `enforce_signed_immutability` directly against a raw in-memory
+    //! SQLite so the tests don't need a Tauri State harness.
+
+    use super::*;
+    use rusqlite::Connection;
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE encounters (
+                id             TEXT PRIMARY KEY,
+                provider_id    TEXT NOT NULL,
+                encounter_date TEXT NOT NULL,
+                patient_alias  TEXT,
+                status         TEXT NOT NULL DEFAULT 'draft',
+                audio_path     TEXT,
+                created_at     TEXT NOT NULL,
+                signed_at      TEXT,
+                signed_hash    TEXT
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_signed(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO encounters (id, provider_id, encounter_date, patient_alias, status, \
+                                     audio_path, created_at, signed_at, signed_hash) \
+             VALUES ('enc-1','prov-1','2026-07-04','J.D.','signed', \
+                     '/tmp/audio.wav','2026-07-04T10:00:00Z', \
+                     '2026-07-04T10:30:00Z','deadbeef')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn draft_row_is_freely_mutable() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO encounters (id, provider_id, encounter_date, status, created_at) \
+             VALUES ('enc-1','prov-1','2026-07-04','draft','2026-07-04T10:00:00Z')",
+            [],
+        ).unwrap();
+        let incoming = json!({
+            "id": "enc-1",
+            "provider_id": "prov-1",
+            "encounter_date": "2026-07-04",
+            "status": "draft",
+            "created_at": "2026-07-04T10:00:00Z",
+            "patient_alias": "changed",
+            "audio_path": "/new/path.wav",
+            "signed_at": null,
+            "signed_hash": null
+        });
+        assert!(enforce_signed_immutability(&conn, &incoming).is_ok());
+    }
+
+    #[test]
+    fn brand_new_row_is_allowed() {
+        let conn = fresh_db();
+        let incoming = json!({
+            "id": "enc-new",
+            "provider_id": "prov-1",
+            "encounter_date": "2026-07-04",
+            "status": "draft",
+            "created_at": "2026-07-04T10:00:00Z"
+        });
+        assert!(enforce_signed_immutability(&conn, &incoming).is_ok());
+    }
+
+    #[test]
+    fn signed_row_rejects_status_demotion() {
+        let conn = fresh_db();
+        insert_signed(&conn);
+        let incoming = json!({
+            "id": "enc-1",
+            "provider_id": "prov-1",
+            "encounter_date": "2026-07-04",
+            "status": "draft",              // <-- illegal demotion
+            "audio_path": "/tmp/audio.wav",
+            "created_at": "2026-07-04T10:00:00Z",
+            "signed_at": null,
+            "signed_hash": null
+        });
+        let err = enforce_signed_immutability(&conn, &incoming).unwrap_err();
+        // The wire code stays `invalid_input` (per AppError::invalid) so JS
+        // can toast the message unchanged. Assert the variant directly since
+        // `code()` is private to the errors module.
+        assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn signed_row_rejects_hash_swap() {
+        let conn = fresh_db();
+        insert_signed(&conn);
+        let incoming = json!({
+            "id": "enc-1",
+            "provider_id": "prov-1",
+            "encounter_date": "2026-07-04",
+            "status": "signed",
+            "audio_path": "/tmp/audio.wav",
+            "created_at": "2026-07-04T10:00:00Z",
+            "signed_at": "2026-07-04T10:30:00Z",
+            "signed_hash": "cafef00d"       // <-- swapped hash
+        });
+        assert!(enforce_signed_immutability(&conn, &incoming).is_err());
+    }
+
+    #[test]
+    fn signed_row_allows_patient_alias_typo_fix() {
+        let conn = fresh_db();
+        insert_signed(&conn);
+        let incoming = json!({
+            "id": "enc-1",
+            "provider_id": "prov-1",
+            "encounter_date": "2026-07-04",
+            "status": "signed",
+            "patient_alias": "J.D. (fixed typo)",
+            "audio_path": "/tmp/audio.wav",
+            "created_at": "2026-07-04T10:00:00Z",
+            "signed_at": "2026-07-04T10:30:00Z",
+            "signed_hash": "deadbeef"
+        });
+        assert!(enforce_signed_immutability(&conn, &incoming).is_ok());
+    }
+
+    #[test]
+    fn clamp_list_limit_defaults_to_50() {
+        assert_eq!(clamp_list_limit(None), 50);
+    }
+
+    #[test]
+    fn clamp_list_limit_enforces_ceiling() {
+        assert_eq!(clamp_list_limit(Some(i64::MAX)), 1000);
+        assert_eq!(clamp_list_limit(Some(10_000)), 1000);
+        assert_eq!(clamp_list_limit(Some(1000)), 1000); // boundary stays
+    }
+
+    #[test]
+    fn clamp_list_limit_enforces_floor() {
+        // 0 and negatives are pathological — bump to 1 so the caller gets
+        // *something* back and notices the bug, rather than a silent empty.
+        assert_eq!(clamp_list_limit(Some(0)), 1);
+        assert_eq!(clamp_list_limit(Some(-5)), 1);
+        assert_eq!(clamp_list_limit(Some(i64::MIN)), 1);
+    }
+
+    #[test]
+    fn clamp_list_limit_passes_through_reasonable_values() {
+        assert_eq!(clamp_list_limit(Some(1)), 1);
+        assert_eq!(clamp_list_limit(Some(25)), 25);
+        assert_eq!(clamp_list_limit(Some(100)), 100);
+    }
+
+    #[test]
+    fn signed_row_rejects_audio_path_change() {
+        // audio_path is intentionally frozen too — a post-sign audio_path
+        // swap could point provenance at a different .wav than the one
+        // that was transcribed to produce the signed note.
+        let conn = fresh_db();
+        insert_signed(&conn);
+        let incoming = json!({
+            "id": "enc-1",
+            "provider_id": "prov-1",
+            "encounter_date": "2026-07-04",
+            "status": "signed",
+            "audio_path": "/malicious/other.wav",
+            "created_at": "2026-07-04T10:00:00Z",
+            "signed_at": "2026-07-04T10:30:00Z",
+            "signed_hash": "deadbeef"
+        });
+        assert!(enforce_signed_immutability(&conn, &incoming).is_err());
+    }
 }
