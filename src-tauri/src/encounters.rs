@@ -80,10 +80,25 @@ pub(crate) fn enforce_signed_immutability(
     Ok(())
 }
 
+/// Clamp a caller-supplied `LIMIT` into a sane range.
+///
+/// Without a ceiling, `list_encounters(Some(i64::MAX))` would deserialize
+/// every row into a `Vec<Value>` in memory — an easy DoS from any JS-layer
+/// foothold (or a UI bug), and a footgun as the table grows. 1000 is the same
+/// ceiling the sync server uses (`api.rs::LIST_WINDOW`), keeping desktop
+/// paging parity with the server.
+///
+/// The floor of 1 turns pathological inputs (0, negatives) into a "give me
+/// one row" query instead of a silent empty result — easier for callers to
+/// notice and fix.
+pub(crate) fn clamp_list_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(50).clamp(1, 1000)
+}
+
 #[tauri::command]
 pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, AppError> {
     let conn = state.0.lock();
-    let n = limit.unwrap_or(50);
+    let n = clamp_list_limit(limit);
     let sql = format!(
         "SELECT {ENCOUNTER_COLS} FROM encounters ORDER BY created_at DESC LIMIT ?1"
     );
@@ -325,6 +340,34 @@ mod tests {
             "signed_hash": "deadbeef"
         });
         assert!(enforce_signed_immutability(&conn, &incoming).is_ok());
+    }
+
+    #[test]
+    fn clamp_list_limit_defaults_to_50() {
+        assert_eq!(clamp_list_limit(None), 50);
+    }
+
+    #[test]
+    fn clamp_list_limit_enforces_ceiling() {
+        assert_eq!(clamp_list_limit(Some(i64::MAX)), 1000);
+        assert_eq!(clamp_list_limit(Some(10_000)), 1000);
+        assert_eq!(clamp_list_limit(Some(1000)), 1000); // boundary stays
+    }
+
+    #[test]
+    fn clamp_list_limit_enforces_floor() {
+        // 0 and negatives are pathological — bump to 1 so the caller gets
+        // *something* back and notices the bug, rather than a silent empty.
+        assert_eq!(clamp_list_limit(Some(0)), 1);
+        assert_eq!(clamp_list_limit(Some(-5)), 1);
+        assert_eq!(clamp_list_limit(Some(i64::MIN)), 1);
+    }
+
+    #[test]
+    fn clamp_list_limit_passes_through_reasonable_values() {
+        assert_eq!(clamp_list_limit(Some(1)), 1);
+        assert_eq!(clamp_list_limit(Some(25)), 25);
+        assert_eq!(clamp_list_limit(Some(100)), 100);
     }
 
     #[test]
