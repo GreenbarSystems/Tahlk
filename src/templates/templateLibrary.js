@@ -4,18 +4,18 @@
 import { kvGet, kvSet, kvList } from '../core/storageBackend.js';
 import { genId } from '../utils/format.js';
 
-import psychEval        from './data/psych-eval.json'          assert { type: 'json' };
-import medMgmt         from './data/med-mgmt.json'            assert { type: 'json' };
-import crisisAssess    from './data/crisis-assess.json'       assert { type: 'json' };
-import therapyProgress from './data/therapy-progress.json'   assert { type: 'json' };
-import soapGeneric     from './data/soap-generic.json'        assert { type: 'json' };
-import podiatryEval    from './data/podiatry-eval.json'              assert { type: 'json' };
-import podiatryFollowup from './data/podiatry-followup.json'         assert { type: 'json' };
-import podiatryProc    from './data/podiatry-procedure.json'         assert { type: 'json' };
-import podiatryDfe     from './data/podiatry-diabetic-foot-exam.json' assert { type: 'json' };
-import podiatryWound   from './data/podiatry-wound-care.json'        assert { type: 'json' };
-import podiatryRfc     from './data/podiatry-routine-foot-care.json'  assert { type: 'json' };
-import podiatryOrthotic from './data/podiatry-orthotic.json'         assert { type: 'json' };
+import psychEval        from './data/psych-eval.json'          with { type: 'json' };
+import medMgmt         from './data/med-mgmt.json'            with { type: 'json' };
+import crisisAssess    from './data/crisis-assess.json'       with { type: 'json' };
+import therapyProgress from './data/therapy-progress.json'   with { type: 'json' };
+import soapGeneric     from './data/soap-generic.json'        with { type: 'json' };
+import podiatryEval    from './data/podiatry-eval.json'              with { type: 'json' };
+import podiatryFollowup from './data/podiatry-followup.json'         with { type: 'json' };
+import podiatryProc    from './data/podiatry-procedure.json'         with { type: 'json' };
+import podiatryDfe     from './data/podiatry-diabetic-foot-exam.json' with { type: 'json' };
+import podiatryWound   from './data/podiatry-wound-care.json'        with { type: 'json' };
+import podiatryRfc     from './data/podiatry-routine-foot-care.json'  with { type: 'json' };
+import podiatryOrthotic from './data/podiatry-orthotic.json'         with { type: 'json' };
 
 const BUILT_IN = [
   psychEval, medMgmt, crisisAssess, therapyProgress, soapGeneric,

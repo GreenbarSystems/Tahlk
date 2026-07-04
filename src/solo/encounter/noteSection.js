@@ -100,10 +100,14 @@ export function wireNoteSection(ctx) {
         noteArea.classList.remove('generating');
       }
       clearStatus();
-      // If Anthropic isn't configured, point the user at the fix.
+      // If Anthropic isn't configured OR the BAA hasn't been affirmed, point
+      // the user at Settings. These two cases share the same fix (“open
+      // Settings”) but are distinguished so the toast can name the reason.
       const err = fromInvoke(e);
       if (err.code === 'no_api_key') {
         toast('No Anthropic API key. Open Settings to add one.');
+      } else if (err.code === 'baa_required') {
+        toast('Confirm your Anthropic BAA in Settings before generating notes.');
       } else {
         toast(userMessage(err, 'Note generation failed.'));
       }

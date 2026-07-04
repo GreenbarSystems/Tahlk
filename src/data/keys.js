@@ -17,6 +17,11 @@ export const keys = {
   customTemplate: id => `note_templates_v1::${id}`,
   telemetryEnabled: () => 'note_settings_v1::telemetry_enabled',
   audioRetention:   () => 'note_settings_v1::audio_retention',
+  // BAA acknowledgment for the Anthropic upstream. The Rust side (baa.rs)
+  // owns the canonical read/write path via invoke('baa_ack_*'); this key is
+  // named here purely for observability — nothing in JS should read the row
+  // directly since the gate lives in Rust before any network I/O.
+  baaAck:           () => 'note_settings_v1::baa_ack',
   diagEvents:       () => 'note_diag_v1::events', // not in EAGER_PREFIXES — loaded on demand
 };
 

@@ -2,6 +2,7 @@
 
 import { kvGet, kvSet, kvEnsure } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
+import { baaRepo } from '../data/baa.js';
 import { keys } from '../data/keys.js';
 import * as telemetry from '../core/telemetry.js';
 import { toast, escapeHtml } from '../utils/format.js';
@@ -18,6 +19,12 @@ export async function renderSettings() {
   const diagOn = telemetry.isEnabled();
   const diagCount = telemetry.getEvents().length;
   const retention = getAudioRetention();
+  // BAA status may be `null` (never acknowledged) or a row for the current
+  // attestation version. `.catch` swallows transport errors so the pane still
+  // renders — the section then shows as “not acknowledged”, which is the
+  // fail-closed default and matches what the Rust gate would enforce anyway.
+  const baaAck = await baaRepo.getStatus().catch(() => null);
+  const baaAcked = !!(baaAck && baaAck.acknowledged);
 
   return `
     <div class="settings-page">
@@ -51,6 +58,28 @@ export async function renderSettings() {
           <span class="model-status-icon">✓</span>
           <span>Whisper base.en — included with Tahlk</span>
         </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>BAA acknowledgment</h3>
+        <p class="settings-desc">
+          Note generation is disabled until you confirm your organization has an executed
+          <strong>Business Associate Agreement (BAA)</strong> with Anthropic covering the API key
+          configured below. Revoking this immediately disables note generation on this device.
+        </p>
+        <div class="baa-status-row">
+          <span class="baa-status-pill ${baaAcked ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}">
+            ${baaAcked ? 'Acknowledged' : 'Not acknowledged'}
+          </span>
+          ${baaAcked && baaAck.acknowledged_at
+            ? `<span class="settings-desc">on ${escapeHtml(baaAck.acknowledged_at)}${baaAck.provider_id ? ` by ${escapeHtml(baaAck.provider_id)}` : ''}</span>`
+            : ''}
+        </div>
+        <label class="baa-toggle">
+          <input type="checkbox" id="s-baa-ack" ${baaAcked ? 'checked' : ''} />
+          <span>I confirm my organization has an executed BAA with Anthropic covering the API key below.</span>
+        </label>
+        <p class="step-hint"><a href="https://support.anthropic.com/en/articles/8555474-i-need-a-business-associate-agreement-baa-with-anthropic-for-hipaa-compliance-what-do-i-do" target="_blank" rel="noreferrer noopener">How to request a BAA from Anthropic →</a></p>
       </section>
 
       <section class="settings-section">
@@ -152,6 +181,37 @@ export function wireSettings() {
       toast('API key removed.');
     } catch (e) {
       toast(`Could not remove API key: ${userMessage(e, 'unknown error')}`);
+    }
+  });
+
+  // BAA toggle. Setting = write ack row with a fresh timestamp; unsetting =
+  // clear the row. The Rust gate rejects note generation the instant the row
+  // is missing, so a user can revoke and immediately verify the app refuses
+  // to send further transcripts — no restart or refresh required.
+  document.getElementById('s-baa-ack')?.addEventListener('change', async e => {
+    const checked = !!e.target.checked;
+    try {
+      if (checked) {
+        const providerName =
+          document.getElementById('s-name')?.value.trim() ||
+          (kvGet(PROVIDER_KEY) || {}).name || '';
+        await baaRepo.setAck({
+          acknowledgedAt: new Date().toISOString(),
+          providerId: providerName,
+        });
+        toast('BAA acknowledged. Note generation is enabled.');
+      } else {
+        if (!confirm('Revoke your BAA acknowledgment? Note generation will stop working until you re-acknowledge.')) {
+          e.target.checked = true;
+          return;
+        }
+        await baaRepo.clear();
+        toast('BAA acknowledgment cleared. Note generation is disabled.');
+      }
+    } catch (err) {
+      // Revert the checkbox visually since the write did not land.
+      e.target.checked = !checked;
+      toast(`Could not update BAA: ${userMessage(err, 'unknown error')}`);
     }
   });
 

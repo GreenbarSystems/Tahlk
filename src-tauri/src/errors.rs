@@ -19,6 +19,10 @@ use std::fmt;
 pub enum AppError {
     /// The Anthropic API key is not set in the OS keychain.
     NoApiKey,
+    /// The Anthropic BAA acknowledgment gate has not been satisfied —
+    /// note generation is refused because sending PHI to a non-BAA
+    /// endpoint would be a §164.502 impermissible disclosure.
+    BaaRequired,
     /// The Whisper model file is missing from resources.
     NoModel,
     /// Underlying HTTP transport error (DNS, TLS, timeout, connection reset).
@@ -47,6 +51,7 @@ impl AppError {
     fn code(&self) -> &'static str {
         match self {
             AppError::NoApiKey        => "no_api_key",
+            AppError::BaaRequired     => "baa_required",
             AppError::NoModel         => "no_model",
             AppError::Network(_)      => "network",
             AppError::AuthFailed(_)   => "auth_failed",
@@ -62,6 +67,7 @@ impl AppError {
     fn message(&self) -> String {
         match self {
             AppError::NoApiKey        => "Anthropic API key not set.".into(),
+            AppError::BaaRequired     => "Anthropic BAA acknowledgment required before note generation.".into(),
             AppError::NoModel         => "Whisper model not downloaded.".into(),
             AppError::Network(m)      => format!("Network error: {}", m),
             AppError::AuthFailed(m)   => format!("Anthropic auth failed: {}", m),

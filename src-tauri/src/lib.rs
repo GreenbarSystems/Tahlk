@@ -5,11 +5,13 @@
 //!   - `db_key`        — DEK loader (keychain-held 256-bit key for SQLCipher).
 //!   - `secrets`       — Anthropic API key in the OS keychain + legacy migration.
 //!   - `kv`            — generic key/value store commands (secret_* namespace blocked).
+//!   - `baa`           — Anthropic BAA acknowledgment gate (audit finding C2).
 //!   - `encounters`    — encounter CRUD, sign-off, stats.
 //!   - `note_history`  — relational note-history append-log + KV→table migration.
+//!   - `llm_audit`     — append-only log of Anthropic calls (metadata only, no PHI).
 //!   - `audio`         — session audio save/delete with path-traversal hardening.
 //!   - `whisper`       — local whisper.cpp sidecar transcription.
-//!   - `notes`         — Anthropic streaming note generation.
+//!   - `notes`         — Anthropic streaming note generation (BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
 //!
 //! `DbState` stays at the crate root so every module can name it via
@@ -21,12 +23,14 @@ use rusqlite::Connection;
 use tauri::Manager;
 
 mod audio;
+mod baa;
 mod db;
 mod db_key;
 mod encounters;
 mod errors;
 mod export;
 mod kv;
+mod llm_audit;
 mod note_history;
 mod notes;
 mod secrets;
@@ -58,6 +62,10 @@ pub fn run() {
             secrets::set_api_key,
             secrets::clear_api_key,
             secrets::has_api_key,
+            baa::baa_ack_status,
+            baa::baa_ack_set,
+            baa::baa_ack_clear,
+            llm_audit::llm_audit_list,
             export::data_location,
             encounters::list_encounters,
             encounters::get_encounter,
