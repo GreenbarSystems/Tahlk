@@ -1,16 +1,17 @@
 //! Generic key/value store commands.
 //!
-//! All entry points route through `guard_key` / the `secret_*` LIKE-escape
-//! so the `secret_v1::anthropic_api_key` namespace can never be read, written,
-//! removed, or enumerated through the JS-facing KV API. Secrets live in the
-//! OS keychain (see `secrets.rs`).
+//! Every entry point consults `KEYCHAIN_ONLY_KEYS` (via `guard_key` for the
+//! get/set/remove paths, and `is_secret_key` post-filter for enumeration) so
+//! the keychain-only namespace can never be read, written, removed, or listed
+//! through the JS-facing KV API. Secrets live in the OS keychain
+//! (see `secrets.rs`).
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use tauri::State;
 
 use crate::errors::AppError;
-use crate::secrets::guard_key;
+use crate::secrets::{guard_key, is_secret_key};
 use crate::DbState;
 
 /// Ceiling on KV key length. Every legitimate key in this app is a
@@ -87,11 +88,22 @@ pub(crate) fn kv_remove(state: State<DbState>, key: String) -> Result<(), AppErr
 
 #[tauri::command]
 pub(crate) fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(String, Value)>, AppError> {
-    let pattern = if prefix.is_empty() { String::from("%") } else { format!("{}%", prefix) };
     let conn = state.0.lock();
-    // Never surface secret_* keys through enumeration.
-    let mut stmt = conn
-        .prepare("SELECT key, value FROM kv WHERE key LIKE ?1 AND key NOT LIKE 'secret\\_%' ESCAPE '\\' ORDER BY key")?;
+    kv_list_conn(&conn, &prefix)
+}
+
+// Inner helper driven by a bare `Connection`. Extracted from `kv_list` so unit
+// tests can exercise the enumeration filter without a Tauri `State` harness.
+// Enumerates via LIKE on the prefix, then post-filters with `is_secret_key`
+// so that helper is the single source of truth shared with `guard_key`
+// (audit H5 replaced a SQL-side `LIKE 'secret\_%'` clause that was the
+// second copy of the prefix rule).
+pub(crate) fn kv_list_conn(
+    conn: &rusqlite::Connection,
+    prefix: &str,
+) -> Result<Vec<(String, Value)>, AppError> {
+    let pattern = if prefix.is_empty() { String::from("%") } else { format!("{}%", prefix) };
+    let mut stmt = conn.prepare("SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key")?;
     let rows = stmt.query_map(params![pattern], |r| {
         let k: String = r.get(0)?;
         let v: String = r.get(1)?;
@@ -100,6 +112,9 @@ pub(crate) fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(Stri
     let mut out = Vec::new();
     for row in rows {
         let (k, v) = row?;
+        if is_secret_key(&k) {
+            continue;
+        }
         let parsed: Value = serde_json::from_str(&v).map_err(AppError::internal_from)?;
         out.push((k, parsed));
     }
@@ -154,6 +169,74 @@ mod tests {
         // trips loudly instead of quietly bricking transcript writes.
         let realistic_hour_transcript_bytes: usize = 200 * 1024;
         assert!(MAX_KV_VALUE_BYTES > realistic_hour_transcript_bytes * 10);
+    }
+
+    // End-to-end coverage for the enumeration filter: seed a raw kv table
+    // with a mix of secret and non-secret rows, then confirm `kv_list_conn`
+    // returns the non-secret rows and hides the allowlisted secret key.
+    // If a future refactor deletes the `is_secret_key` post-filter, this test
+    // fails loudly with the leaked row visible in the assertion.
+    #[test]
+    fn kv_list_hides_keychain_only_keys() {
+        use rusqlite::Connection;
+        use crate::secrets::API_KEY_KV;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+
+        // Two ordinary rows plus the legacy plaintext-key row that must never
+        // surface through enumeration.
+        for (k, v) in [
+            ("note_settings_v1::onboarded", "true"),
+            ("note_provider_v1::profile", "{}"),
+            (API_KEY_KV, "\"sk-ant-should-not-leak\""),
+        ] {
+            conn.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+                params![k, v],
+            )
+            .unwrap();
+        }
+
+        let listed = kv_list_conn(&conn, "").unwrap();
+        let keys: Vec<&str> = listed.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains(&API_KEY_KV), "secret key leaked into kv_list: {keys:?}");
+        assert!(keys.contains(&"note_settings_v1::onboarded"));
+        assert!(keys.contains(&"note_provider_v1::profile"));
+        assert_eq!(keys.len(), 2, "expected exactly 2 non-secret rows, got {keys:?}");
+    }
+
+    // A prefix filter should still hide the secret row even when the prefix
+    // deliberately matches the secret's namespace.
+    #[test]
+    fn kv_list_prefix_filter_still_hides_secret_keys() {
+        use rusqlite::Connection;
+        use crate::secrets::API_KEY_KV;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+            params![API_KEY_KV, "\"sk-ant-should-not-leak\""],
+        )
+        .unwrap();
+
+        let listed = kv_list_conn(&conn, "secret_").unwrap();
+        assert!(listed.is_empty(), "secret_ prefix leaked rows: {listed:?}");
     }
 
     #[test]
