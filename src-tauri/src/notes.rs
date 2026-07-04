@@ -5,11 +5,23 @@
 //! `content_block_delta` is emitted as a `scribe:note_chunk` event AND
 //! accumulated into the returned full note, so callers don't need to
 //! observe events to get the final result.
+//!
+//! Error mapping (see `errors.rs`):
+//!   * missing keychain entry     → `AppError::NoApiKey`
+//!   * client builder failure     → `AppError::internal_from` (reqwest config bug)
+//!   * transport error on send    → `AppError::Network`
+//!   * HTTP 401/403               → `AppError::AuthFailed`
+//!   * HTTP 429                   → `AppError::RateLimited`
+//!   * any other non-2xx          → `AppError::UpstreamApi`
+//!   * stream body read error     → `AppError::Network`
+//!   * server-emitted stream error→ `AppError::UpstreamApi`
+//!   * zero-length accumulation   → `AppError::UpstreamEmpty`
 
 use reqwest::Client;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::errors::AppError;
 use crate::secrets::read_api_key;
 use crate::DbState;
 
@@ -19,11 +31,10 @@ pub(crate) async fn generate_note(
     state: State<'_, DbState>,
     transcript: String,
     system_prompt: String,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     // Read the key from the OS keychain (locks drop inside read_api_key — no
     // lock is held across the await below).
-    let key = read_api_key(&state)
-        .ok_or("Anthropic API key not set. Open Settings to add your key.")?;
+    let key = read_api_key(&state).ok_or(AppError::NoApiKey)?;
 
     // TLS: reqwest validates the server certificate against the system trust
     // store by default; we additionally pin the floor to TLS 1.2. Certificate
@@ -33,7 +44,7 @@ pub(crate) async fn generate_note(
     let client = Client::builder()
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::internal_from)?;
     let body = json!({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 2048,
@@ -55,12 +66,16 @@ pub(crate) async fn generate_note(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Network error: {}", e))?;
+        .map_err(|e| AppError::Network(e.to_string()))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Anthropic API error {}: {}", status, text));
+        return Err(match status.as_u16() {
+            401 | 403 => AppError::AuthFailed(text),
+            429 => AppError::RateLimited,
+            _ => AppError::UpstreamApi(format!("HTTP {}: {}", status, text)),
+        });
     }
 
     // Parse the SSE stream: accumulate the full note while emitting each text
@@ -73,7 +88,7 @@ pub(crate) async fn generate_note(
     let mut full = String::new();
 
     while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| format!("Stream error: {}", e))?;
+        let bytes = chunk.map_err(|e| AppError::Network(format!("stream: {}", e)))?;
         byte_buf.extend_from_slice(&bytes);
 
         // SSE fields are newline-delimited; process each complete line.
@@ -96,7 +111,7 @@ pub(crate) async fn generate_note(
                 }
                 Some("error") => {
                     let msg = v["error"]["message"].as_str().unwrap_or("unknown stream error");
-                    return Err(format!("Anthropic stream error: {}", msg));
+                    return Err(AppError::UpstreamApi(format!("stream: {}", msg)));
                 }
                 _ => {}
             }
@@ -104,7 +119,7 @@ pub(crate) async fn generate_note(
     }
 
     if full.is_empty() {
-        return Err("Anthropic returned an empty response".into());
+        return Err(AppError::UpstreamEmpty);
     }
     Ok(full)
 }

@@ -13,6 +13,7 @@ import { generateNote } from '../../scribe/noteGenerator.js';
 import { saveDraftGenerated, saveDraftEdited, signNote, purgeAudio } from '../../editor/noteEditor.js';
 import { getAudioRetention } from '../../domain/retention.js';
 import { toast } from '../../utils/format.js';
+import { userMessage, fromInvoke } from '../../platform/appError.js';
 import { setStatus, clearStatus } from './template.js';
 
 export function wireNoteSection(ctx) {
@@ -99,7 +100,13 @@ export function wireNoteSection(ctx) {
         noteArea.classList.remove('generating');
       }
       clearStatus();
-      toast(e.message || 'Note generation failed.');
+      // If Anthropic isn't configured, point the user at the fix.
+      const err = fromInvoke(e);
+      if (err.code === 'no_api_key') {
+        toast('No Anthropic API key. Open Settings to add one.');
+      } else {
+        toast(userMessage(err, 'Note generation failed.'));
+      }
     }
   });
 
@@ -158,7 +165,7 @@ export function wireNoteSection(ctx) {
       document.querySelector('.recording-section')?.remove();
     } catch (e) {
       if (signBtn) { signBtn.disabled = false; signBtn.textContent = 'Sign & Attest Note'; }
-      toast(e.message || 'Sign failed.');
+      toast(userMessage(e, 'Sign failed.'));
     }
   });
 

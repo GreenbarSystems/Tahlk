@@ -100,7 +100,10 @@ export async function init() {
   on('scribe:generation_complete',    d => track('note_generated', { chars: d?.note?.length || 0 }));
   on('scribe:note_signed',           () => track('note_signed'));
   on('scribe:note_exported',          d => track('note_exported', { kind: d?.format }));
-  on('scribe:transcription_error',    d => recordError('transcription', d?.error));
-  on('scribe:generation_error',       d => recordError('generation', d?.error));
+  // NOTE: transcription/generation errors are recorded directly by the scribe
+  // modules calling `recordError` — see scribe/transcriber.js + noteGenerator.js.
+  // We used to bridge via `scribe:transcription_error`/`scribe:generation_error`
+  // events, but that surface got double-toasted alongside the caller's catch
+  // site; the emits are gone. Audio errors still flow through the event bus.
   on('scribe:audio_error',            d => recordError('audio', d?.error));
 }

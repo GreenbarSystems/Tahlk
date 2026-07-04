@@ -1,9 +1,17 @@
 // Note generation — sends the session transcript to Anthropic claude-haiku
-// via the Rust generate_note command. The API key lives in SQLite (LOCAL_ONLY)
+// via the Rust generate_note command. The API key lives in the OS keychain
 // and is never accessible from JS. Returns the full note text.
+//
+// Error surface contract: on failure we (1) record a diagnostic locally
+// via telemetry.recordError and (2) re-throw the AppError from `invoke`
+// (preserving `code` for branch logic like `no_api_key` → open Settings).
+// We do NOT emit `scribe:generation_error` — the caller toasts once.
+// Emitting an event on top of throwing led to two user-visible surfaces
+// for a single failure.
 
 import { emit } from '../core/eventBus.js';
 import { invoke, listen } from '../platform/tauri.js';
+import { recordError } from '../core/telemetry.js';
 import { getTemplate } from '../templates/templateLibrary.js';
 
 export async function generateNote(transcript, templateId, encounterId) {
@@ -28,9 +36,8 @@ export async function generateNote(transcript, templateId, encounterId) {
     emit('scribe:generation_complete', { note, encounterId });
     return note;
   } catch (e) {
-    const msg = e.message || String(e);
-    emit('scribe:generation_error', { error: msg, encounterId });
-    throw new Error(msg);
+    recordError('generation', e);
+    throw e;
   } finally {
     if (unlisten) unlisten();
   }

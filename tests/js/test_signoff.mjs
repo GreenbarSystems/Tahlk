@@ -5,6 +5,11 @@
 // A mock Tauri runtime is installed BEFORE the app modules load, so `isTauri`
 // resolves true and KV + commands flow through a recording `invoke` we control.
 //
+// Rejection shapes covered: the real Rust side rejects with an AppError
+// `{ code, message }` object. Legacy paths (and older mocks) rejected with a
+// bare Error. `fromInvoke` in `platform/appError.js` normalizes both, so the
+// mock exercises both shapes below to keep that normalizer honest.
+//
 // Guards, in order of how much they'd hurt in production:
 //   - the chain built by generate->edit->sign verifies and links correctly
 //   - signing flips status via mark_encounter_signed, NEVER a full upsert
@@ -38,12 +43,14 @@ function invokeMock(cmd, args) {
   }
   if (cmd === 'note_history_append') {
     const list = _historyStore.get(args.encounterId) || [];
-    // Enforce prev_hash chain the same way Rust will.
+    // Enforce prev_hash chain the same way Rust will. Reject with the same
+    // `{ code, message }` shape the Rust AppError serializes to so the JS
+    // boundary normalizer (`fromInvoke`) sees production-shaped payloads.
     const tail = list[list.length - 1];
     const expectedPrev = tail ? (tail.entryHash ?? null) : null;
     const gotPrev = args.entry.prevHash ?? null;
     if (expectedPrev !== gotPrev) {
-      return Promise.reject(new Error(`prev_hash chain mismatch (mock)`));
+      return Promise.reject({ code: 'invalid_input', message: 'prev_hash chain mismatch (mock)' });
     }
     list.push(args.entry);
     _historyStore.set(args.encounterId, list);
@@ -139,7 +146,12 @@ test('signed hash binds note + transcript + signer', async () => {
 test('sign-off fails closed: a failed history write never marks the encounter signed', async () => {
   const id = uid();
   // Durable chain write fails at the note_history_append boundary.
-  responders['note_history_append'] = new Error('disk full');
+  // Use the real Rust rejection shape (`{ code, message }`) so the JS-side
+  // `fromInvoke` normalizer is exercised on the production path.
+  responders['note_history_append'] = Object.assign(
+    new Error('disk full'),
+    { code: 'storage' }
+  );
 
   await assert.rejects(() => signNote(id, 'NOTE', 'TRANSCRIPT', 'Dr. Smith'));
 

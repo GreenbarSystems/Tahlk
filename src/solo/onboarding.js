@@ -4,6 +4,7 @@ import { kvGet, kvSet } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
 import { toast, escapeHtml } from '../utils/format.js';
+import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { LOGO_SVG_LG } from './logoSvg.js';
 
@@ -89,7 +90,7 @@ export async function wireOnboarding(onComplete) {
     try {
       await secretsRepo.setApiKey(apiKey);
     } catch (e) {
-      toast(`Could not save API key: ${e.message || e}`);
+      toast(`Could not save API key: ${userMessage(e, 'unknown error')}`);
       return;
     }
     kvSet(ONBOARDED_KEY, true);

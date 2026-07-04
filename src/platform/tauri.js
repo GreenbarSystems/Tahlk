@@ -5,6 +5,12 @@
 // tier can swap this module for an HTTP client without the UI, data, or domain
 // layers changing. The global is read lazily (per call) because it is injected
 // by the WebView before app scripts run but is absent in tests / plain browsers.
+//
+// Rejection shape contract: `invoke` promises reject with an `AppError`
+// ({ code, message }). Callers can branch on `code` (e.g. `no_api_key`) or
+// pass the error to `userMessage()` for a display string. See `appError.js`.
+
+import { fromInvoke } from './appError.js';
 
 function runtime() {
   return typeof window !== 'undefined' ? window.__TAURI__ : undefined;
@@ -16,12 +22,17 @@ export const isTauri =
 
 // Invoke a backend command. Mirrors the historical fallback across Tauri global
 // shapes so behavior is identical to the previous inline helper.
+//
+// Rejections are ALWAYS normalized to an AppError so downstream catch sites
+// can rely on `e.code` / `userMessage(e)` without runtime shape checks.
 export function invoke(command, args) {
   const t = runtime();
-  if (t?.core?.invoke) return t.core.invoke(command, args);
-  if (t?.tauri?.invoke) return t.tauri.invoke(command, args);
-  if (typeof t?.invoke === 'function') return t.invoke(command, args);
-  return Promise.reject(new Error('Tauri invoke unavailable'));
+  const raw =
+    t?.core?.invoke ? t.core.invoke(command, args) :
+    t?.tauri?.invoke ? t.tauri.invoke(command, args) :
+    typeof t?.invoke === 'function' ? t.invoke(command, args) :
+    Promise.reject(new Error('Tauri invoke unavailable'));
+  return raw.catch(e => Promise.reject(fromInvoke(e)));
 }
 
 // Subscribe to a backend event. Resolves to an unlisten function (a no-op when

@@ -8,15 +8,18 @@
 //   scribe:audio_error         — capture/save failed. detail: { error, encounterId }
 //   scribe:transcription_started
 //   scribe:transcription_complete — detail: { transcript, encounterId }
-//   scribe:transcription_error    — detail: { error, encounterId }
 //   scribe:generation_started
 //   scribe:note_chunk          — streaming token. detail: { text }
 //   scribe:generation_complete — detail: { note, encounterId }
-//   scribe:generation_error    — note generation failed. detail: { error, encounterId }
 //   scribe:draft_saved         — detail: { encounterId }
 //   scribe:note_signed         — detail: { encounterId, hash }
 //   scribe:note_exported       — detail: { encounterId, format }
 //   scribe:encounter_changed   — home list needs refresh
+//
+// Note: transcription/generation FAILURES do not emit an event. Errors are
+// thrown from the scribe modules (caller toasts once) and recorded directly
+// via telemetry.recordError. The old `*_error` events double-surfaced with
+// the caller's catch site; see scribe/transcriber.js + noteGenerator.js.
 
 const _subs = new Map();
 

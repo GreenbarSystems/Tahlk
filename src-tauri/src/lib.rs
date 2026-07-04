@@ -22,6 +22,7 @@ use tauri::Manager;
 mod audio;
 mod db;
 mod encounters;
+mod errors;
 mod export;
 mod kv;
 mod note_history;

@@ -7,6 +7,7 @@
 import { kvSet } from '../../core/storageBackend.js';
 import { transcribe } from '../../scribe/transcriber.js';
 import { toast } from '../../utils/format.js';
+import { userMessage } from '../../platform/appError.js';
 import { TRANSCRIPT_KEY, setStatus, clearStatus } from './template.js';
 
 export function wireTranscriptSection(ctx) {
@@ -23,7 +24,7 @@ export function wireTranscriptSection(ctx) {
       toast('Transcription complete.');
     } catch (e) {
       clearStatus();
-      toast(e.message || 'Transcription failed.');
+      toast(userMessage(e, 'Transcription failed.'));
     }
   });
 

@@ -13,14 +13,15 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use tauri::State;
 
+use crate::errors::AppError;
 use crate::DbState;
 
 pub(crate) const API_KEY_KV: &str = "secret_v1::anthropic_api_key";
 const KEYRING_SERVICE: &str = "com.tahlk.app";
 const KEYRING_USER: &str = "anthropic_api_key";
 
-fn keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())
+fn keyring_entry() -> Result<keyring::Entry, AppError> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(AppError::internal_from)
 }
 
 // Read the API key, keychain-first. If absent there but present in the legacy
@@ -58,16 +59,18 @@ pub(crate) fn read_api_key(state: &DbState) -> Option<String> {
 }
 
 // Reject any attempt to reach the secret namespace through the generic KV API.
-pub(crate) fn guard_key(key: &str) -> Result<(), String> {
+pub(crate) fn guard_key(key: &str) -> Result<(), AppError> {
     if key.starts_with("secret_") {
-        return Err("access denied: secret keys are not accessible via the KV API".into());
+        return Err(AppError::invalid(
+            "secret keys are not accessible via the KV API",
+        ));
     }
     Ok(())
 }
 
 #[tauri::command]
-pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), String> {
-    keyring_entry()?.set_password(&key).map_err(|e| e.to_string())?;
+pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), AppError> {
+    keyring_entry()?.set_password(&key).map_err(AppError::internal_from)?;
     // Remove any legacy plaintext copy so the key no longer lives on disk.
     let conn = state.0.lock();
     let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
@@ -75,7 +78,7 @@ pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), Stri
 }
 
 #[tauri::command]
-pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), String> {
+pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), AppError> {
     if let Ok(entry) = keyring_entry() {
         let _ = entry.delete_credential(); // ignore "no entry"
     }
@@ -85,7 +88,7 @@ pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) fn has_api_key(state: State<DbState>) -> Result<bool, String> {
+pub(crate) fn has_api_key(state: State<DbState>) -> Result<bool, AppError> {
     Ok(read_api_key(&state).is_some())
 }
 

@@ -10,30 +10,32 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
 
-fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
+use crate::errors::AppError;
+
+fn model_path(app: &AppHandle) -> Result<PathBuf, AppError> {
     app.path()
         .resource_dir()
-        .map_err(|e| e.to_string())
+        .map_err(AppError::internal_from)
         .map(|d| d.join("ggml-base.en.bin"))
 }
 
 #[tauri::command]
-pub(crate) async fn model_downloaded(app: AppHandle) -> Result<bool, String> {
+pub(crate) async fn model_downloaded(app: AppHandle) -> Result<bool, AppError> {
     Ok(tokio::fs::try_exists(model_path(&app)?).await.unwrap_or(false))
 }
 
 // Retained for API compatibility; model ships with the app so this is a no-op.
 #[tauri::command]
-pub(crate) async fn download_whisper_model(app: AppHandle) -> Result<(), String> {
+pub(crate) async fn download_whisper_model(app: AppHandle) -> Result<(), AppError> {
     let _ = app;
     Ok(())
 }
 
 #[tauri::command]
-pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Result<String, String> {
+pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Result<String, AppError> {
     let model = model_path(&app)?;
     if !tokio::fs::try_exists(&model).await.unwrap_or(false) {
-        return Err("Whisper model not downloaded. Open Settings → Download Transcription Model.".into());
+        return Err(AppError::NoModel);
     }
 
     // Confine transcription to the app's audio directory. The output .txt path is
@@ -42,14 +44,16 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
     let audio_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(AppError::internal_from)?
         .join("audio");
     let canon = std::path::Path::new(&audio_path)
         .canonicalize()
-        .map_err(|_| "audio file not found".to_string())?;
-    let dir_canon = audio_dir.canonicalize().map_err(|e| e.to_string())?;
+        .map_err(|_| AppError::invalid("audio file not found"))?;
+    let dir_canon = audio_dir.canonicalize().map_err(AppError::storage_from)?;
     if !canon.starts_with(&dir_canon) {
-        return Err("audio path is outside the session audio directory".into());
+        return Err(AppError::invalid(
+            "audio path is outside the session audio directory",
+        ));
     }
 
     let output_base = audio_path.trim_end_matches(".wav").to_string();
@@ -57,7 +61,7 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
     let output = app
         .shell()
         .sidecar("whisper-cpp")
-        .map_err(|e| e.to_string())?
+        .map_err(AppError::internal_from)?
         .args([
             "-m", &model.to_string_lossy(),
             "-f", &audio_path,
@@ -68,15 +72,17 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
         ])
         .output()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::internal_from)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        return Err(format!("Transcription failed: {}", stderr));
+        return Err(AppError::Transcription(stderr));
     }
 
     let txt_path = format!("{}.txt", output_base);
-    let transcript = tokio::fs::read_to_string(&txt_path).await.map_err(|e| e.to_string())?;
+    let transcript = tokio::fs::read_to_string(&txt_path)
+        .await
+        .map_err(AppError::storage_from)?;
     let _ = tokio::fs::remove_file(&txt_path).await;
     Ok(transcript.trim().to_string())
 }

@@ -10,22 +10,21 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::db::{encounter_row_to_json, ENCOUNTER_COLS};
+use crate::errors::AppError;
 use crate::DbState;
 
 #[tauri::command]
-pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, String> {
+pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, AppError> {
     let conn = state.0.lock();
     let n = limit.unwrap_or(50);
     let sql = format!(
         "SELECT {ENCOUNTER_COLS} FROM encounters ORDER BY created_at DESC LIMIT ?1"
     );
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![n], encounter_row_to_json)
-        .map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![n], encounter_row_to_json)?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| e.to_string())?);
+        out.push(row?);
     }
     Ok(out)
 }
@@ -40,16 +39,14 @@ pub(crate) fn mark_encounter_signed(
     id: String,
     signed_at: String,
     signed_hash: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let conn = state.0.lock();
-    let n = conn
-        .execute(
-            "UPDATE encounters SET status = 'signed', signed_at = ?2, signed_hash = ?3 WHERE id = ?1",
-            params![id, signed_at, signed_hash],
-        )
-        .map_err(|e| e.to_string())?;
+    let n = conn.execute(
+        "UPDATE encounters SET status = 'signed', signed_at = ?2, signed_hash = ?3 WHERE id = ?1",
+        params![id, signed_at, signed_hash],
+    )?;
     if n == 0 {
-        return Err(format!("encounter {} not found", id));
+        return Err(AppError::invalid(format!("encounter {} not found", id)));
     }
     Ok(())
 }
@@ -58,50 +55,48 @@ pub(crate) fn mark_encounter_signed(
 // column — mirrors mark_encounter_signed's scoping so an audio-purge cannot
 // clobber patient_alias or sign-off fields.
 #[tauri::command]
-pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> Result<(), String> {
+pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> Result<(), AppError> {
     let conn = state.0.lock();
-    let n = conn
-        .execute(
-            "UPDATE encounters SET audio_path = NULL WHERE id = ?1",
-            params![id],
-        )
-        .map_err(|e| e.to_string())?;
+    let n = conn.execute(
+        "UPDATE encounters SET audio_path = NULL WHERE id = ?1",
+        params![id],
+    )?;
     if n == 0 {
-        return Err(format!("encounter {} not found", id));
+        return Err(AppError::invalid(format!("encounter {} not found", id)));
     }
     Ok(())
 }
 
 // Fetch a single encounter by id — avoids pulling the whole list to open one row.
 #[tauri::command]
-pub(crate) fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, String> {
+pub(crate) fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, AppError> {
     let conn = state.0.lock();
     let sql = format!("SELECT {ENCOUNTER_COLS} FROM encounters WHERE id = ?1");
-    conn.query_row(&sql, params![id], encounter_row_to_json)
-        .optional()
-        .map_err(|e| e.to_string())
+    Ok(conn.query_row(&sql, params![id], encounter_row_to_json).optional()?)
 }
 
 // Home-screen counters via indexed COUNT(*) — O(index) instead of shipping rows
 // to JS and filtering. `today` is passed in so the comparison matches how
 // encounter_date is stored client-side.
 #[tauri::command]
-pub(crate) fn encounter_stats(state: State<DbState>, today: String) -> Result<Value, String> {
+pub(crate) fn encounter_stats(state: State<DbState>, today: String) -> Result<Value, AppError> {
     let conn = state.0.lock();
-    let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM encounters", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    let signed: i64 = conn
-        .query_row("SELECT COUNT(*) FROM encounters WHERE status = 'signed'", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    let today_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM encounters WHERE encounter_date = ?1", params![today], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM encounters", [], |r| r.get(0))?;
+    let signed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM encounters WHERE status = 'signed'",
+        [],
+        |r| r.get(0),
+    )?;
+    let today_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM encounters WHERE encounter_date = ?1",
+        params![today],
+        |r| r.get(0),
+    )?;
     Ok(json!({ "total": total, "signed": signed, "today": today_count }))
 }
 
 #[tauri::command]
-pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), String> {
+pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), AppError> {
     let conn = state.0.lock();
     conn.execute(
         "INSERT INTO encounters (id, provider_id, encounter_date, patient_alias, status, \
@@ -124,7 +119,6 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
             encounter["signed_at"].as_str(),
             encounter["signed_hash"].as_str(),
         ],
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     Ok(())
 }

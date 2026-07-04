@@ -5,6 +5,7 @@
 import { encountersRepo } from '../../data/encountersRepo.js';
 import { startRecording, stopRecording, isRecording } from '../../scribe/recorder.js';
 import { toast, fmtDuration } from '../../utils/format.js';
+import { userMessage } from '../../platform/appError.js';
 
 export function wireRecordingSection(ctx) {
   const recordBtn = document.getElementById('btn-record');
@@ -31,7 +32,7 @@ export function wireRecordingSection(ctx) {
       try {
         await stopRecording(ctx.currentEncounter.id);
       } catch (e) {
-        toast(e.message);
+        toast(userMessage(e, 'Could not save the recording.'));
         recordBtn.disabled = false;
         recordLabel.textContent = 'Start Recording';
       }
@@ -41,7 +42,7 @@ export function wireRecordingSection(ctx) {
         recordBtn.classList.add('btn-record--active');
         recordLabel.textContent = 'Stop Recording';
       } catch (e) {
-        toast(e.message);
+        toast(userMessage(e, 'Could not start recording.'));
       }
     }
   });

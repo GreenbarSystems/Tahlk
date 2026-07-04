@@ -5,6 +5,7 @@ import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
 import * as telemetry from '../core/telemetry.js';
 import { toast, escapeHtml } from '../utils/format.js';
+import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
 
@@ -140,7 +141,7 @@ export function wireSettings() {
       await secretsRepo.setApiKey(val);
       toast('API key saved.');
     } catch (e) {
-      toast(`Could not save API key: ${e.message || e}`);
+      toast(`Could not save API key: ${userMessage(e, 'unknown error')}`);
     }
   });
 
@@ -150,7 +151,7 @@ export function wireSettings() {
       await secretsRepo.clearApiKey();
       toast('API key removed.');
     } catch (e) {
-      toast(`Could not remove API key: ${e.message || e}`);
+      toast(`Could not remove API key: ${userMessage(e, 'unknown error')}`);
     }
   });
 
@@ -164,7 +165,7 @@ export function wireSettings() {
       await telemetry.exportLog();
       toast('Diagnostics log exported.');
     } catch (err) {
-      toast(`Export failed: ${err.message || err}`);
+      toast(`Export failed: ${userMessage(err, 'unknown error')}`);
     }
   });
 
@@ -187,7 +188,7 @@ export function wireSettings() {
           ? 'Audio will be deleted immediately after each sign-off.'
           : 'Audio will be kept on this device.');
       } catch (err) {
-        toast(`Could not update retention: ${err.message || err}`);
+        toast(`Could not update retention: ${userMessage(err, 'unknown error')}`);
       }
     });
   });

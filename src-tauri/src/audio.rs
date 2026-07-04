@@ -9,29 +9,31 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use tauri::{AppHandle, Manager};
 
-pub(crate) fn safe_id(id: &str) -> Result<(), String> {
+use crate::errors::AppError;
+
+pub(crate) fn safe_id(id: &str) -> Result<(), AppError> {
     let ok = !id.is_empty()
         && id.len() <= 128
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
     if ok {
         Ok(())
     } else {
-        Err("invalid encounter id".into())
+        Err(AppError::invalid("invalid encounter id"))
     }
 }
 
 #[tauri::command]
-pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, String> {
+pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, AppError> {
     safe_id(&encounter_id)?;
-    let data = BASE64.decode(base64_data.as_bytes()).map_err(|e| e.to_string())?;
+    let data = BASE64.decode(base64_data.as_bytes()).map_err(AppError::invalid)?;
     let audio_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(AppError::internal_from)?
         .join("audio");
-    tokio::fs::create_dir_all(&audio_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&audio_dir).await.map_err(AppError::storage_from)?;
     let path = audio_dir.join(format!("{}.wav", encounter_id));
-    tokio::fs::write(&path, &data).await.map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, &data).await.map_err(AppError::storage_from)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -40,18 +42,18 @@ pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, bas
 // deriving the path from app_data_dir keeps this scoped to files this app
 // created — the WebView cannot pass an arbitrary path.
 #[tauri::command]
-pub(crate) async fn delete_session_audio(app: AppHandle, encounter_id: String) -> Result<bool, String> {
+pub(crate) async fn delete_session_audio(app: AppHandle, encounter_id: String) -> Result<bool, AppError> {
     safe_id(&encounter_id)?;
     let path = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(AppError::internal_from)?
         .join("audio")
         .join(format!("{}.wav", encounter_id));
     match tokio::fs::remove_file(&path).await {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(AppError::Storage(e.to_string())),
     }
 }
 

@@ -24,6 +24,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::State;
 
+use crate::errors::AppError;
 use crate::DbState;
 
 const LEGACY_PREFIX: &str = "note_history_v1::";
@@ -184,20 +185,16 @@ fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 }
 
 #[tauri::command]
-pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> Result<Vec<Value>, String> {
+pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> Result<Vec<Value>, AppError> {
     let conn = state.0.lock();
-    let mut stmt = conn
-        .prepare(
-            "SELECT action, actor, timestamp, content_hash, notes, prev_hash, entry_hash \
-             FROM note_history WHERE encounter_id = ?1 ORDER BY seq",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![encounter_id], row_to_json)
-        .map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT action, actor, timestamp, content_hash, notes, prev_hash, entry_hash \
+         FROM note_history WHERE encounter_id = ?1 ORDER BY seq",
+    )?;
+    let rows = stmt.query_map(params![encounter_id], row_to_json)?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|e| e.to_string())?);
+        out.push(row?);
     }
     Ok(out)
 }
@@ -207,30 +204,31 @@ pub(crate) fn note_history_append(
     state: State<DbState>,
     encounter_id: String,
     entry: Value,
-) -> Result<i64, String> {
+) -> Result<i64, AppError> {
     // All fields required except notes/prev_hash. entry_hash is opaque data
     // computed by JS; Rust does not re-derive it. Length caps guard against
-    // pathological payloads from a compromised WebView.
-    fn take_str(v: &Value, k: &str, max: usize) -> Result<String, String> {
+    // pathological payloads from a compromised WebView. Validation failures
+    // map to `InvalidInput` (frontend bug), not `Storage`.
+    fn take_str(v: &Value, k: &str, max: usize) -> Result<String, AppError> {
         let s = v
             .get(k)
             .and_then(|x| x.as_str())
-            .ok_or_else(|| format!("missing string field: {}", k))?;
+            .ok_or_else(|| AppError::invalid(format!("missing string field: {}", k)))?;
         if s.len() > max {
-            return Err(format!("{} exceeds {} bytes", k, max));
+            return Err(AppError::invalid(format!("{} exceeds {} bytes", k, max)));
         }
         Ok(s.to_string())
     }
-    fn opt_str(v: &Value, k: &str, max: usize) -> Result<Option<String>, String> {
+    fn opt_str(v: &Value, k: &str, max: usize) -> Result<Option<String>, AppError> {
         match v.get(k) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::String(s)) => {
                 if s.len() > max {
-                    return Err(format!("{} exceeds {} bytes", k, max));
+                    return Err(AppError::invalid(format!("{} exceeds {} bytes", k, max)));
                 }
                 Ok(Some(s.clone()))
             }
-            Some(_) => Err(format!("{} must be string or null", k)),
+            Some(_) => Err(AppError::invalid(format!("{} must be string or null", k))),
         }
     }
 
@@ -245,26 +243,25 @@ pub(crate) fn note_history_append(
         .unwrap_or("")
         .to_string();
     if notes.len() > 4096 {
-        return Err("notes exceeds 4096 bytes".into());
+        return Err(AppError::invalid("notes exceeds 4096 bytes"));
     }
     let prev_hash = opt_str(&entry, "prevHash", 128)?;
     let entry_hash = take_str(&entry, "entryHash", 128)?;
 
     let mut conn = state.0.lock();
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let next_seq: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM note_history WHERE encounter_id = ?1",
-            params![encounter_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+    let tx = conn.transaction()?;
+    let next_seq: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM note_history WHERE encounter_id = ?1",
+        params![encounter_id],
+        |r| r.get(0),
+    )?;
 
     // If the caller sent a prev_hash, it must match the last row's entry_hash
     // for this encounter. Enforcing this in the tx (not just JS) closes the
     // "two panels racing an append" hole: the loser is rejected with a chain
     // mismatch instead of silently producing a diverged branch that would
-    // only be caught later by verifyHistoryChain.
+    // only be caught later by verifyHistoryChain. This is a client-side
+    // logic mismatch, so it maps to `InvalidInput`, not `Storage`.
     let last_hash: Option<String> = tx
         .query_row(
             "SELECT entry_hash FROM note_history \
@@ -272,13 +269,12 @@ pub(crate) fn note_history_append(
             params![encounter_id, next_seq - 1],
             |r| r.get(0),
         )
-        .optional()
-        .map_err(|e| e.to_string())?;
+        .optional()?;
     if last_hash.as_deref() != prev_hash.as_deref() {
-        return Err(format!(
+        return Err(AppError::invalid(format!(
             "prev_hash chain mismatch (expected {:?}, got {:?})",
             last_hash, prev_hash
-        ));
+        )));
     }
 
     tx.execute(
@@ -286,9 +282,8 @@ pub(crate) fn note_history_append(
          (encounter_id, seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![encounter_id, next_seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
+    )?;
+    tx.commit()?;
 
     Ok(next_seq)
 }
