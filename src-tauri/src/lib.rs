@@ -1,7 +1,8 @@
 //! Tahlk desktop crate root.
 //!
 //! Modules are split by concern:
-//!   - `db`            — SQLite bootstrap, encounter row projection.
+//!   - `db`            — SQLite bootstrap, encounter row projection, at-rest encryption.
+//!   - `db_key`        — DEK loader (keychain-held 256-bit key for SQLCipher).
 //!   - `secrets`       — Anthropic API key in the OS keychain + legacy migration.
 //!   - `kv`            — generic key/value store commands (secret_* namespace blocked).
 //!   - `encounters`    — encounter CRUD, sign-off, stats.
@@ -21,6 +22,7 @@ use tauri::Manager;
 
 mod audio;
 mod db;
+mod db_key;
 mod encounters;
 mod errors;
 mod export;
@@ -38,7 +40,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let conn = db::open_database(&app.handle()).expect("failed to open SQLite database");
+            // Fail-closed on any DB open error — including keychain unreachable
+            // (M1) or wrong-key (tampered / corrupted DEK). We would rather
+            // refuse to launch than silently fall back to an unencrypted DB and
+            // expose PHI. The `Display` impl on AppError formats the code so
+            // logs point straight at the failure (e.g. "Storage error: ...").
+            let conn = db::open_database(&app.handle())
+                .unwrap_or_else(|e| panic!("failed to open encrypted SQLite database: {}", e));
             app.manage(db::new_state(conn));
             Ok(())
         })

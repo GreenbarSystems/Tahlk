@@ -22,9 +22,16 @@ tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Bundled SQLite — self-contained installer, no system lib needed.
-rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+# Bundled SQLCipher — self-contained installer, no system lib needed. The
+# `vendored-openssl` half compiles OpenSSL from source so CI/dev builds do not
+# need OPENSSL_DIR set on Windows/Linux. Adds ~90s to cold builds; incremental
+# builds are unaffected. See db::open_database for keying + at-rest migration.
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "serde_json"] }
 parking_lot = "0.12"
+
+# CSPRNG for the database encryption key. `getrandom` is already transitive
+# via `keyring`/`ring`; naming it here keeps the dependency explicit.
+getrandom = "0.2"
 
 # HTTP client for Anthropic API calls and Whisper model download.
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -42,6 +49,11 @@ futures-util = "0.3"
 # OS secure store for the Anthropic API key (Windows Credential Manager /
 # macOS Keychain / Linux Secret Service) — keeps the key off plaintext disk.
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+
+# Test-only deps. `tempfile` scopes each SQLCipher round-trip test to its
+# own directory so parallel `cargo test` runs don't stomp on each other.
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 default = ["custom-protocol"]
