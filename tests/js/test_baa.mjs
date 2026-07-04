@@ -24,22 +24,23 @@ globalThis.document = { getElementById: () => null };
 
 // Recording Tauri runtime. Each test resets `calls` and `nextResult` so
 // invocations from prior tests can't leak into later assertions.
+// See src/platform/tauri.js — L4 migrated the wrapper from the __TAURI__
+// global to ESM imports; tests use the __TAHLK_TEST_TAURI__ escape hatch.
 const calls = [];
 let nextResult = { ok: null };
-globalThis.window = {
-  __TAURI__: {
-    core: {
-      invoke: (command, args) => {
-        calls.push({ command, args });
-        if (nextResult.reject !== undefined) {
-          return Promise.reject(nextResult.reject);
-        }
-        return Promise.resolve(nextResult.ok);
-      },
+globalThis.__TAHLK_TEST_TAURI__ = {
+  core: {
+    invoke: (command, args) => {
+      calls.push({ command, args });
+      if (nextResult.reject !== undefined) {
+        return Promise.reject(nextResult.reject);
+      }
+      return Promise.resolve(nextResult.ok);
     },
-    event: { listen: () => () => {} },
   },
+  event: { listen: () => () => {} },
 };
+globalThis.window = globalThis.window || {};
 
 const { baaRepo, BAA_ATTESTATION_VERSION } = await import('../../src/data/baa.js');
 const { AppError, fromInvoke, userMessage } = await import('../../src/platform/appError.js');

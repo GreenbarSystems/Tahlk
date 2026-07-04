@@ -60,12 +60,14 @@ function invokeMock(cmd, args) {
 }
 
 globalThis.document = { getElementById: () => null }; // toast() no-ops in tests
-globalThis.window = {
-  __TAURI__: {
-    core: { invoke: invokeMock },
-    event: { listen: () => () => {} },
-  },
+// Install the test-only Tauri escape hatch. See src/platform/tauri.js — the
+// real runtime is now imported as ESM (audit L4), so tests inject a fake via
+// this obscurely-named global that platform/tauri.js checks first.
+globalThis.__TAHLK_TEST_TAURI__ = {
+  core: { invoke: invokeMock },
+  event: { listen: () => () => {} },
 };
+globalThis.window = globalThis.window || {};
 
 // Dynamic import so the globals above exist when the module graph evaluates.
 const { saveDraftGenerated, saveDraftEdited, signNote, loadHistory } =
