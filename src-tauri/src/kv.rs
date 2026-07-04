@@ -92,18 +92,40 @@ pub(crate) fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(Stri
     kv_list_conn(&conn, &prefix)
 }
 
+/// Escape SQL LIKE wildcards (`%`, `_`) and the escape character itself
+/// (`\`) so a caller-supplied prefix is matched as a literal string.
+///
+/// SQL LIKE treats `%` as "any characters" and `_` as "any single char."
+/// The old `kv_list` fed the client prefix directly into the pattern, so
+/// `prefix="note_"` matched `noteX`, `noteY`, etc. Not a direct exploit
+/// (the prefix isn't user-content today) but a footgun waiting for a
+/// future feature that surfaces a user-supplied prefix. Callers pair the
+/// escaped output with `ESCAPE '\\'` in the SQL. [audit M5]
+fn escape_like_prefix(prefix: &str) -> String {
+    prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 // Inner helper driven by a bare `Connection`. Extracted from `kv_list` so unit
 // tests can exercise the enumeration filter without a Tauri `State` harness.
-// Enumerates via LIKE on the prefix, then post-filters with `is_secret_key`
-// so that helper is the single source of truth shared with `guard_key`
-// (audit H5 replaced a SQL-side `LIKE 'secret\_%'` clause that was the
-// second copy of the prefix rule).
+// Enumerates via LIKE on the escaped prefix, then post-filters with
+// `is_secret_key` so that helper is the single source of truth shared with
+// `guard_key` (audit H5 replaced a SQL-side `LIKE 'secret\_%'` clause that
+// was the second copy of the prefix rule).
 pub(crate) fn kv_list_conn(
     conn: &rusqlite::Connection,
     prefix: &str,
 ) -> Result<Vec<(String, Value)>, AppError> {
-    let pattern = if prefix.is_empty() { String::from("%") } else { format!("{}%", prefix) };
-    let mut stmt = conn.prepare("SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key")?;
+    let pattern = if prefix.is_empty() {
+        String::from("%")
+    } else {
+        format!("{}%", escape_like_prefix(prefix))
+    };
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM kv WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
+    )?;
     let rows = stmt.query_map(params![pattern], |r| {
         let k: String = r.get(0)?;
         let v: String = r.get(1)?;
@@ -237,6 +259,88 @@ mod tests {
 
         let listed = kv_list_conn(&conn, "secret_").unwrap();
         assert!(listed.is_empty(), "secret_ prefix leaked rows: {listed:?}");
+    }
+
+    // The escape helper must convert LIKE wildcards to their escaped forms and
+    // handle the escape character itself. Cheap, exhaustive coverage.
+    #[test]
+    fn escape_like_prefix_handles_all_wildcards() {
+        assert_eq!(escape_like_prefix("note_content"), "note\\_content");
+        assert_eq!(escape_like_prefix("100%"), "100\\%");
+        assert_eq!(escape_like_prefix("path\\to"), "path\\\\to");
+        // Backslash must be escaped BEFORE % and _ or the newly-inserted
+        // escape backslashes would themselves get escaped a second time.
+        assert_eq!(escape_like_prefix("a\\_b%c"), "a\\\\\\_b\\%c");
+        assert_eq!(escape_like_prefix(""), "");
+        assert_eq!(escape_like_prefix("plain"), "plain");
+    }
+
+    // The M5 attack pattern: a caller-supplied prefix that contains `_` used
+    // to match any character. With the escape in place, `_` is now literal
+    // and the enumeration returns only exact-prefix matches.
+    #[test]
+    fn kv_list_prefix_treats_underscore_as_literal() {
+        use rusqlite::Connection;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        // Two rows: one that should match a literal `note_` prefix, one that
+        // would have matched under a broken-LIKE interpretation (`noteX`).
+        for (k, v) in [
+            ("note_alpha", "1"),
+            ("noteXalpha", "2"),
+        ] {
+            conn.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+                params![k, v],
+            )
+            .unwrap();
+        }
+
+        let listed = kv_list_conn(&conn, "note_").unwrap();
+        let keys: Vec<&str> = listed.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["note_alpha"], "underscore should match literally, got {keys:?}");
+    }
+
+    // `%` in the prefix must not glob — same footgun class as `_`.
+    #[test]
+    fn kv_list_prefix_treats_percent_as_literal() {
+        use rusqlite::Connection;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        for (k, v) in [
+            ("metric_100%_load", "1"),
+            ("metric_50%_load", "2"),
+        ] {
+            conn.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+                params![k, v],
+            )
+            .unwrap();
+        }
+
+        let listed = kv_list_conn(&conn, "metric_100%").unwrap();
+        let keys: Vec<&str> = listed.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["metric_100%_load"],
+            "percent should match literally, got {keys:?}"
+        );
     }
 
     #[test]
