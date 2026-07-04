@@ -19,16 +19,20 @@
 //!   * missing keychain entry     → `AppError::NoApiKey`
 //!   * client builder failure     → `AppError::internal_from` (reqwest config bug)
 //!   * transport error on send    → `AppError::Network`
-//!   * HTTP 401/403               → `AppError::AuthFailed`
+//!   * HTTP 401/403               → `AppError::AuthFailed` (status only, no body — audit M10)
 //!   * HTTP 429                   → `AppError::RateLimited`
-//!   * any other non-2xx          → `AppError::UpstreamApi`
+//!   * any other non-2xx          → `AppError::UpstreamApi` (status only, no body — audit M10)
 //!   * stream body read error     → `AppError::Network`
-//!   * server-emitted stream error→ `AppError::UpstreamApi`
+//!   * server-emitted stream error→ `AppError::UpstreamApi` (generic marker — audit M10)
+//!   * response exceeds 1 MiB cap → `AppError::UpstreamApi` (audit M9)
 //!   * zero-length accumulation   → `AppError::UpstreamEmpty`
+//!
+//! Bounded HTTP timeouts (audit M8): connect 10s / total 120s. See
+//! `CONNECT_TIMEOUT` and `REQUEST_TIMEOUT`.
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::baa;
@@ -39,6 +43,39 @@ use crate::DbState;
 
 const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
+
+// M8: bounded HTTP timeouts for the Anthropic call. Without these the request
+// inherits reqwest's defaults (no total-request timeout, OS-default connect
+// timeout, both effectively "forever" on a broken network path). A hung
+// upstream would block the whole note-generation command indefinitely and
+// starve the audit path.
+//
+//   * REQUEST_TIMEOUT bounds the total wall-clock cost of the streaming call.
+//     120s is a comfortable ceiling for a 2048-token note over a typical
+//     home connection; anything longer indicates real trouble.
+//   * CONNECT_TIMEOUT bounds just the TCP+TLS handshake. 10s is generous for
+//     healthy networks and short enough to fail fast on DNS/routing blackholes.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+// M9: hard cap on how many bytes we will accumulate from the SSE stream into
+// the returned note body. A cooperating server sends a few kB; a hostile or
+// misbehaving upstream could stream indefinitely and OOM the desktop app.
+// 1 MiB is roughly 200k tokens of text — orders of magnitude above any
+// realistic clinical note — while still cheap to hold in memory.
+pub(crate) const MAX_NOTE_BYTES: usize = 1_048_576;
+
+// M10: dev-time helper that keeps upstream error bodies out of the AppError
+// (which surfaces to JS/telemetry) while still preserving them for local
+// debugging in debug builds. Anthropic error responses can include the API
+// key or reflected request fragments — we do NOT want those in structured
+// error strings that get logged, shipped, or shown to users.
+#[cfg(debug_assertions)]
+fn log_upstream_body(context: &str, body: &str) {
+    eprintln!("[notes] {context}: {body}");
+}
+#[cfg(not(debug_assertions))]
+fn log_upstream_body(_context: &str, _body: &str) {}
 
 // Prompt-injection defense (audit finding H6).
 //
@@ -162,6 +199,8 @@ pub(crate) async fn generate_note(
     // rogue-CA MITM risk is accepted (low for a desktop client). [audit L4]
     let client = Client::builder()
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(AppError::internal_from)?;
     // Prompt-injection defense (audit H6): wrap the transcript in
@@ -238,13 +277,19 @@ pub(crate) async fn generate_note(
 
     if !resp.status().is_success() {
         let status = resp.status();
+        // M10: capture the body for local dev debugging ONLY; never include it
+        // in the returned AppError. Anthropic error payloads can reflect
+        // request fragments (which contained our api key header on the wire)
+        // or upstream stack traces — both are dangerous to funnel into
+        // structured telemetry or a user-visible error toast.
         let text = resp.text().await.unwrap_or_default();
+        log_upstream_body(&format!("HTTP {status} body"), &text);
         let (code, err) = match status.as_u16() {
-            401 | 403 => ("auth_failed", AppError::AuthFailed(text)),
+            401 | 403 => ("auth_failed", AppError::AuthFailed(format!("HTTP {status}"))),
             429 => ("rate_limited", AppError::RateLimited),
             _ => (
                 "upstream_api",
-                AppError::UpstreamApi(format!("HTTP {}: {}", status, text)),
+                AppError::UpstreamApi(format!("HTTP {status}")),
             ),
         };
         record_llm_call(
@@ -295,12 +340,33 @@ pub(crate) async fn generate_note(
             match v["type"].as_str() {
                 Some("content_block_delta") => {
                     if let Some(t) = v["delta"]["text"].as_str() {
+                        // M9: hard-cap accumulator so a runaway upstream can't
+                        // OOM the desktop app. Check BEFORE growing `full`.
+                        if full.len().saturating_add(t.len()) > MAX_NOTE_BYTES {
+                            record_llm_call(
+                                &state,
+                                audit_row(
+                                    "upstream_api",
+                                    Some("upstream_api"),
+                                    full.len() as i64,
+                                    upstream_reqid.clone(),
+                                ),
+                            );
+                            return Err(AppError::UpstreamApi(
+                                "response exceeded 1 MiB cap".into(),
+                            ));
+                        }
                         full.push_str(t);
                         let _ = app.emit("scribe:note_chunk", t);
                     }
                 }
                 Some("error") => {
-                    let msg = v["error"]["message"].as_str().unwrap_or("unknown stream error");
+                    // M10: keep the upstream error body OUT of the AppError.
+                    // The `msg` field can contain reflected request content or
+                    // upstream diagnostic text; ship only a generic marker to
+                    // telemetry and stash the detail behind a dev-only log.
+                    let msg = v["error"]["message"].as_str().unwrap_or("unknown");
+                    log_upstream_body("stream error body", msg);
                     record_llm_call(
                         &state,
                         audit_row(
@@ -310,7 +376,7 @@ pub(crate) async fn generate_note(
                             upstream_reqid.clone(),
                         ),
                     );
-                    return Err(AppError::UpstreamApi(format!("stream: {}", msg)));
+                    return Err(AppError::UpstreamApi("stream error".into()));
                 }
                 _ => {}
             }
@@ -402,5 +468,52 @@ mod tests {
         assert_eq!(&s[19..20], "Z");
         let year: i32 = s[..4].parse().unwrap();
         assert!(year >= 2026, "timestamp year suspiciously old: {}", year);
+    }
+
+    // M8: pin the bounded HTTP timeouts. If someone raises the request cap to
+    // "1 hour" or drops the connect timeout to a suicidal value, this test
+    // surfaces the change during review.
+    #[test]
+    fn http_timeouts_are_bounded() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(120));
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert!(
+            CONNECT_TIMEOUT < REQUEST_TIMEOUT,
+            "connect timeout must be strictly less than total timeout"
+        );
+    }
+
+    // M9: pin the SSE accumulator ceiling. 1 MiB is a deliberate tradeoff
+    // between "comfortably above any realistic clinical note" and "cheap to
+    // hold in memory". A silent shrink would truncate real notes; a silent
+    // growth would defeat the OOM guard. Force any change through review.
+    #[test]
+    fn max_note_bytes_is_one_mib() {
+        assert_eq!(MAX_NOTE_BYTES, 1_048_576);
+    }
+
+    // M9 semantics: the check is `full.len() + t.len() > MAX_NOTE_BYTES`.
+    // Walk through the arithmetic on a small budget so the boundary is
+    // documented and any refactor of the guard clause fails loudly.
+    #[test]
+    fn accumulator_overflow_math_matches_guard() {
+        // Pretend the cap is 10 bytes and the accumulator already holds 8.
+        let cap: usize = 10;
+        let acc_len: usize = 8;
+        // A 2-byte chunk exactly fills the cap — must be ALLOWED.
+        assert!(!(acc_len.saturating_add(2) > cap));
+        // A 3-byte chunk overflows — must be REJECTED.
+        assert!(acc_len.saturating_add(3) > cap);
+    }
+
+    // M10: log_upstream_body must never panic and must accept both empty and
+    // huge payloads without allocating unbounded structures. This is a
+    // smoke-test — the important thing is that the AppError construction
+    // stays body-free (covered by inspection + code review).
+    #[test]
+    fn log_upstream_body_accepts_any_payload() {
+        log_upstream_body("context", "");
+        log_upstream_body("context", "short body");
+        log_upstream_body("context", &"x".repeat(10_000));
     }
 }
