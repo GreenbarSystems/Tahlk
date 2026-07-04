@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::DbState;
+use crate::{note_history, DbState};
 
 // Column order shared by list_encounters and get_encounter. Keeping the
 // SELECT list identical between the two paths means encounter_row_to_json
@@ -37,7 +37,7 @@ pub(crate) fn open_database(app: &AppHandle) -> rusqlite::Result<Connection> {
     let data_dir = app.path().app_data_dir().expect("could not resolve app_data_dir");
     std::fs::create_dir_all(&data_dir).expect("could not create app data dir");
     let db_path = data_dir.join("tahlk.db");
-    let conn = Connection::open(&db_path)?;
+    let mut conn = Connection::open(&db_path)?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous   = NORMAL;
@@ -65,6 +65,13 @@ pub(crate) fn open_database(app: &AppHandle) -> rusqlite::Result<Connection> {
          CREATE INDEX IF NOT EXISTS enc_status_idx ON encounters (status);
          CREATE INDEX IF NOT EXISTS enc_created_idx ON encounters (created_at DESC);",
     )?;
+
+    // note_history: relational replacement for the legacy KV blob. Schema
+    // creation + one-shot migration from note_history_v1::<id> KV rows. The
+    // migration is idempotent and safe to re-run on every startup.
+    note_history::init_schema(&conn)?;
+    note_history::migrate_from_kv(&mut conn)?;
+
     Ok(conn)
 }
 

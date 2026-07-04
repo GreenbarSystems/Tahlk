@@ -20,13 +20,36 @@ import assert from 'node:assert/strict';
 // ── Mock Tauri runtime (installed before app modules import) ────────────────
 const calls = [];
 let responders = {};
+// note_history table stand-in: mirrors what the Rust side would persist. Keyed
+// by encounterId, values are arrays of entry rows (JS shape). Reset per test.
+let _historyStore = new Map();
 
 function invokeMock(cmd, args) {
   calls.push({ cmd, args });
   const r = responders[cmd];
   if (r instanceof Error) return Promise.reject(r);
   if (typeof r === 'function') return Promise.resolve(r(args));
-  return Promise.resolve(r === undefined ? null : r);
+  if (r !== undefined) return Promise.resolve(r);
+
+  // Default responders for the note_history commands so tests don't have to
+  // re-implement the chain semantics per test.
+  if (cmd === 'note_history_list') {
+    return Promise.resolve(_historyStore.get(args.encounterId)?.slice() || []);
+  }
+  if (cmd === 'note_history_append') {
+    const list = _historyStore.get(args.encounterId) || [];
+    // Enforce prev_hash chain the same way Rust will.
+    const tail = list[list.length - 1];
+    const expectedPrev = tail ? (tail.entryHash ?? null) : null;
+    const gotPrev = args.entry.prevHash ?? null;
+    if (expectedPrev !== gotPrev) {
+      return Promise.reject(new Error(`prev_hash chain mismatch (mock)`));
+    }
+    list.push(args.entry);
+    _historyStore.set(args.encounterId, list);
+    return Promise.resolve(list.length);
+  }
+  return Promise.resolve(null);
 }
 
 globalThis.document = { getElementById: () => null }; // toast() no-ops in tests
@@ -49,6 +72,7 @@ const uid = () => `enc-test-${++_n}`;
 beforeEach(() => {
   calls.length = 0;
   responders = {};
+  _historyStore = new Map();
 });
 
 test('generate -> edit -> sign builds a valid, linked hash chain', async () => {
@@ -57,7 +81,7 @@ test('generate -> edit -> sign builds a valid, linked hash chain', async () => {
   await saveDraftEdited(id, 'NOTE v2', 'TRANSCRIPT');
   await signNote(id, 'NOTE v2', 'TRANSCRIPT', 'Dr. Smith');
 
-  const history = loadHistory(id);
+  const history = await loadHistory(id);
   assert.equal(history.length, 3);
   assert.deepEqual(history.map(e => e.action), ['generated', 'edited', 'signed']);
 
@@ -87,7 +111,7 @@ test('post-sign tampering is detectable', async () => {
   const id = uid();
   await signNote(id, 'SIGNED NOTE', 'TRANSCRIPT', 'Dr. Smith');
 
-  const history = loadHistory(id);
+  const history = await loadHistory(id);
   assert.equal((await verifyHistoryChain(history)).ok, true);
 
   // mutate the signed entry's content hash without re-deriving entryHash
@@ -114,7 +138,8 @@ test('signed hash binds note + transcript + signer', async () => {
 
 test('sign-off fails closed: a failed history write never marks the encounter signed', async () => {
   const id = uid();
-  responders['kv_set'] = new Error('disk full'); // durable chain write fails
+  // Durable chain write fails at the note_history_append boundary.
+  responders['note_history_append'] = new Error('disk full');
 
   await assert.rejects(() => signNote(id, 'NOTE', 'TRANSCRIPT', 'Dr. Smith'));
 

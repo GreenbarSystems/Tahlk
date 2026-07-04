@@ -1,14 +1,15 @@
 //! Tahlk desktop crate root.
 //!
 //! Modules are split by concern:
-//!   - `db`         — SQLite bootstrap, encounter row projection.
-//!   - `secrets`    — Anthropic API key in the OS keychain + legacy migration.
-//!   - `kv`         — generic key/value store commands (secret_* namespace blocked).
-//!   - `encounters` — encounter CRUD, sign-off, stats.
-//!   - `audio`      — session audio save/delete with path-traversal hardening.
-//!   - `whisper`    — local whisper.cpp sidecar transcription.
-//!   - `notes`      — Anthropic streaming note generation.
-//!   - `export`     — data-location lookup + save-as export.
+//!   - `db`            — SQLite bootstrap, encounter row projection.
+//!   - `secrets`       — Anthropic API key in the OS keychain + legacy migration.
+//!   - `kv`            — generic key/value store commands (secret_* namespace blocked).
+//!   - `encounters`    — encounter CRUD, sign-off, stats.
+//!   - `note_history`  — relational note-history append-log + KV→table migration.
+//!   - `audio`         — session audio save/delete with path-traversal hardening.
+//!   - `whisper`       — local whisper.cpp sidecar transcription.
+//!   - `notes`         — Anthropic streaming note generation.
+//!   - `export`        — data-location lookup + save-as export.
 //!
 //! `DbState` stays at the crate root so every module can name it via
 //! `crate::DbState` without cyclic imports; this file only wires setup and
@@ -23,6 +24,7 @@ mod db;
 mod encounters;
 mod export;
 mod kv;
+mod note_history;
 mod notes;
 mod secrets;
 mod whisper;
@@ -56,6 +58,8 @@ pub fn run() {
             audio::save_session_audio,
             audio::delete_session_audio,
             encounters::clear_encounter_audio_path,
+            note_history::note_history_list,
+            note_history::note_history_append,
             whisper::model_downloaded,
             whisper::download_whisper_model,
             whisper::transcribe_audio,

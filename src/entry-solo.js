@@ -90,7 +90,7 @@ async function renderMainContent() {
     // post-sign alteration of the audit history (the chain was always built
     // but never checked — this enforces it).
     if (_openEncounter.status === 'signed') {
-      const integrity = await verifyHistoryChain(loadHistory(_openEncounter.id));
+      const integrity = await verifyHistoryChain(await loadHistory(_openEncounter.id));
       if (!integrity.ok) {
         toast('⚠ Integrity check failed for this signed note — its audit chain may have been altered.', 6000);
       }
