@@ -177,8 +177,35 @@ pub(crate) fn encounter_stats(state: State<DbState>, today: String) -> Result<Va
     Ok(json!({ "total": total, "signed": signed, "today": today_count }))
 }
 
+/// Extract a required string field from an incoming encounter payload,
+/// or return `AppError::InvalidInput` naming the missing field.
+///
+/// Previously the four required fields on `upsert_encounter` used
+/// `unwrap_or("")`, which coerced missing values into empty strings and
+/// happily persisted them — not exploitable, but it hid bugs behind a
+/// misleading NOT NULL success. Failing loudly here surfaces the caller
+/// error at the boundary (audit L2).
+fn required_str<'a>(incoming: &'a Value, field: &'static str) -> Result<&'a str, AppError> {
+    match incoming[field].as_str() {
+        Some(s) if !s.is_empty() => Ok(s),
+        _ => Err(AppError::invalid(format!(
+            "encounter.{field} is required and must be a non-empty string"
+        ))),
+    }
+}
+
 #[tauri::command]
 pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), AppError> {
+    // Fail loudly on missing required fields BEFORE taking the DB lock so a
+    // shape-invalid payload can't tie up the connection. `status` retains a
+    // legitimate default of "draft" because callers reasonably omit it on
+    // fresh encounters.
+    let id             = required_str(&encounter, "id")?;
+    let provider_id    = required_str(&encounter, "provider_id")?;
+    let encounter_date = required_str(&encounter, "encounter_date")?;
+    let created_at     = required_str(&encounter, "created_at")?;
+    let status         = encounter["status"].as_str().unwrap_or("draft");
+
     let mut conn = state.0.lock();
     // Wrap the check + write in a single transaction so a legitimate
     // concurrent sign-off between check and write cannot squeeze in and
@@ -196,13 +223,13 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
              signed_at    = excluded.signed_at, \
              signed_hash  = excluded.signed_hash",
         params![
-            encounter["id"].as_str().unwrap_or(""),
-            encounter["provider_id"].as_str().unwrap_or(""),
-            encounter["encounter_date"].as_str().unwrap_or(""),
+            id,
+            provider_id,
+            encounter_date,
             encounter["patient_alias"].as_str(),
-            encounter["status"].as_str().unwrap_or("draft"),
+            status,
             encounter["audio_path"].as_str(),
-            encounter["created_at"].as_str().unwrap_or(""),
+            created_at,
             encounter["signed_at"].as_str(),
             encounter["signed_hash"].as_str(),
         ],
@@ -368,6 +395,52 @@ mod tests {
         assert_eq!(clamp_list_limit(Some(1)), 1);
         assert_eq!(clamp_list_limit(Some(25)), 25);
         assert_eq!(clamp_list_limit(Some(100)), 100);
+    }
+
+    #[test]
+    fn required_str_accepts_non_empty_string() {
+        let payload = json!({"id": "enc-42"});
+        assert_eq!(required_str(&payload, "id").unwrap(), "enc-42");
+    }
+
+    #[test]
+    fn required_str_rejects_missing_field() {
+        // Missing key on the JSON object — the old code would have coerced
+        // this to "" via unwrap_or and cheerfully persisted an empty PK.
+        let payload = json!({"provider_id": "prov-1"});
+        let err = required_str(&payload, "id").unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        // Error message must name the offending field so JS gets an
+        // actionable toast instead of a generic "invalid input".
+        let msg = format!("{err}");
+        assert!(msg.contains("id"), "error should name the missing field: {msg}");
+    }
+
+    #[test]
+    fn required_str_rejects_empty_string() {
+        // An explicit "" is just as bad as missing — both violate NOT NULL
+        // semantics in a misleading way (INSERT succeeds with a blank PK).
+        let payload = json!({"id": ""});
+        assert!(matches!(
+            required_str(&payload, "id").unwrap_err(),
+            AppError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
+    fn required_str_rejects_wrong_type() {
+        // Numeric/bool/null values were previously silently coerced to "";
+        // now they surface a typed error at the boundary.
+        for val in [json!(42), json!(true), json!(null), json!({"nested": "obj"})] {
+            let payload = json!({"id": val});
+            assert!(
+                matches!(
+                    required_str(&payload, "id").unwrap_err(),
+                    AppError::InvalidInput(_)
+                ),
+                "wrong-type value should reject: {payload}"
+            );
+        }
     }
 
     #[test]
