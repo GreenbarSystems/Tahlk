@@ -19,7 +19,7 @@ export function renderEncounterPanel(encounter) {
   const templates = listTemplates();
 
   return `
-    <div class="panel encounter-panel" data-encounter-id="${encounter.id}">
+    <div class="panel encounter-panel" data-encounter-id="${escapeHtml(encounter.id)}">
 
       <!-- Header: date · alias (always editable) · status · close -->
       <div class="panel-header">
@@ -108,7 +108,7 @@ export function renderEncounterPanel(encounter) {
                 </div>
               ` : `
                 <div class="signed-export-row">
-                  <span class="signed-at">Signed ${displayDate(encounter.signed_at)}</span>
+                  <span class="signed-at">Signed ${escapeHtml(displayDate(encounter.signed_at))}</span>
                   <div class="export-controls">
                     <select id="export-format">
                       <option value="plain">Plain text</option>
