@@ -6,13 +6,14 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Mock Tauri runtime so storageBackend uses the real TauriBackend path.
+// See src/platform/tauri.js — L4 migrated the wrapper from the __TAURI__
+// global to ESM imports; tests use the __TAHLK_TEST_TAURI__ escape hatch.
 globalThis.document = { getElementById: () => null };
-globalThis.window = {
-  __TAURI__: {
-    core: { invoke: () => Promise.resolve(null) },
-    event: { listen: () => () => {} },
-  },
+globalThis.__TAHLK_TEST_TAURI__ = {
+  core: { invoke: () => Promise.resolve(null) },
+  event: { listen: () => () => {} },
 };
+globalThis.window = globalThis.window || {};
 
 const telemetry = await import('../../src/core/telemetry.js');
 
