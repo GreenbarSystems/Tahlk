@@ -25,7 +25,11 @@ pub(crate) fn safe_id(id: &str) -> Result<(), AppError> {
 #[tauri::command]
 pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, AppError> {
     safe_id(&encounter_id)?;
-    let data = BASE64.decode(base64_data.as_bytes()).map_err(AppError::invalid)?;
+    // Bad base64 from JS is a frontend-invariant violation, so surface it as
+    // InvalidInput rather than an opaque internal error.
+    let data = BASE64
+        .decode(base64_data.as_bytes())
+        .map_err(|e| AppError::invalid(format!("base64 decode: {}", e)))?;
     let audio_dir = app
         .path()
         .app_data_dir()
