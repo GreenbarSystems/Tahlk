@@ -194,6 +194,36 @@ fn required_str<'a>(incoming: &'a Value, field: &'static str) -> Result<&'a str,
     }
 }
 
+/// Encounter lifecycle states the local DB will accept. Mirrors the server's
+/// `ALLOWED_STATUS` in `server/src/api.rs` so a compromised JS layer can't
+/// write garbage that the UI then can't render or exit — and so the desktop
+/// and server never disagree about what shapes are valid.
+///
+/// Keep in sync: any addition here MUST be paired with the same addition on
+/// the server (and vice versa), otherwise sync will reject rows the desktop
+/// happily wrote (or the server will accept states the desktop can't render).
+/// [audit M4]
+pub(crate) const ALLOWED_STATUS: &[&str] = &[
+    "recording",
+    "recording_done",
+    "transcribing",
+    "draft",
+    "signed",
+    "exported",
+];
+
+/// Validate an incoming status string against the allowlist. Pure function —
+/// no DB — so unit tests can enumerate variants without a Tauri harness.
+fn check_status(status: &str) -> Result<(), AppError> {
+    if ALLOWED_STATUS.contains(&status) {
+        Ok(())
+    } else {
+        Err(AppError::invalid(format!(
+            "unknown encounter status: {status}"
+        )))
+    }
+}
+
 #[tauri::command]
 pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), AppError> {
     // Fail loudly on missing required fields BEFORE taking the DB lock so a
@@ -205,6 +235,10 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
     let encounter_date = required_str(&encounter, "encounter_date")?;
     let created_at     = required_str(&encounter, "created_at")?;
     let status         = encounter["status"].as_str().unwrap_or("draft");
+    // Reject unknown states at the boundary. Any provided value must appear
+    // on the shared allowlist above; a caller omitting the field entirely
+    // still lands on "draft", which is always valid. [audit M4]
+    check_status(status)?;
 
     let mut conn = state.0.lock();
     // Wrap the check + write in a single transaction so a legitimate
@@ -441,6 +475,61 @@ mod tests {
                 "wrong-type value should reject: {payload}"
             );
         }
+    }
+
+    // Every allowlisted status must pass check_status. Iterates the exact
+    // constant so a merge that drops a state (breaking the desktop↔server
+    // contract) fails the build.
+    #[test]
+    fn check_status_accepts_every_allowlisted_state() {
+        for s in ALLOWED_STATUS {
+            assert!(
+                check_status(s).is_ok(),
+                "{s} is allowlisted but check_status rejected it"
+            );
+        }
+    }
+
+    // Off-list values must be rejected as AppError::InvalidInput. Covers the
+    // exact attack the audit named: a compromised JS layer writing a garbage
+    // status the UI then can't render or exit.
+    #[test]
+    fn check_status_rejects_off_list_values() {
+        for s in [
+            "",
+            "pending",         // similar to "draft", but wrong
+            "signed_at",       // an adjacent field name
+            "DRAFT",           // case sensitivity matters
+            "draft ",          // trailing whitespace matters
+            "'; DROP TABLE",   // pathological
+            "\u{202e}gnitroper", // RTL-override + reversed 'reporting'
+        ] {
+            let err = check_status(s).unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidInput(_)),
+                "{s:?} should reject as InvalidInput, got {err:?}"
+            );
+        }
+    }
+
+    // Pin the exact allowlist against the server's ALLOWED_STATUS. If either
+    // side edits, this test surfaces the desync during review. Also ties the
+    // pin to a doc comment reviewer can grep for.
+    #[test]
+    fn allowed_status_pin_mirrors_server_contract() {
+        assert_eq!(
+            ALLOWED_STATUS,
+            &[
+                "recording",
+                "recording_done",
+                "transcribing",
+                "draft",
+                "signed",
+                "exported",
+            ],
+            "ALLOWED_STATUS changed — update `server/src/api.rs::ALLOWED_STATUS` \
+             in the same commit or sync will break."
+        );
     }
 
     #[test]
