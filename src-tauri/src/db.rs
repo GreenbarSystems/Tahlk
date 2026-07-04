@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use tauri::{AppHandle, Manager};
 
-use crate::{db_key, errors::AppError, note_history, DbState};
+use crate::{db_key, errors::AppError, llm_audit, note_history, DbState};
 
 // SQLite file magic ("SQLite format 3\0"). SQLCipher-encrypted files start
 // with random-looking ciphertext; plaintext files always begin with this
@@ -263,6 +263,10 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<Connection, AppError> {
     // migration is idempotent and safe to re-run on every startup.
     note_history::init_schema(&conn)?;
     note_history::migrate_from_kv(&mut conn)?;
+
+    // llm_audit: append-only log of Anthropic API calls (metadata only, no
+    // PHI). Schema is idempotent — CREATE IF NOT EXISTS on every launch.
+    llm_audit::init_schema(&conn)?;
 
     Ok(conn)
 }

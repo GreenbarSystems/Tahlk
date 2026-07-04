@@ -65,6 +65,85 @@ database only — never sent to any server.
 Long-term: once a HIPAA BAA is signed with Anthropic, the app will switch
 to a managed key and users won't need to provide their own.
 
+## Anthropic BAA acknowledgment (HIPAA)
+
+Tahlk sends session transcripts to Anthropic for note generation. Under HIPAA,
+any PHI transmitted to a third party requires an executed Business Associate
+Agreement (BAA) between the covered entity and that third party. Tahlk
+refuses to make the call until the provider has affirmed a BAA is in place.
+
+**Where the gate lives.** The check runs in Rust (`src-tauri/src/baa.rs`)
+as the first statement of `generate_note`, before the API key is read and
+before any HTTP client is built. A WebView compromise cannot bypass it —
+cookies, session storage, or DOM manipulation have no path to the SQLite
+row that holds the acknowledgment.
+
+**Where the ack is recorded.**
+- KV key: `note_settings_v1::baa_ack`
+- Row shape:
+  ```json
+  {
+    "acknowledged": true,
+    "acknowledged_at": "2026-07-04T14:22:11Z",
+    "provider_id": "Dr. Jane Smith",
+    "attestation_version": 1
+  }
+  ```
+- `attestation_version` is stamped by Rust (not by JS). Bumping
+  `ATTESTATION_VERSION` in `baa.rs` (and the matching
+  `BAA_ATTESTATION_VERSION` in `src/data/baa.js`) invalidates every existing
+  ack and forces re-attestation — use this when BAA terms materially change.
+- Missing, `acknowledged: false`, malformed, or stale-version rows all fail
+  closed (treated as un-acknowledged).
+
+**Where the provider sees it.**
+- **First-run onboarding** — Step 3 is a required checkbox alongside the API
+  key. The button is inert until the box is checked.
+- **Settings → BAA acknowledgment** — shows current status (Acknowledged /
+  Not acknowledged), the timestamp and provider name, and a toggle to
+  revoke or re-affirm. Revocation takes effect immediately — the very next
+  `generate_note` call from that device is rejected with error code
+  `baa_required`.
+
+**Error surface.** When the gate refuses, Rust returns
+`AppError::BaaRequired` which serializes to `{"code":"baa_required", ...}`.
+The encounter panel branches on this code and toasts “Confirm your Anthropic
+BAA in Settings before generating notes.” The wire string is guarded by a
+Rust unit test (`baa::tests::error_code_wire_shape`) so a rename cannot slip
+past review.
+
+## LLM call audit log
+
+Every attempt to call Anthropic — successful or not — writes one row to the
+append-only `llm_audit` table (`src-tauri/src/llm_audit.rs`). This is
+**separate** from `note_history` on purpose: note_history is a
+tamper-evident hash chain of note content, and pouring metadata rows into
+it would muddy the chain.
+
+**Columns:** `id, created_at, encounter_id, provider_id, model, endpoint,
+request_bytes, response_bytes, upstream_reqid, outcome, error_code,
+duration_ms`.
+
+**Never logged:** transcript text, generated note text, API key, or any
+other PHI. Byte counts and the upstream `request-id` header are the
+strongest signals recorded — enough to correlate with an Anthropic support
+ticket, not enough to leak clinical content.
+
+**Outcomes recorded:** `success`, `network_error`, `http_error` (with the
+specific `error_code` like `auth_failed` / `rate_limited` / `upstream_api`),
+`stream_error`, `upstream_empty`. Every exit path in `generate_note` emits a
+row — a bug that skipped one would be caught by the Rust tests.
+
+**Retention:** rows live for the lifetime of the SQLite database. There is
+no automatic pruning; a future PR can add a rolling retention window.
+Read-side access is via the `llm_audit_list` Tauri command
+(`encounter_id?`, `limit?` — clamped to 500, `before_id?` for pagination).
+
+**Failure mode:** if inserting an audit row fails, the insert error is
+swallowed and the caller-facing error is returned unchanged. A dropped
+audit row is preferable to masking the real network failure with an
+unrelated storage error.
+
 ## Architecture
 
 ```
@@ -82,6 +161,10 @@ src-tauri/      — Rust backend: SQLite KV + encounters + audio + LLM + export
 - **Local-first**: all data in SQLite on the user's device
 - **SHA-256 hash chain**: every note edit logged; sign-off binds to exact content
 - **API key in LOCAL_ONLY storage**: stored in Rust/SQLite, never accessible from JS
+- **BAA gate in Rust**: `generate_note` refuses to call Anthropic unless a
+  current-version BAA acknowledgment row is present — unbypassable from JS
+- **LLM call audit log**: every Anthropic call is recorded (metadata only,
+  never transcript or response text) in the `llm_audit` table
 - **Audio never leaves the device**: WAV written to app data dir, transcribed locally via whisper.cpp
 - **Tauri CSP**: no external scripts; Anthropic API whitelisted in connect-src only
 

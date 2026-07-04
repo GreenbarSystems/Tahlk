@@ -4,10 +4,14 @@
 //
 // Error surface contract: on failure we (1) record a diagnostic locally
 // via telemetry.recordError and (2) re-throw the AppError from `invoke`
-// (preserving `code` for branch logic like `no_api_key` → open Settings).
-// We do NOT emit `scribe:generation_error` — the caller toasts once.
-// Emitting an event on top of throwing led to two user-visible surfaces
-// for a single failure.
+// (preserving `code` for branch logic like `no_api_key` or `baa_required`
+// → open Settings). We do NOT emit `scribe:generation_error` — the caller
+// toasts once. Emitting an event on top of throwing led to two user-visible
+// surfaces for a single failure.
+//
+// `encounterId` is forwarded to Rust so the on-device LLM audit row can be
+// attached to the encounter that triggered the call (see src-tauri/src/
+// llm_audit.rs). It is metadata only — never the transcript or note text.
 
 import { emit } from '../core/eventBus.js';
 import { invoke, listen } from '../platform/tauri.js';
@@ -32,6 +36,7 @@ export async function generateNote(transcript, templateId, encounterId) {
     const note = await invoke('generate_note', {
       transcript,
       systemPrompt: template.systemPrompt,
+      encounterId: encounterId ?? null,
     });
     emit('scribe:generation_complete', { note, encounterId });
     return note;
