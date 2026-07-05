@@ -79,6 +79,29 @@ fn log_upstream_body(context: &str, body: &str) {
 #[cfg(not(debug_assertions))]
 fn log_upstream_body(_context: &str, _body: &str) {}
 
+// N1 (HIPAA §164.312(c)(1) Integrity): a genuinely malformed SSE `data:`
+// frame (truncated JSON, corrupt bytes, an unexpected shape) used to be
+// dropped *silently* — no log, no metric, no audit trail. For clinical note
+// content that is a data-loss/integrity failure that can't even be
+// investigated after the fact. We now emit a structured warning for every
+// dropped frame so the loss is at least observable.
+//
+// PHI SAFETY: this must NEVER log the frame body. serde_json's `Error`
+// Display renders only structural position ("expected `,` at line 1 column
+// 42") and never echoes the source text, so it is safe to include. We log
+// the byte length and the coarse error `Category` (Io/Syntax/Data/Eof) as
+// the "error kind" — enough to debug a framing/encoding bug without leaking
+// any note content into logs. Unlike `log_upstream_body`, this fires in
+// release builds too: the whole point is a persistent integrity signal.
+fn log_dropped_sse_frame(byte_len: usize, err: &serde_json::Error) {
+    eprintln!(
+        "[notes] dropped malformed SSE frame: {} bytes, error_kind={:?} ({})",
+        byte_len,
+        err.classify(),
+        err
+    );
+}
+
 // Prompt-injection defense (audit finding H6).
 //
 // A session transcript is untrusted user-shaped input: anything the patient
@@ -229,31 +252,47 @@ fn http_client() -> Result<&'static Client, AppError> {
     Ok(CLIENT.get_or_init(|| built))
 }
 
-/// Borrow-only view of the Anthropic SSE frames we care about. Only the
-/// fields we actually consume are declared; everything else is dropped by
-/// `#[serde(deny_unknown_fields)]`-free deserialization. Every &str borrows
-/// from the SSE `data:` line, which in turn borrows from `byte_buf` — so an
-/// `SseEvent<'a>` must not outlive the batch iteration.
+/// View of the Anthropic SSE frames we care about. Only the fields we
+/// actually consume are declared; everything else is ignored by the
+/// (non-`deny_unknown_fields`) deserialization.
+///
+/// Each string field is an owned `String`. This is deliberate and is the
+/// crux of HIPAA integrity finding N1: the previous implementation used a
+/// borrow-only `&'a str` field to avoid an allocation (perf note P3). But a
+/// borrowed `&str` cannot represent a JSON string that requires unescaping —
+/// serde must allocate to turn `\n`, `\"`, `\\`, `\uXXXX`, … into their
+/// decoded bytes. So any note delta containing one of those escapes simply
+/// *failed to deserialize*, and the parent loop silently dropped the whole
+/// frame — losing real clinical note content mid-stream with no error and no
+/// audit trail. Owning the strings lets serde allocate-and-unescape as
+/// needed, so every delta deserializes correctly and is preserved
+/// character-for-character.
+///
+/// (A `Cow<'a, str>` with `#[serde(borrow)]` was evaluated to keep the P3
+/// zero-copy path for the non-escaped common case, but serde_json does not
+/// borrow through these nested `Option` fields — it produced `Cow::Owned`
+/// even for escape-free input — so `Cow` bought the complexity of a lifetime
+/// with none of the savings. Plain `String` is simpler and equivalent here.)
 #[derive(Deserialize)]
-struct SseEvent<'a> {
-    #[serde(rename = "type", borrow)]
-    event_type: &'a str,
-    #[serde(borrow, default)]
-    delta: Option<SseDelta<'a>>,
-    #[serde(borrow, default)]
-    error: Option<SseErrorBody<'a>>,
+struct SseEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    delta: Option<SseDelta>,
+    #[serde(default)]
+    error: Option<SseErrorBody>,
 }
 
 #[derive(Deserialize)]
-struct SseDelta<'a> {
-    #[serde(borrow, default)]
-    text: Option<&'a str>,
+struct SseDelta {
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct SseErrorBody<'a> {
-    #[serde(borrow, default)]
-    message: Option<&'a str>,
+struct SseErrorBody {
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[tauri::command]
@@ -395,6 +434,10 @@ pub(crate) async fn generate_note(
     // demand if a note is longer.
     let mut byte_buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut full = String::with_capacity(16 * 1024);
+    // N1: count of malformed frames dropped across the whole stream so we can
+    // emit a single summary line at the end (individual drops are already
+    // logged as they happen). Metadata only — never any note content.
+    let mut dropped_frames: u64 = 0;
 
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
@@ -416,7 +459,7 @@ pub(crate) async fn generate_note(
 
         // P3: parse lines out of byte_buf in-place using &[u8] slices.
         //
-        // The previous implementation was three copies per delta:
+        // The original implementation was three copies per delta:
         //   1. `byte_buf.drain(..=pos).collect()` — memcpy into a fresh Vec.
         //   2. `String::from_utf8_lossy(&line_bytes)` — usually a second copy.
         //   3. `serde_json::from_str::<Value>` — owned Value tree with owned
@@ -424,13 +467,13 @@ pub(crate) async fn generate_note(
         //
         // Now: locate line boundaries with memchr::memchr (SIMD on x86/aarch64
         // where available, falls back to a scalar loop), decode UTF-8 by
-        // borrow, and deserialize into a borrowed SseEvent<'_>. The delta
-        // text is a &str aliasing byte_buf until we push_str into `full`, so
-        // we defer compaction (`drain(..end)`) until every line in this batch
-        // has been consumed.
-        //
-        // Behavior is unchanged — same error mapping, same audit rows, same
-        // event payload, same M9 cap, same M10 error-body suppression.
+        // borrow, and deserialize into an `SseEvent`. Only the delta `text`
+        // (and error `message`) are copied out — into owned `String`s — which
+        // is required for correctness: a borrowed `&str` cannot hold a JSON
+        // string that needs unescaping, and silently dropping those frames was
+        // integrity finding N1 (see the `SseEvent` doc comment). Line
+        // boundaries are still found without copying, and compaction
+        // (`drain(..consumed)`) is still deferred to once per batch.
         let mut consumed: usize = 0;
         let mut cap_exceeded = false;
         let mut stream_error = false;
@@ -450,11 +493,21 @@ pub(crate) async fn generate_note(
                 continue;
             }
 
-            // Borrow-only deserialize — `text`, `type`, and `message` alias
-            // `data` (which aliases byte_buf). Malformed frames are silently
-            // skipped, matching the previous `let Ok(v) = … else { continue }`.
-            let Ok(evt) = serde_json::from_str::<SseEvent<'_>>(data) else { continue };
-            match evt.event_type {
+            // N1: a deserialize failure here is a genuinely malformed frame
+            // (truncated/corrupt JSON) — the old escape-sequence false failure
+            // is gone now that the fields own their strings. Log the drop
+            // (metadata only, no PHI) so the integrity loss is observable,
+            // then continue so one bad frame can't take down the rest of the
+            // stream or drop other valid events in the session.
+            let evt = match serde_json::from_str::<SseEvent>(data) {
+                Ok(evt) => evt,
+                Err(e) => {
+                    log_dropped_sse_frame(data.len(), &e);
+                    dropped_frames = dropped_frames.saturating_add(1);
+                    continue;
+                }
+            };
+            match evt.event_type.as_str() {
                 "content_block_delta" => {
                     let Some(delta) = evt.delta else { continue };
                     let Some(t) = delta.text else { continue };
@@ -464,16 +517,13 @@ pub(crate) async fn generate_note(
                         cap_exceeded = true;
                         break;
                     }
-                    full.push_str(t);
-                    let _ = app.emit("scribe:note_chunk", t);
+                    full.push_str(&t);
+                    let _ = app.emit("scribe:note_chunk", &t);
                 }
                 "error" => {
                     // M10: keep the upstream error body OUT of the AppError.
-                    let msg = evt
-                        .error
-                        .and_then(|e| e.message)
-                        .unwrap_or("unknown");
-                    log_upstream_body("stream error body", msg);
+                    let msg = evt.error.and_then(|e| e.message);
+                    log_upstream_body("stream error body", msg.as_deref().unwrap_or("unknown"));
                     stream_error = true;
                     break;
                 }
@@ -515,6 +565,17 @@ pub(crate) async fn generate_note(
             );
             return Err(AppError::UpstreamApi("stream error".into()));
         }
+    }
+
+    // N1: surface an aggregate integrity signal if any frames were dropped.
+    // The note still returns (we don't fail an otherwise-good stream over a
+    // stray corrupt frame), but the loss is now visible in logs rather than
+    // silent. Metadata only — no note content.
+    if dropped_frames > 0 {
+        eprintln!(
+            "[notes] stream completed with {} malformed SSE frame(s) dropped",
+            dropped_frames
+        );
     }
 
     if full.is_empty() {
@@ -659,9 +720,12 @@ mod tests {
     #[test]
     fn sse_content_block_delta_yields_text() {
         let frame = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
-        let evt: SseEvent<'_> = serde_json::from_str(frame).unwrap();
+        let evt: SseEvent = serde_json::from_str(frame).unwrap();
         assert_eq!(evt.event_type, "content_block_delta");
-        assert_eq!(evt.delta.as_ref().and_then(|d| d.text), Some("Hello"));
+        assert_eq!(
+            evt.delta.as_ref().and_then(|d| d.text.as_deref()),
+            Some("Hello")
+        );
         assert!(evt.error.is_none());
     }
 
@@ -671,7 +735,7 @@ mod tests {
         // Deserialize succeeds; the consumer sees delta.text == None and
         // skips — same behavior as the previous v["delta"]["text"].as_str().
         let frame = r#"{"type":"content_block_delta","delta":{"type":"tool_use_delta"}}"#;
-        let evt: SseEvent<'_> = serde_json::from_str(frame).unwrap();
+        let evt: SseEvent = serde_json::from_str(frame).unwrap();
         assert_eq!(evt.event_type, "content_block_delta");
         assert!(evt.delta.is_some(), "delta should deserialize even without a text field");
         assert!(evt.delta.unwrap().text.is_none(), "missing text must be None, not empty string");
@@ -680,18 +744,21 @@ mod tests {
     #[test]
     fn sse_error_frame_yields_message() {
         let frame = r#"{"type":"error","error":{"type":"overloaded","message":"upstream busy"}}"#;
-        let evt: SseEvent<'_> = serde_json::from_str(frame).unwrap();
+        let evt: SseEvent = serde_json::from_str(frame).unwrap();
         assert_eq!(evt.event_type, "error");
-        assert_eq!(evt.error.and_then(|e| e.message), Some("upstream busy"));
+        assert_eq!(
+            evt.error.and_then(|e| e.message).as_deref(),
+            Some("upstream busy")
+        );
     }
 
     #[test]
     fn sse_error_frame_without_message_falls_back_to_unknown() {
         // Mirrors the .unwrap_or("unknown") behavior in the consumer.
         let frame = r#"{"type":"error","error":{"type":"overloaded"}}"#;
-        let evt: SseEvent<'_> = serde_json::from_str(frame).unwrap();
-        let msg = evt.error.and_then(|e| e.message).unwrap_or("unknown");
-        assert_eq!(msg, "unknown");
+        let evt: SseEvent = serde_json::from_str(frame).unwrap();
+        let msg = evt.error.and_then(|e| e.message);
+        assert_eq!(msg.as_deref().unwrap_or("unknown"), "unknown");
     }
 
     #[test]
@@ -707,60 +774,185 @@ mod tests {
             r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
             r#"{"type":"message_stop"}"#,
         ] {
-            let evt: SseEvent<'_> = serde_json::from_str(frame)
+            let evt: SseEvent = serde_json::from_str(frame)
                 .unwrap_or_else(|e| panic!("failed to deserialize {frame}: {e}"));
             // All that matters is that the deserialize succeeds and no text
             // payload leaks out; the consumer's match _ arm handles these.
-            let has_text = evt.delta.as_ref().and_then(|d| d.text).is_some();
+            let has_text = evt.delta.as_ref().and_then(|d| d.text.as_deref()).is_some();
             assert!(!has_text, "frame {} should not carry text", evt.event_type);
         }
     }
 
     #[test]
-    fn sse_delta_text_actually_borrows_from_input() {
-        // Guard the perf property: if a future refactor changes
-        // `text: Option<&'a str>` to `text: Option<String>` (e.g. by
-        // dropping the #[serde(borrow)]), the delta text will be a fresh
-        // allocation on every frame — undoing P3. We prove borrowing by
-        // asserting the text slice's memory lives *inside* the input JSON
-        // buffer.
-        let frame = String::from(
-            r#"{"type":"content_block_delta","delta":{"text":"borrowed"}}"#,
-        );
-        let evt: SseEvent<'_> = serde_json::from_str(&frame).unwrap();
-        let text = evt.delta.unwrap().text.unwrap();
-        let frame_start = frame.as_ptr() as usize;
-        let frame_end = frame_start + frame.len();
-        let text_start = text.as_ptr() as usize;
-        assert!(
-            (frame_start..frame_end).contains(&text_start),
-            "delta.text must borrow from the source buffer (got ptr {text_start:x}, buf {frame_start:x}..{frame_end:x})"
-        );
+    fn sse_delta_text_plain_ascii_round_trips() {
+        // The common case: a plain text delta with no escapes must
+        // deserialize and be preserved exactly.
+        let frame = r#"{"type":"content_block_delta","delta":{"text":"plain text"}}"#;
+        assert_eq!(parse_delta_text(frame).as_deref(), Some("plain text"));
     }
 
     #[test]
     fn sse_malformed_json_is_a_deserialize_error() {
-        // The consumer uses `let Ok(evt) = … else { continue }`. We only
-        // need to know that malformed input produces Err, not Ok(garbage).
+        // The consumer logs-and-skips deserialize errors (N1). We only need
+        // to know that malformed input produces Err, not Ok(garbage).
         let frame = r#"{"type":"content_block_delta","delta":{"text":"missing_close""#;
-        let res: Result<SseEvent<'_>, _> = serde_json::from_str(frame);
+        let res: Result<SseEvent, _> = serde_json::from_str(frame);
         assert!(res.is_err(), "malformed JSON must be a Err, not Ok");
     }
 
+    // N1 (HIPAA §164.312(c)(1) Integrity) — regression tests.
+    //
+    // The previous parser deserialized SSE text into a borrow-only `&'a str`.
+    // JSON strings that require unescaping (`\n`, `\"`, `\\`, `\t`, `\uXXXX`)
+    // cannot be produced as a borrow — serde must allocate — so the borrow
+    // deserialize FAILED, and the parent loop silently dropped the whole
+    // frame. Any clinical note text containing a newline, an embedded quote,
+    // or a backslash was therefore silently lost mid-stream, with no error
+    // and no audit trail. The old test here asserted this drop was
+    // "acceptable"; that assumption was wrong. These tests assert the content
+    // is now preserved character-for-character.
+
+    /// Deserialize an Anthropic `content_block_delta` frame the same way the
+    /// stream loop does, returning the decoded delta text.
+    fn parse_delta_text(frame: &str) -> Option<String> {
+        let evt: SseEvent = serde_json::from_str(frame).unwrap();
+        evt.delta.and_then(|d| d.text)
+    }
+
     #[test]
-    fn sse_json_string_escapes_force_owned_and_are_rejected_by_borrow() {
-        // Edge case: JSON allows `\u0041` inside strings, which the parser
-        // must materialize into an owned String because the decoded bytes
-        // don't exist verbatim in the source buffer. A borrow-only field
-        // (`&'a str`) will therefore fail to deserialize. This is fine for
-        // Anthropic's SSE (text deltas do not contain unicode escapes;
-        // they arrive as raw UTF-8), and the parent code treats a failed
-        // frame as skipped rather than fatal.
-        let frame = r#"{"type":"content_block_delta","delta":{"text":"\u0041"}}"#;
-        let res: Result<SseEvent<'_>, _> = serde_json::from_str(frame);
+    fn sse_delta_text_with_newline_survives_round_trip() {
+        // A note with a paragraph break. `\n` inside a JSON string must be
+        // unescaped to a real newline and preserved, not dropped.
+        let frame =
+            r#"{"type":"content_block_delta","delta":{"text":"Line one\nLine two"}}"#;
+        assert_eq!(parse_delta_text(frame).as_deref(), Some("Line one\nLine two"));
+    }
+
+    #[test]
+    fn sse_delta_text_with_embedded_quotes_survives_round_trip() {
+        // Clinical notes routinely quote the patient. The escaped `\"` used
+        // to make the whole frame fail to deserialize and vanish.
+        let frame =
+            r#"{"type":"content_block_delta","delta":{"text":"Patient said \"I feel better\" today"}}"#;
+        assert_eq!(
+            parse_delta_text(frame).as_deref(),
+            Some(r#"Patient said "I feel better" today"#)
+        );
+    }
+
+    #[test]
+    fn sse_delta_text_with_backslash_survives_round_trip() {
+        // Backslashes appear in things like "and/or" shorthand or file paths
+        // pasted into a note. `\\` must round-trip to a single `\`.
+        let frame = r#"{"type":"content_block_delta","delta":{"text":"dosage 5\\10mg"}}"#;
+        assert_eq!(parse_delta_text(frame).as_deref(), Some(r"dosage 5\10mg"));
+    }
+
+    #[test]
+    fn sse_delta_text_with_tab_and_unicode_escape_survives_round_trip() {
+        // `\t` and a `\uXXXX` unicode escape both require unescaping. Exercise
+        // them together to prove the owned-allocation path handles every JSON
+        // escape class, not just the three named in the finding. The escape
+        // here decodes to 'A' (U+0041).
+        let frame =
+            "{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"col1\\tcol2 \\u0041\"}}";
+        assert_eq!(parse_delta_text(frame).as_deref(), Some("col1\tcol2 A"));
+    }
+
+    #[test]
+    fn sse_delta_text_with_multibyte_utf8_survives_round_trip() {
+        // Raw multi-byte UTF-8 (emoji, accented chars) arrives unescaped but
+        // must also survive. Combine with a `\n` escape so both a raw
+        // multi-byte run and an unescape happen in the same delta.
+        let frame =
+            "{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"café ☕\\nnext\"}}";
+        assert_eq!(parse_delta_text(frame).as_deref(), Some("café ☕\nnext"));
+    }
+
+    #[test]
+    fn sse_escaped_content_deserializes_instead_of_failing() {
+        // The crux of N1: escaped content must deserialize successfully (into
+        // an owned String) rather than producing a deserialize error that the
+        // old borrow-only `&str` field caused — the failure the loop used to
+        // treat as a silent drop.
+        let frame = r#"{"type":"content_block_delta","delta":{"text":"a\nb"}}"#;
+        let evt: SseEvent = serde_json::from_str(frame).expect(
+            "escaped content must deserialize, not error into a dropped frame",
+        );
+        assert_eq!(evt.delta.and_then(|d| d.text).as_deref(), Some("a\nb"));
+    }
+
+    #[test]
+    fn sse_full_escaped_note_reconstructs_across_deltas() {
+        // End-to-end reconstruction: several deltas, some escaped, are
+        // concatenated exactly as the stream loop does into `full`. Verify
+        // nothing is dropped and the assembled note matches byte-for-byte.
+        let frames = [
+            r#"{"type":"content_block_delta","delta":{"text":"S: Patient reports \"feeling low\".\n"}}"#,
+            r#"{"type":"content_block_delta","delta":{"text":"O: Affect flat.\tMood 3/10.\n"}}"#,
+            r#"{"type":"content_block_delta","delta":{"text":"A/P: Continue plan; path C:\\notes."}}"#,
+        ];
+        let mut full = String::new();
+        for frame in frames {
+            let t = parse_delta_text(frame).expect("every delta must parse and carry text");
+            full.push_str(&t);
+        }
+        let expected = "S: Patient reports \"feeling low\".\n\
+                        O: Affect flat.\tMood 3/10.\n\
+                        A/P: Continue plan; path C:\\notes.";
+        assert_eq!(full, expected);
+    }
+
+    #[test]
+    fn sse_malformed_frame_is_reported_not_silently_swallowed() {
+        // A genuinely corrupt/truncated frame must produce a deserialize Err
+        // that the loop can log (see `log_dropped_sse_frame`) rather than a
+        // silent drop. Assert the error is observable and carries a coarse,
+        // PHI-free classification.
+        let frame = r#"{"type":"content_block_delta","delta":{"text":"oops"#;
+        // Avoid requiring SseEvent: Debug (which unwrap_err would need).
+        let err = match serde_json::from_str::<SseEvent>(frame) {
+            Ok(_) => panic!("truncated frame must not deserialize as Ok"),
+            Err(e) => e,
+        };
+        use serde_json::error::Category;
         assert!(
-            res.is_err(),
-            "borrow-only &str cannot deserialize a JSON string that needs unescaping; parent code must treat this as a skipped frame"
+            matches!(err.classify(), Category::Syntax | Category::Eof | Category::Data),
+            "malformed frame should classify as a structural error: {:?}",
+            err.classify()
+        );
+        // Sanity: the logging helper never panics on a real error.
+        log_dropped_sse_frame(frame.len(), &err);
+    }
+
+    #[test]
+    fn sse_malformed_frame_does_not_prevent_other_valid_frames() {
+        // Mirror the loop's behavior: a bad frame is skipped (logged) while
+        // subsequent valid frames in the same session are still consumed.
+        let frames = [
+            r#"{"type":"content_block_delta","delta":{"text":"good one\n"}}"#,
+            r#"{"type":"content_block_delta","delta":{"text":"broken"#, // truncated
+            r#"{"type":"content_block_delta","delta":{"text":"good two"}}"#,
+        ];
+        let mut full = String::new();
+        let mut dropped = 0u64;
+        for frame in frames {
+            match serde_json::from_str::<SseEvent>(frame) {
+                Ok(evt) => {
+                    if let Some(t) = evt.delta.and_then(|d| d.text) {
+                        full.push_str(t.as_ref());
+                    }
+                }
+                Err(e) => {
+                    log_dropped_sse_frame(frame.len(), &e);
+                    dropped += 1;
+                }
+            }
+        }
+        assert_eq!(dropped, 1, "exactly one frame should be dropped");
+        assert_eq!(
+            full, "good one\ngood two",
+            "valid frames on either side of a malformed one must survive"
         );
     }
 }
