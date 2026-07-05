@@ -113,3 +113,12 @@ impl AppError {
 impl From<rusqlite::Error> for AppError {
     fn from(e: rusqlite::Error) -> Self { AppError::Storage(e.to_string()) }
 }
+
+// r2d2 pool checkout failures are also storage — same class as a rusqlite
+// error. Having this impl means every `state.0.get().map_err(AppError::
+// storage_from)?` site collapses to `state.0.get()?`, folding 21 identical
+// lines across the KV/encounters/notes/audit surface into the pool call
+// itself. Introduced during the ADR 0001 modularity pass.
+impl From<r2d2::Error> for AppError {
+    fn from(e: r2d2::Error) -> Self { AppError::Storage(e.to_string()) }
+}

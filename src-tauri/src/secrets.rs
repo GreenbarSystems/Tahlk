@@ -142,7 +142,7 @@ pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), AppE
     validate_api_key(&key)?;
     keyring_entry()?.set_password(&key).map_err(AppError::internal_from)?;
     // Remove any legacy plaintext copy so the key no longer lives on disk.
-    let conn = state.0.get().map_err(AppError::storage_from)?;
+    let conn = state.0.get()?;
     let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
     Ok(())
 }
@@ -152,7 +152,7 @@ pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), AppError> {
     if let Ok(entry) = keyring_entry() {
         let _ = entry.delete_credential(); // ignore "no entry"
     }
-    let conn = state.0.get().map_err(AppError::storage_from)?;
+    let conn = state.0.get()?;
     let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
     Ok(())
 }

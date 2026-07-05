@@ -186,7 +186,7 @@ fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 
 #[tauri::command]
 pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get().map_err(AppError::storage_from)?;
+    let conn = state.0.get()?;
     let mut stmt = conn.prepare(
         "SELECT action, actor, timestamp, content_hash, notes, prev_hash, entry_hash \
          FROM note_history WHERE encounter_id = ?1 ORDER BY seq",
@@ -248,7 +248,7 @@ pub(crate) fn note_history_append(
     let prev_hash = opt_str(&entry, "prevHash", 128)?;
     let entry_hash = take_str(&entry, "entryHash", 128)?;
 
-    let mut conn = state.0.get().map_err(AppError::storage_from)?;
+    let mut conn = state.0.get()?;
     let tx = conn.transaction()?;
     let next_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM note_history WHERE encounter_id = ?1",

@@ -336,7 +336,7 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
     // are idempotent so a crash mid-bootstrap on a prior launch is safe.
     // `migrate_from_kv` needs `&mut Connection` for its transaction —
     // PooledConnection derefs to Connection, so DerefMut just works.
-    let mut conn = pool.get().map_err(AppError::storage_from)?;
+    let mut conn = pool.get()?;
     conn.execute_batch(SCHEMA_TABLES)?;
     note_history::init_schema(&conn)?;
     note_history::migrate_from_kv(&mut conn)?;
