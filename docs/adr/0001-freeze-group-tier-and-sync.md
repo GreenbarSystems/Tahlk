@@ -54,6 +54,14 @@ exclusively on finishing the single-user **Solo** desktop product.
    how tenant-isolation breaks in prod. Track in
    [`docs/security/pre-deploy-checklist.md`](../security/pre-deploy-checklist.md).
 
+   > **Note (2026-07-05):** the S1/S2 code fix has landed as a scoped,
+   > security-only exception to this freeze (permitted precisely because this
+   > criterion calls for it). This satisfies criterion #3 only. The service
+   > **remains frozen** — criteria #1 (signed Group pilot) and #2 (audit-safe
+   > sync design) are still unmet — and no new Group-tier features, endpoints,
+   > or seam expansion were added. This ADR's Status stays **Accepted /
+   > frozen**.
+
 ## Consequences
 
 - Solo is the single focus. The finishing work (see review): sign-off /

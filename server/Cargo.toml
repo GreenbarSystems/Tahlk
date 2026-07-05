@@ -7,7 +7,7 @@ description = "Tahlk Group-tier sync service — multi-tenant encounter + audit 
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
@@ -16,6 +16,7 @@ parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+governor = "0.10.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Release-mode optimizations for the sync server. Same `lto`/`codegen-units`/
@@ -27,3 +28,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+[dev-dependencies]
+http-body-util = "0.1.3"
+tower = { version = "0.5.3", features = ["util"] }
