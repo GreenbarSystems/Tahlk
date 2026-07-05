@@ -328,3 +328,91 @@ public JS surface, and every one has DB-free unit tests.
   unit tests: tags present, data-only lead-in, hostile input round-trips
   verbatim (defense is structure, not scrubbing), guardrail comes first,
   guardrail names the same tag the wrapper uses.
+
+## Hardening (M1-M10)
+
+The Medium-severity findings from the same audit
+(`tahlk-security-audit.md`, findings M1-M10). Like the H-tier work above,
+each is a small, independently-verifiable belt around an existing command,
+none change the public JS surface, and each ships DB-free unit tests where
+feasible. All ten fixes landed together in one batch.
+
+- **M1 — Owner-only permissions on PHI files**
+  (`src-tauri/src/perms.rs`, `src-tauri/src/audio.rs`,
+  `src-tauri/src/whisper.rs`, `src-tauri/src/db.rs`).
+  `File::create` / `tokio::fs::write` leave new files at the process
+  umask default — typically `0644` on Unix, which lets any other local
+  user (or a backup daemon) read raw PHI. A centralized
+  `perms::chmod_0600_unix` helper clamps every PHI-bearing file to owner-only
+  `0600`: the saved `audio.wav`, the transcript `.txt` scratch file, and the
+  encrypted SQLite DB. No-op on Windows, where NTFS ACLs on the app-data dir
+  already scope access to the user profile. Two Unix-only tests confirm the
+  helper flips the mode and does not panic on a missing path.
+- **M2 — Whisper stderr redaction** (`src-tauri/src/whisper.rs`).
+  Raw whisper.cpp stderr echoes absolute paths (app-data layout, home dir)
+  and sometimes the model file name — a path-disclosure that helps a local
+  attacker map the on-disk layout. `redact_whisper_stderr` keeps only the
+  first non-empty line, drops everything after the first ` --` option-echo
+  separator, and caps the result at 200 chars (char-safe truncation) before
+  it reaches `AppError::Transcription` or the audit log. Five unit tests:
+  first-line-only, argv-echo dropped, length cap, empty/whitespace fallback,
+  multibyte-UTF-8 boundary safety.
+- **M3 — Guaranteed transcript scratch-file cleanup**
+  (`src-tauri/src/whisper.rs`).
+  The transcript `.txt` was deleted only on the success path, so a
+  `read_to_string` failure left PHI on disk. A `TxtCleanup(PathBuf)` RAII
+  guard now removes the file on scope exit via `Drop`, so it is deleted on
+  every path — success, read failure, or early return. Best-effort delete
+  (the file may legitimately never have been created). A unit test confirms
+  the file is gone after the guard drops.
+- **M4 — Encounter status allowlist** (`src-tauri/src/encounters.rs`).
+  `upsert_encounter` previously accepted any status string. A crate-visible
+  `ALLOWED_STATUS` allowlist (`recording`, `recording_done`, `transcribing`,
+  `draft`, `signed`, `exported`) now mirrors the server's `ALLOWED_STATUS`
+  in `server/src/api.rs`; `check_status` rejects anything else with
+  `AppError::InvalidInput` at the boundary, before the DB lock. An omitted
+  status still defaults to `draft`. Keeping the two lists in sync prevents
+  the desktop and server from disagreeing about valid states. Pure-function
+  tests enumerate accepted and rejected values.
+- **M5 — Escaped LIKE prefix in `kv_list`** (`src-tauri/src/kv.rs`).
+  A client-supplied prefix was fed straight into a SQL `LIKE` pattern, so
+  `%` and `_` acted as wildcards (`note_` matched `noteX`). `escape_like_prefix`
+  backslash-escapes `\`, `%`, and `_` (backslash first, to avoid
+  double-escaping), and the query pairs it with `ESCAPE '\\'` so the prefix
+  matches literally. Not a live exploit today (the prefix isn't user content
+  yet) but a footgun closed ahead of any feature that surfaces one. Unit
+  tests cover the escape helper and the `_`-as-literal attack pattern.
+- **M6 — Reject empty API keys** (`src-tauri/src/secrets.rs`).
+  `set_api_key` silently accepted empty / whitespace-only strings, which
+  would overwrite a real credential with nothing and quietly disable note
+  generation. `validate_api_key` now rejects `key.trim().is_empty()` up
+  front with `AppError::InvalidInput`. A test enumerates empty, space, tab,
+  newline, and mixed-whitespace inputs.
+- **M7 — API key length cap** (`src-tauri/src/secrets.rs`).
+  `validate_api_key` caps keys at `API_KEY_MAX_BYTES = 512` bytes —
+  conservative relative to the macOS keychain's ~4 KB item limit, so other
+  keychain backends stay safe too. A realistic ~100-char key and exactly 512
+  bytes pass; 513 fails with `AppError::InvalidInput`. Boundary test pins
+  512-pass / 513-fail.
+- **M8 — Bounded Anthropic HTTP timeouts** (`src-tauri/src/notes.rs`).
+  The reqwest client is built with `.timeout(REQUEST_TIMEOUT)` (120 s total)
+  and `.connect_timeout(CONNECT_TIMEOUT)` (10 s), replacing reqwest's
+  effectively-infinite defaults. A hung network path can no longer wedge
+  `generate_note` forever. A test pins both constants so a future bump is a
+  deliberate, reviewed change.
+- **M9 — Capped SSE accumulator** (`src-tauri/src/notes.rs`).
+  The streamed-response accumulator is bounded at `MAX_NOTE_BYTES = 1 MiB`
+  (`1_048_576`). Before appending each streamed token the code checks
+  `full.len().saturating_add(t.len())` against the cap and aborts with
+  `AppError::UpstreamApi("response exceeded 1 MiB cap")`, so a runaway or
+  malicious upstream can't grow the buffer without bound. A test pins the
+  ceiling.
+- **M10 — Redacted upstream error bodies** (`src-tauri/src/notes.rs`).
+  Anthropic error bodies were echoed verbatim into `AppError`. Now HTTP
+  401/403 map to `AppError::AuthFailed("HTTP <status>")` and any other
+  non-2xx (plus server-emitted stream errors) map to
+  `AppError::UpstreamApi("HTTP <status>")` / `"stream error"` — status code
+  and a short generic marker only. The raw body goes to `tracing::debug!`
+  via a dev-only `log_upstream_body` helper and never reaches the on-device
+  diagnostics/telemetry log. A test confirms the logger accepts empty and
+  populated bodies without panicking.
