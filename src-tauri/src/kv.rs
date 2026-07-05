@@ -45,7 +45,7 @@ fn check_key_size(key: &str) -> Result<(), AppError> {
 pub(crate) fn kv_get(state: State<DbState>, key: String) -> Result<Option<Value>, AppError> {
     guard_key(&key)?;
     check_key_size(&key)?;
-    let conn = state.0.get().map_err(AppError::storage_from)?;
+    let conn = state.0.get()?;
     let row: Option<String> = conn
         .query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| r.get(0))
         .optional()?;
@@ -65,7 +65,7 @@ pub(crate) fn kv_set(state: State<DbState>, key: String, value: Value) -> Result
     if json.len() > MAX_KV_VALUE_BYTES {
         return Err(AppError::invalid("kv value too large"));
     }
-    let conn = state.0.get().map_err(AppError::storage_from)?;
+    let conn = state.0.get()?;
     conn.execute(
         "INSERT INTO kv (key, value, updated_at) \
          VALUES (?1, ?2, strftime('%s', 'now')) \
@@ -81,14 +81,14 @@ pub(crate) fn kv_set(state: State<DbState>, key: String, value: Value) -> Result
 pub(crate) fn kv_remove(state: State<DbState>, key: String) -> Result<(), AppError> {
     guard_key(&key)?;
     check_key_size(&key)?;
-    let conn = state.0.get().map_err(AppError::storage_from)?;
+    let conn = state.0.get()?;
     conn.execute("DELETE FROM kv WHERE key = ?1", params![key])?;
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(String, Value)>, AppError> {
-    let conn = state.0.get().map_err(AppError::storage_from)?;
+    let conn = state.0.get()?;
     kv_list_conn(&conn, &prefix)
 }
 
