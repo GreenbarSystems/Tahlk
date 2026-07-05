@@ -28,6 +28,7 @@ mod encounters;
 mod errors;
 mod export;
 mod kv;
+mod kv_ops;
 mod llm_audit;
 mod note_history;
 mod notes;

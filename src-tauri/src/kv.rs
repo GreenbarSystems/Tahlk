@@ -11,6 +11,7 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::errors::AppError;
+use crate::kv_ops;
 use crate::secrets::{guard_key, is_secret_key};
 use crate::DbState;
 
@@ -66,15 +67,7 @@ pub(crate) fn kv_set(state: State<DbState>, key: String, value: Value) -> Result
         return Err(AppError::invalid("kv value too large"));
     }
     let conn = state.0.get()?;
-    conn.execute(
-        "INSERT INTO kv (key, value, updated_at) \
-         VALUES (?1, ?2, strftime('%s', 'now')) \
-         ON CONFLICT(key) DO UPDATE SET \
-             value      = excluded.value, \
-             updated_at = excluded.updated_at",
-        params![key, json],
-    )?;
-    Ok(())
+    kv_ops::upsert_json(&conn, &key, &json)
 }
 
 #[tauri::command]
@@ -82,7 +75,7 @@ pub(crate) fn kv_remove(state: State<DbState>, key: String) -> Result<(), AppErr
     guard_key(&key)?;
     check_key_size(&key)?;
     let conn = state.0.get()?;
-    conn.execute("DELETE FROM kv WHERE key = ?1", params![key])?;
+    kv_ops::delete_by_key(&conn, &key)?;
     Ok(())
 }
 
