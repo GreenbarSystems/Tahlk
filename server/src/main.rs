@@ -6,6 +6,13 @@
 // the Postgres/Redis impls (see migrations/ + README) drop in without touching
 // the handlers. Everything is tenant-scoped at the API boundary AND, in the
 // Postgres impl, at the database via row-level security (defense in depth).
+//
+// SECURITY — DO NOT DEPLOY. Open audit findings S1 (stub auth) and S2 (no TLS,
+// no rate limits, no body-size limit, no fail-closed bind gate) make this
+// service unsafe for any deployment against real tenants. The service is
+// frozen per ADR 0001, so the fixes are intentionally deferred; see
+// server/README.md and docs/security/pre-deploy-checklist.md for the concrete
+// remediation plan that MUST land before unfreeze.
 
 mod api;
 mod auth;

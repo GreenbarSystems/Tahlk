@@ -41,12 +41,18 @@ exclusively on finishing the single-user **Solo** desktop product.
 - Capability accessors that are **load-bearing today** (`currentProvider` /
   `currentUser` → audit actor identity) remain; they are not part of the freeze.
 
-## Unfreeze criteria (both required)
+## Unfreeze criteria (all required)
 
 1. A signed Group/Enterprise pilot or customer with a concrete multi-provider /
    multi-device requirement.
 2. An **audit-safe sync design** on paper: append-only per-device hash chains
    with server-side merge — never last-writer-wins for signed/attested state.
+3. **Security findings S1 and S2** from `tahlk-security-audit.md` are
+   remediated — real JWT verification (S1) and body-size limit + rate limiting
+   + fail-closed bind gate (S2) landed in `server/`. These are today's Critical
+   items **on any deploy**; unfreezing the service without them shipping is
+   how tenant-isolation breaks in prod. Track in
+   [`docs/security/pre-deploy-checklist.md`](../security/pre-deploy-checklist.md).
 
 ## Consequences
 
