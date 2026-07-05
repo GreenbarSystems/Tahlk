@@ -20,6 +20,32 @@ pub(crate) const API_KEY_KV: &str = "secret_v1::anthropic_api_key";
 const KEYRING_SERVICE: &str = "com.tahlk.app";
 const KEYRING_USER: &str = "anthropic_api_key";
 
+/// Hard ceiling on how many bytes we will accept when a caller tries to set an
+/// API key. Anthropic keys are ~100 chars in practice; 512 bytes is generous
+/// headroom while still rejecting mistakes (an entire file pasted, a giant
+/// blob, etc.) at the boundary before it ever reaches the OS keychain.
+pub(crate) const API_KEY_MAX_BYTES: usize = 512;
+
+/// Validate an API key submitted by JS before it touches the OS keychain.
+///
+/// Rejects two footguns:
+///   1. Empty / whitespace-only input — writing that would silently wipe the
+///      real key on next set. Callers should call `clear_api_key` instead.
+///   2. Values exceeding `API_KEY_MAX_BYTES` — almost certainly a paste bug
+///      or malicious blob; nothing legitimate needs that much room.
+///
+/// Byte-length is checked (not char count) because that's the storage
+/// dimension the underlying keyring will care about. Pure function.
+pub(crate) fn validate_api_key(key: &str) -> Result<(), AppError> {
+    if key.trim().is_empty() {
+        return Err(AppError::invalid("api key must not be empty"));
+    }
+    if key.len() > API_KEY_MAX_BYTES {
+        return Err(AppError::invalid("api key exceeds 512 bytes"));
+    }
+    Ok(())
+}
+
 /// KV keys that must never be reachable through the generic `kv_*` commands.
 ///
 /// Historically `guard_key` used `key.starts_with("secret_")` (audit H5). That
@@ -104,6 +130,7 @@ pub(crate) fn guard_key(key: &str) -> Result<(), AppError> {
 
 #[tauri::command]
 pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), AppError> {
+    validate_api_key(&key)?;
     keyring_entry()?.set_password(&key).map_err(AppError::internal_from)?;
     // Remove any legacy plaintext copy so the key no longer lives on disk.
     let conn = state.0.lock();
@@ -194,6 +221,43 @@ mod tests {
             assert!(!is_secret_key(key), "{key} should NOT be a secret key");
             assert!(guard_key(key).is_ok(), "guard_key({key}) should accept");
         }
+    }
+
+    // M6: an empty or whitespace-only key must be rejected. If we accepted it,
+    // set_api_key would overwrite the real credential with an empty string,
+    // silently disabling note generation until the user re-entered the key.
+    #[test]
+    fn validate_api_key_rejects_empty_and_whitespace() {
+        for key in ["", " ", "\t", "\n", "   \t \n  "] {
+            let err = validate_api_key(key).unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidInput(_)),
+                "validate_api_key({key:?}) should be InvalidInput, got {err:?}"
+            );
+        }
+    }
+
+    // M7: cap at 512 bytes. 512 exact must pass; 513 must fail. Realistic
+    // Anthropic keys (~100 chars) must sail through.
+    #[test]
+    fn validate_api_key_enforces_byte_ceiling() {
+        // Realistic-shaped key — must pass.
+        let realistic = format!("sk-ant-api03-{}", "A".repeat(90));
+        assert!(realistic.len() < API_KEY_MAX_BYTES);
+        assert!(validate_api_key(&realistic).is_ok());
+
+        // Exactly at the ceiling — must pass.
+        let at_limit = "A".repeat(API_KEY_MAX_BYTES);
+        assert_eq!(at_limit.len(), API_KEY_MAX_BYTES);
+        assert!(validate_api_key(&at_limit).is_ok());
+
+        // One byte over — must fail with InvalidInput.
+        let over = "A".repeat(API_KEY_MAX_BYTES + 1);
+        let err = validate_api_key(&over).unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "over-limit should be InvalidInput, got {err:?}"
+        );
     }
 
     // Pin the exact allowlist so a merge that adds/removes an entry surfaces

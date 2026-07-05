@@ -33,6 +33,7 @@ mod kv;
 mod llm_audit;
 mod note_history;
 mod notes;
+mod perms;
 mod secrets;
 mod whisper;
 

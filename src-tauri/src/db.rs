@@ -153,24 +153,7 @@ fn zero_and_remove(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-// On Unix, tighten permissions on files that hold PHI or the encrypted DB.
-// A no-op on Windows (NTFS ACLs are handled at the app-data-dir level by the
-// OS user profile).
-fn tighten_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path; // suppress unused-var warning on Windows
-    }
-}
+
 
 // Migrates a legacy plaintext SQLite DB at `plaintext_path` into a fresh
 // SQLCipher-encrypted DB at `encrypted_path` using `sqlcipher_export`.
@@ -254,7 +237,7 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<Connection, AppError> {
 
     let mut conn = Connection::open(&db_path)?;
     apply_key(&conn, &hex_key)?;
-    tighten_permissions(&db_path);
+    crate::perms::chmod_0600_unix(&db_path);
 
     conn.execute_batch(SCHEMA_DDL)?;
 
