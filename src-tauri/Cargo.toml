@@ -58,3 +58,18 @@ tempfile = "3"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Release-mode optimizations for the desktop binary. `lto = "fat"` collapses
+# cross-crate inlining across all deps (SQLCipher, reqwest, tauri) — big wins
+# for the SSE hot path in notes.rs. `codegen-units = 1` gives LLVM the whole
+# crate at once so it can fold across module boundaries. `strip = "symbols"`
+# drops the debug symbol table (~10-20 MiB off the shipped binary; PDBs still
+# available in target/release/deps for crash-dump symbolication). `panic =
+# "abort"` removes unwinding tables — safe here because the desktop app has
+# no `catch_unwind` boundaries; a panic already tears the process down.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+

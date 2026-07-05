@@ -15,3 +15,13 @@ anyhow = "1"
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+# Release-mode optimizations for the sync server. Same `lto`/`codegen-units`/
+# `strip` combo as the desktop crate — meaningful bin-size + throughput wins.
+# Deliberately NOT using `panic = "abort"` here: axum/tower handlers rely on
+# panic-catching to convert a task panic into a 500 rather than tearing the
+# whole process (and every other in-flight request) down. Keep unwinding.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

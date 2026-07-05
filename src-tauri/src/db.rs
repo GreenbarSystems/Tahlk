@@ -51,10 +51,29 @@ pub(crate) fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value
 
 // Schema DDL shared between the fresh-DB path and the plaintext migration
 // path; keeping it as a single string means both entrypoints stay in sync.
+// PRAGMA cache_size = -65536      → 64 MiB per-connection page cache (negative
+//                                    means KiB). Default 2 MiB is far too small
+//                                    for the encounter+kv+audit workload.
+// PRAGMA temp_store  = MEMORY      → keep temp b-trees for ORDER BY / GROUP BY
+//                                    off disk; matters for the encounter list
+//                                    query that sorts by encounter_date DESC.
+// PRAGMA mmap_size   = 268435456   → 256 MiB memory-mapped read window. Lets
+//                                    SQLite skip the pread() syscall on hot
+//                                    pages. Safe with WAL + SQLCipher (mmap
+//                                    reads still go through the codec).
+// PRAGMA busy_timeout = 5000       → 5s spin on SQLITE_BUSY before returning
+//                                    an error. With the single-mutex arch
+//                                    (see P2 in perf audit) contention is
+//                                    rare, but timeout > 0 guards against
+//                                    checkpoint stalls on WAL rotation.
 const SCHEMA_DDL: &str = "
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous   = NORMAL;
     PRAGMA foreign_keys  = ON;
+    PRAGMA cache_size    = -65536;
+    PRAGMA temp_store    = MEMORY;
+    PRAGMA mmap_size     = 268435456;
+    PRAGMA busy_timeout  = 5000;
 
     CREATE TABLE IF NOT EXISTS kv (
         key        TEXT PRIMARY KEY,
