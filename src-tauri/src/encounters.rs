@@ -119,6 +119,15 @@ pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Resu
 // overwrites patient_alias/audio_path from its payload, so using it for sign-off
 // (which doesn't resend those) would null them out — corrupting the record at
 // the moment of attestation. This targeted update cannot clobber other columns.
+//
+// The `AND status != 'signed'` clause makes re-signing atomically impossible:
+// an already-signed row matches the id but not the status, so the UPDATE affects
+// 0 rows and never overwrites the original signed_at/signed_hash. This mirrors
+// enforce_signed_immutability (which guards the upsert_encounter path) so both
+// sign-off routes reject a re-sign with the same AppError::InvalidInput variant
+// — audit N2, §164.312(c)(1) integrity. The 0-row case is then disambiguated
+// (missing row vs. already signed) with a follow-up read inside the same
+// transaction so the diagnostic can't race a concurrent write.
 #[tauri::command]
 pub(crate) fn mark_encounter_signed(
     state: State<DbState>,
@@ -126,14 +135,43 @@ pub(crate) fn mark_encounter_signed(
     signed_at: String,
     signed_hash: String,
 ) -> Result<(), AppError> {
-    let conn = state.0.get()?;
-    let n = conn.execute(
-        "UPDATE encounters SET status = 'signed', signed_at = ?2, signed_hash = ?3 WHERE id = ?1",
+    let mut conn = state.0.get()?;
+    mark_signed(&mut conn, &id, &signed_at, &signed_hash)
+}
+
+/// Pure DB helper for `mark_encounter_signed` — takes any `rusqlite::Connection`
+/// so tests can exercise the re-sign guard against an in-memory fixture without
+/// the Tauri State harness (same pattern as `query_encounter_stats`).
+pub(crate) fn mark_signed(
+    conn: &mut Connection,
+    id: &str,
+    signed_at: &str,
+    signed_hash: &str,
+) -> Result<(), AppError> {
+    let tx = conn.transaction()?;
+    let n = tx.execute(
+        "UPDATE encounters SET status = 'signed', signed_at = ?2, signed_hash = ?3 \
+         WHERE id = ?1 AND status != 'signed'",
         params![id, signed_at, signed_hash],
     )?;
     if n == 0 {
-        return Err(AppError::invalid(format!("encounter {} not found", id)));
+        // Zero rows could mean the id doesn't exist OR the row is already
+        // signed. Read the current status (same tx) to return the right error.
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT status FROM encounters WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return match existing {
+            Some(_) => Err(AppError::invalid(format!(
+                "cannot re-sign encounter {id}: already signed"
+            ))),
+            None => Err(AppError::invalid(format!("encounter {id} not found"))),
+        };
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -336,6 +374,69 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    // Read back the sign-off metadata for a row so tests can prove a rejected
+    // re-sign left the original attestation untouched (audit N2).
+    fn signed_meta(conn: &Connection, id: &str) -> (String, Option<String>, Option<String>) {
+        conn.query_row(
+            "SELECT status, signed_at, signed_hash FROM encounters WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mark_signed_signs_an_unsigned_encounter() {
+        // Happy path: a draft row flips to signed and records the metadata.
+        let mut conn = fresh_db();
+        conn.execute(
+            "INSERT INTO encounters (id, provider_id, encounter_date, status, created_at) \
+             VALUES ('enc-1','prov-1','2026-07-04','draft','2026-07-04T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        mark_signed(&mut conn, "enc-1", "2026-07-04T10:30:00Z", "deadbeef").unwrap();
+        assert_eq!(
+            signed_meta(&conn, "enc-1"),
+            (
+                "signed".to_string(),
+                Some("2026-07-04T10:30:00Z".to_string()),
+                Some("deadbeef".to_string()),
+            ),
+        );
+    }
+
+    #[test]
+    fn mark_signed_rejects_resign_and_preserves_original_metadata() {
+        // Re-signing an already-signed row must fail AND leave the original
+        // signed_at/signed_hash intact — proving the UPDATE never took effect.
+        let mut conn = fresh_db();
+        insert_signed(&conn); // status=signed, signed_at=...10:30:00Z, hash=deadbeef
+        let before = signed_meta(&conn, "enc-1");
+
+        let err = mark_signed(&mut conn, "enc-1", "2099-01-01T00:00:00Z", "cafef00d")
+            .unwrap_err();
+        // Same variant enforce_signed_immutability uses, so JS handles an
+        // "already signed" conflict identically across both sign-off paths.
+        assert!(matches!(err, AppError::InvalidInput(_)));
+
+        let after = signed_meta(&conn, "enc-1");
+        assert_eq!(before, after, "rejected re-sign must not mutate the row");
+        // Belt-and-suspenders: the attacker's values are provably absent.
+        assert_eq!(after.1, Some("2026-07-04T10:30:00Z".to_string()));
+        assert_eq!(after.2, Some("deadbeef".to_string()));
+    }
+
+    #[test]
+    fn mark_signed_reports_missing_row() {
+        let mut conn = fresh_db();
+        let err = mark_signed(&mut conn, "nope", "2026-07-04T10:30:00Z", "deadbeef")
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        let msg = format!("{err}");
+        assert!(msg.contains("not found"), "missing row should say so: {msg}");
     }
 
     #[test]
