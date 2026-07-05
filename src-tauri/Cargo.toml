@@ -35,6 +35,12 @@ getrandom = "0.2"
 
 # HTTP client for Anthropic API calls and Whisper model download.
 reqwest = { version = "0.12", features = ["json", "stream"] }
+# memchr: SIMD-accelerated byte search on x86_64/aarch64 with a scalar
+# fallback. Used by the SSE parser in notes.rs to find newline boundaries
+# without copying bytes out of the streaming buffer (perf P3). Already
+# transitively pulled by reqwest→hyper; declaring it directly keeps the
+# build stable if a future dep bump removes it from the transitive graph.
+memchr = "2"
 
 # Async runtime — Tauri 2.x already uses tokio; this makes it explicit
 # for our async commands.
