@@ -97,7 +97,7 @@ pub(crate) fn clamp_list_limit(limit: Option<i64>) -> i64 {
 
 #[tauri::command]
 pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
     let n = clamp_list_limit(limit);
     let sql = format!(
         "SELECT {ENCOUNTER_COLS} FROM encounters ORDER BY created_at DESC LIMIT ?1"
@@ -126,7 +126,7 @@ pub(crate) fn mark_encounter_signed(
     signed_at: String,
     signed_hash: String,
 ) -> Result<(), AppError> {
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
     let n = conn.execute(
         "UPDATE encounters SET status = 'signed', signed_at = ?2, signed_hash = ?3 WHERE id = ?1",
         params![id, signed_at, signed_hash],
@@ -142,7 +142,7 @@ pub(crate) fn mark_encounter_signed(
 // clobber patient_alias or sign-off fields.
 #[tauri::command]
 pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> Result<(), AppError> {
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
     let n = conn.execute(
         "UPDATE encounters SET audio_path = NULL WHERE id = ?1",
         params![id],
@@ -156,7 +156,7 @@ pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> R
 // Fetch a single encounter by id — avoids pulling the whole list to open one row.
 #[tauri::command]
 pub(crate) fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, AppError> {
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
     let sql = format!("SELECT {ENCOUNTER_COLS} FROM encounters WHERE id = ?1");
     Ok(conn.query_row(&sql, params![id], encounter_row_to_json).optional()?)
 }
@@ -174,7 +174,7 @@ pub(crate) fn get_encounter(state: State<DbState>, id: String) -> Result<Option<
 // step, one lock.
 #[tauri::command]
 pub(crate) fn encounter_stats(state: State<DbState>, today: String) -> Result<Value, AppError> {
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
     let (total, signed, today_count) = query_encounter_stats(&conn, &today)?;
     Ok(json!({ "total": total, "signed": signed, "today": today_count }))
 }
@@ -266,7 +266,7 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
     // still lands on "draft", which is always valid. [audit M4]
     check_status(status)?;
 
-    let mut conn = state.0.lock();
+    let mut conn = state.0.get().map_err(AppError::storage_from)?;
     // Wrap the check + write in a single transaction so a legitimate
     // concurrent sign-off between check and write cannot squeeze in and
     // convert this call from "upsert draft" into "demote signed".

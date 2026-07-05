@@ -147,7 +147,7 @@ pub(crate) fn llm_audit_list(
     before_id: Option<i64>,
 ) -> Result<Vec<Value>, AppError> {
     let limit = limit.unwrap_or(100).min(500) as i64;
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
 
     let (sql, rows): (String, Vec<Value>) = match (encounter_id.as_deref(), before_id) {
         (Some(eid), Some(bid)) => (

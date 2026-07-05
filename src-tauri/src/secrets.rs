@@ -93,9 +93,14 @@ pub(crate) fn read_api_key(state: &DbState) -> Option<String> {
         }
     }
 
-    // Legacy fallback + one-time migration off plaintext disk.
+    // Legacy fallback + one-time migration off plaintext disk. The pool
+    // checkout is Option-returning (this whole function returns Option) so
+    // a checkout failure short-circuits to "no legacy key found" — the
+    // caller then treats the app as un-keyed and the Settings UI surfaces
+    // the connect flow, which is the correct fallback when the DB is
+    // unreachable anyway.
     let legacy: Option<String> = {
-        let conn = state.0.lock();
+        let conn = state.0.get().ok()?;
         conn.query_row("SELECT value FROM kv WHERE key = ?1", params![API_KEY_KV], |r| {
             r.get::<_, String>(0)
         })
@@ -109,8 +114,12 @@ pub(crate) fn read_api_key(state: &DbState) -> Option<String> {
         if let Ok(entry) = keyring_entry() {
             let _ = entry.set_password(&key);
         }
-        let conn = state.0.lock();
-        let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
+        // Best-effort delete of the legacy plaintext row — if the pool is
+        // exhausted here the row survives to the next launch, which is
+        // still safe (guard_key blocks KV access to the secret namespace).
+        if let Ok(conn) = state.0.get() {
+            let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
+        }
         return Some(key);
     }
     None
@@ -133,7 +142,7 @@ pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), AppE
     validate_api_key(&key)?;
     keyring_entry()?.set_password(&key).map_err(AppError::internal_from)?;
     // Remove any legacy plaintext copy so the key no longer lives on disk.
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
     let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
     Ok(())
 }
@@ -143,7 +152,7 @@ pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), AppError> {
     if let Ok(entry) = keyring_entry() {
         let _ = entry.delete_credential(); // ignore "no entry"
     }
-    let conn = state.0.lock();
+    let conn = state.0.get().map_err(AppError::storage_from)?;
     let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
     Ok(())
 }

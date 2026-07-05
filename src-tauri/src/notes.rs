@@ -167,7 +167,22 @@ fn utc_now_iso() -> String {
 // row is worse for compliance than a missing one, but propagating an audit
 // failure to the caller would mask the real error they came in with.
 fn record_llm_call(state: &State<DbState>, entry: LlmCallEntry) {
-    let conn = state.0.lock();
+    // Pooled checkout. If the pool is exhausted or a fresh connection fails
+    // to key, log and drop the audit row rather than propagating: this
+    // function is the fire-and-forget end of the record-then-return flow,
+    // and we already refused to propagate append() failures for the same
+    // reason (a lost audit row is worse than a masked real error, but
+    // masking is worse still).
+    let conn = match state.0.get() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "llm_audit: failed to check out pooled connection for {} call ({}): {}",
+                entry.outcome, entry.endpoint, e
+            );
+            return;
+        }
+    };
     if let Err(e) = llm_audit::append(&conn, &entry) {
         eprintln!(
             "llm_audit: failed to record {} call ({}): {}",

@@ -14,13 +14,21 @@
 //! migration. Unix file mode is tightened to 0600 so a curious process
 //! running as a different user on the same box can't read the ciphertext.
 
-use parking_lot::Mutex;
+use r2d2::{CustomizeConnection, Pool};
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 use crate::{db_key, errors::AppError, llm_audit, note_history, DbState};
+
+/// Alias for the desktop-wide SQLite pool type. Every command that used to
+/// take a `Mutex<Connection>` guard now takes a `PooledConnection` handed out
+/// by this pool; the `KeyingCustomizer` below guarantees every fresh checkout
+/// is SQLCipher-keyed before it reaches user code.
+pub(crate) type SqlitePool = Pool<SqliteConnectionManager>;
 
 // SQLite file magic ("SQLite format 3\0"). SQLCipher-encrypted files start
 // with random-looking ciphertext; plaintext files always begin with this
@@ -49,24 +57,34 @@ pub(crate) fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value
     }))
 }
 
-// Schema DDL shared between the fresh-DB path and the plaintext migration
-// path; keeping it as a single string means both entrypoints stay in sync.
+// Per-connection PRAGMAs. Applied by the pool's `KeyingCustomizer` on EVERY
+// fresh connection, right after the SQLCipher key. journal_mode/synchronous/
+// foreign_keys/cache_size/temp_store/mmap_size are connection-scoped in
+// SQLite — setting them once on the bootstrap connection would leave every
+// other pooled connection on defaults, which is a footgun the old
+// Mutex<Connection> arch happened to sidestep.
+//
+// PRAGMA journal_mode = WAL       → durable and concurrent; safe with SQLCipher.
+// PRAGMA synchronous   = NORMAL   → fsync per checkpoint, not per commit; correct
+//                                   under WAL and matches audit P5 guidance.
+// PRAGMA foreign_keys  = ON       → SQLite disables FK enforcement per-connection
+//                                   by default; MUST be re-enabled on every one.
 // PRAGMA cache_size = -65536      → 64 MiB per-connection page cache (negative
-//                                    means KiB). Default 2 MiB is far too small
-//                                    for the encounter+kv+audit workload.
-// PRAGMA temp_store  = MEMORY      → keep temp b-trees for ORDER BY / GROUP BY
-//                                    off disk; matters for the encounter list
-//                                    query that sorts by encounter_date DESC.
-// PRAGMA mmap_size   = 268435456   → 256 MiB memory-mapped read window. Lets
-//                                    SQLite skip the pread() syscall on hot
-//                                    pages. Safe with WAL + SQLCipher (mmap
-//                                    reads still go through the codec).
-// PRAGMA busy_timeout = 5000       → 5s spin on SQLITE_BUSY before returning
-//                                    an error. With the single-mutex arch
-//                                    (see P2 in perf audit) contention is
-//                                    rare, but timeout > 0 guards against
-//                                    checkpoint stalls on WAL rotation.
-const SCHEMA_DDL: &str = "
+//                                   means KiB). At max_size=8 that’s ~512 MiB
+//                                   worst case; acceptable for a desktop app.
+// PRAGMA temp_store  = MEMORY     → keep temp b-trees for ORDER BY / GROUP BY
+//                                   off disk; matters for the encounter list
+//                                   query that sorts by encounter_date DESC.
+// PRAGMA mmap_size   = 268435456  → 256 MiB memory-mapped read window. Lets
+//                                   SQLite skip the pread() syscall on hot
+//                                   pages. Safe with WAL + SQLCipher (mmap
+//                                   reads still go through the codec).
+// PRAGMA busy_timeout = 5000      → 5s spin on SQLITE_BUSY before returning
+//                                   an error. WAL + pool means writers still
+//                                   serialize on the DB lock; this bounds the
+//                                   wait for checkpoints and writer-writer
+//                                   contention.
+const CONN_PRAGMAS: &str = "
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous   = NORMAL;
     PRAGMA foreign_keys  = ON;
@@ -74,7 +92,13 @@ const SCHEMA_DDL: &str = "
     PRAGMA temp_store    = MEMORY;
     PRAGMA mmap_size     = 268435456;
     PRAGMA busy_timeout  = 5000;
+";
 
+// Idempotent schema DDL. Runs ONCE on bootstrap from a checked-out pool
+// connection — running it on every fresh pooled connection would be wasted
+// work (CREATE IF NOT EXISTS is cheap but not free) and would race with the
+// plaintext-migration path on first launch.
+const SCHEMA_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS kv (
         key        TEXT PRIMARY KEY,
         value      TEXT NOT NULL,
@@ -97,6 +121,39 @@ const SCHEMA_DDL: &str = "
     CREATE INDEX IF NOT EXISTS enc_status_idx ON encounters (status);
     CREATE INDEX IF NOT EXISTS enc_created_idx ON encounters (created_at DESC);
 ";
+
+/// r2d2 connection customizer that runs on every fresh SQLite connection the
+/// pool creates. Two-step init: (1) apply the SQLCipher DEK, (2) apply the
+/// per-connection PRAGMAs. If keying fails the pool refuses to hand the
+/// connection out — the alternative (silently returning an unkeyed
+/// connection) would let user code read/write plaintext against an encrypted
+/// file, corrupting it and leaking PHI. Both are `rusqlite::Error` so the
+/// pool's error type stays `rusqlite::Error`.
+///
+/// The hex key is held in an `Arc<String>` so the customizer is `Send + Sync
+/// + 'static` (r2d2's trait bound). The key never leaves this process image
+/// — `db_key` fetches it from the OS keychain on startup.
+#[derive(Debug)]
+struct KeyingCustomizer {
+    hex_key: Arc<String>,
+}
+
+impl CustomizeConnection<Connection, rusqlite::Error> for KeyingCustomizer {
+    fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
+        // Wrap `apply_key`'s AppError back into rusqlite::Error so the pool
+        // can propagate it. The error text carries "database key rejected"
+        // which is exactly what an operator needs to see if the DEK ever
+        // drifts from the DB.
+        apply_key(conn, &self.hex_key).map_err(|e| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH),
+                Some(e.to_string()),
+            )
+        })?;
+        conn.execute_batch(CONN_PRAGMAS)?;
+        Ok(())
+    }
+}
 
 // SQL-quote a hex DEK so `PRAGMA key = "x'...'"` skips PBKDF2 and treats
 // the value as a raw 32-byte blob. `hex_key` is validated by `db_key`
@@ -234,7 +291,7 @@ fn migrate_plaintext_to_encrypted(
     Ok(())
 }
 
-pub(crate) fn open_database(app: &AppHandle) -> Result<Connection, AppError> {
+pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
     let data_dir = app
         .path()
         .app_data_dir()
@@ -247,36 +304,52 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<Connection, AppError> {
     // Legacy upgrade path: existing plaintext DB gets copied into a new
     // encrypted file, then swapped into place. Skipped on fresh installs
     // (file doesn't exist yet) and on subsequent launches (file is already
-    // ciphertext, so the magic-byte check returns false).
+    // ciphertext, so the magic-byte check returns false). MUST run before we
+    // hand the file to the pool — the pool's customizer will `PRAGMA key`
+    // every fresh connection and reject a plaintext file with "NOTADB".
     if is_plaintext_db(&db_path).map_err(AppError::storage_from)? {
         let encrypted_tmp = data_dir.join("tahlk.db.encrypted");
         migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, &hex_key)?;
         std::fs::rename(&encrypted_tmp, &db_path).map_err(AppError::storage_from)?;
     }
 
-    let mut conn = Connection::open(&db_path)?;
-    apply_key(&conn, &hex_key)?;
     crate::perms::chmod_0600_unix(&db_path);
 
-    conn.execute_batch(SCHEMA_DDL)?;
+    // Build the pool. `max_size=8` is enough for the desktop workload
+    // (streaming SSE + concurrent list/stats/history reads) without
+    // over-committing per-connection cache (64 MiB × 8 = 512 MiB worst case).
+    // `min_idle=2` keeps a warm connection ready so the first UI action after
+    // launch doesn't pay the SQLCipher PBKDF2 cost synchronously.
+    let manager = SqliteConnectionManager::file(&db_path);
+    let customizer = KeyingCustomizer {
+        hex_key: Arc::new(hex_key),
+    };
+    let pool = Pool::builder()
+        .max_size(8)
+        .min_idle(Some(2))
+        .connection_customizer(Box::new(customizer))
+        .build(manager)
+        .map_err(AppError::storage_from)?;
 
-    // note_history: relational replacement for the legacy KV blob. Schema
-    // creation + one-shot migration from note_history_v1::<id> KV rows. The
-    // migration is idempotent and safe to re-run on every startup.
+    // One-shot bootstrap on a single checked-out connection: schema tables,
+    // note_history schema + KV→table migration, llm_audit schema. All three
+    // are idempotent so a crash mid-bootstrap on a prior launch is safe.
+    // `migrate_from_kv` needs `&mut Connection` for its transaction —
+    // PooledConnection derefs to Connection, so DerefMut just works.
+    let mut conn = pool.get().map_err(AppError::storage_from)?;
+    conn.execute_batch(SCHEMA_TABLES)?;
     note_history::init_schema(&conn)?;
     note_history::migrate_from_kv(&mut conn)?;
-
-    // llm_audit: append-only log of Anthropic API calls (metadata only, no
-    // PHI). Schema is idempotent — CREATE IF NOT EXISTS on every launch.
     llm_audit::init_schema(&conn)?;
+    drop(conn);
 
-    Ok(conn)
+    Ok(pool)
 }
 
 // Convenience wrapper so `run()` in lib.rs doesn't need to know how DbState
-// is constructed from a Connection.
-pub(crate) fn new_state(conn: Connection) -> DbState {
-    DbState(Mutex::new(conn))
+// is constructed from a Pool.
+pub(crate) fn new_state(pool: SqlitePool) -> DbState {
+    DbState(pool)
 }
 
 #[cfg(test)]
