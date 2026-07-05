@@ -26,7 +26,22 @@ serde_json = "1"
 # `vendored-openssl` half compiles OpenSSL from source so CI/dev builds do not
 # need OPENSSL_DIR set on Windows/Linux. Adds ~90s to cold builds; incremental
 # builds are unaffected. See db::open_database for keying + at-rest migration.
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "serde_json"] }
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "serde_json"] }
+
+# r2d2 connection pool. The pool holds up to 8 SQLCipher connections and hands
+# them out with parking-lot-cheap semaphore semantics — cheaper than the old
+# global Mutex<Connection> that serialized every DB call. `r2d2_sqlite` 0.31
+# depends on rusqlite ^0.37 (matches our pin) and re-exports SqliteConnectionManager.
+#
+# CRITICAL: the `bundled-sqlcipher-vendored-openssl` feature MUST match rusqlite's
+# feature set exactly so cargo unifies the single `libsqlite3-sys` link. Any
+# feature drift here would either pull a second SQLite copy (link errors) or —
+# worse — silently link the non-SQLCipher build, defeating at-rest encryption.
+# `default-features = false` drops the redundant `bundled` feature that would
+# otherwise fight the SQLCipher build.
+r2d2 = "0.8"
+r2d2_sqlite = { version = "0.31", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+
 parking_lot = "0.12"
 
 # CSPRNG for the database encryption key. `getrandom` is already transitive

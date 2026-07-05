@@ -18,8 +18,6 @@
 //! `crate::DbState` without cyclic imports; this file only wires setup and
 //! the `generate_handler!` list.
 
-use parking_lot::Mutex;
-use rusqlite::Connection;
 use tauri::Manager;
 
 mod audio;
@@ -37,7 +35,14 @@ mod perms;
 mod secrets;
 mod whisper;
 
-pub(crate) struct DbState(pub(crate) Mutex<Connection>);
+/// Shared SQLite pool state. Every #[tauri::command] that touches the DB
+/// checks out a pooled connection via `state.0.get()?` — the old
+/// `Mutex<Connection>` chokepoint (audit P2) is gone. The pool's
+/// `KeyingCustomizer` (see db.rs) guarantees each fresh connection is
+/// SQLCipher-keyed before it reaches user code, so this state can be handed
+/// out freely across the invoke handler without any keying invariant leaking
+/// into every callsite.
+pub(crate) struct DbState(pub(crate) db::SqlitePool);
 
 pub fn run() {
     tauri::Builder::default()
@@ -50,9 +55,9 @@ pub fn run() {
             // refuse to launch than silently fall back to an unencrypted DB and
             // expose PHI. The `Display` impl on AppError formats the code so
             // logs point straight at the failure (e.g. "Storage error: ...").
-            let conn = db::open_database(&app.handle())
+            let pool = db::open_database(&app.handle())
                 .unwrap_or_else(|e| panic!("failed to open encrypted SQLite database: {}", e));
-            app.manage(db::new_state(conn));
+            app.manage(db::new_state(pool));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
