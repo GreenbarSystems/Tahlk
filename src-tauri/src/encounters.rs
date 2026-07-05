@@ -104,7 +104,11 @@ pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Resu
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![n], encounter_row_to_json)?;
-    let mut out = Vec::new();
+    // Preallocate to `n` (already clamped to [1, 1000] by clamp_list_limit).
+    // The LIMIT clause caps the row count exactly, so this is the tight upper
+    // bound and avoids the 4–16 reallocations Vec::new() would do while
+    // growing from 0 → 50 (default list size) or 0 → 1000.
+    let mut out = Vec::with_capacity(n as usize);
     for row in rows {
         out.push(row?);
     }

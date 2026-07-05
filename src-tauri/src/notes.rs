@@ -305,8 +305,15 @@ pub(crate) async fn generate_note(
     // events having been observed.
     use futures_util::StreamExt;
     let mut stream = resp.bytes_stream();
-    let mut byte_buf: Vec<u8> = Vec::new();
-    let mut full = String::new();
+    // Preallocate the SSE parsing buffers. Anthropic streams notes in many
+    // small deltas; without a capacity hint, `byte_buf` reallocates on every
+    // chunk boundary until it stabilizes and `full` reallocates as the note
+    // grows past each doubling threshold (16, 32, 64, 128, … bytes). 8 KiB
+    // covers the vast majority of SSE frame batches on a typical note; 16 KiB
+    // covers most complete notes before the first realloc. Both grow on
+    // demand if a note is longer.
+    let mut byte_buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+    let mut full = String::with_capacity(16 * 1024);
 
     while let Some(chunk) = stream.next().await {
         let bytes = match chunk {
