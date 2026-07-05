@@ -15,6 +15,8 @@ anyhow = "1"
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Release-mode optimizations for the sync server. Same `lto`/`codegen-units`/
 # `strip` combo as the desktop crate — meaningful bin-size + throughput wins.
