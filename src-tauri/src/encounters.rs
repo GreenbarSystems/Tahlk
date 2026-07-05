@@ -160,21 +160,43 @@ pub(crate) fn get_encounter(state: State<DbState>, id: String) -> Result<Option<
 // Home-screen counters via indexed COUNT(*) — O(index) instead of shipping rows
 // to JS and filtering. `today` is passed in so the comparison matches how
 // encounter_date is stored client-side.
+//
+// Perf (MP1): the three counters used to be three separate `query_row` calls,
+// which meant three prepare/step/reset cycles and — under the single-mutex
+// arch (P2) — three back-to-back lock hits. SQLite has supported
+// `COUNT(*) FILTER (WHERE …)` since 3.30 (bundled SQLCipher ships far newer),
+// so we can fold all three into one full-table scan of the covering index on
+// `encounters(status, encounter_date)`. Same result set, one prepare, one
+// step, one lock.
 #[tauri::command]
 pub(crate) fn encounter_stats(state: State<DbState>, today: String) -> Result<Value, AppError> {
     let conn = state.0.lock();
-    let total: i64 = conn.query_row("SELECT COUNT(*) FROM encounters", [], |r| r.get(0))?;
-    let signed: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM encounters WHERE status = 'signed'",
-        [],
-        |r| r.get(0),
-    )?;
-    let today_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM encounters WHERE encounter_date = ?1",
-        params![today],
-        |r| r.get(0),
-    )?;
+    let (total, signed, today_count) = query_encounter_stats(&conn, &today)?;
     Ok(json!({ "total": total, "signed": signed, "today": today_count }))
+}
+
+/// Pure DB helper for `encounter_stats` — takes any `rusqlite::Connection`
+/// so tests can drive it against an in-memory fixture without the Tauri
+/// State harness. Returns `(total, signed, today_count)`.
+///
+/// Uses `COUNT(*) FILTER (WHERE …)` to collapse three passes into one. The
+/// planner still walks the same rows it would have for `COUNT(*)`, but the
+/// FILTER clauses are evaluated on the same row visit, so we avoid two extra
+/// scans and two extra prepared-statement round-trips.
+pub(crate) fn query_encounter_stats(
+    conn: &rusqlite::Connection,
+    today: &str,
+) -> Result<(i64, i64, i64), AppError> {
+    let row = conn.query_row(
+        "SELECT \
+            COUNT(*)                                        AS total, \
+            COUNT(*) FILTER (WHERE status = 'signed')       AS signed, \
+            COUNT(*) FILTER (WHERE encounter_date = ?1)     AS today \
+         FROM encounters",
+        params![today],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+    )?;
+    Ok(row)
 }
 
 /// Extract a required string field from an incoming encounter payload,
@@ -550,5 +572,62 @@ mod tests {
             "signed_hash": "deadbeef"
         });
         assert!(enforce_signed_immutability(&conn, &incoming).is_err());
+    }
+
+    // MP1: folded-COUNT stats. Verify the single-query path produces the
+    // same tuple the three-query path would have.
+
+    fn insert_row(conn: &Connection, id: &str, status: &str, date: &str) {
+        conn.execute(
+            "INSERT INTO encounters (id, provider_id, encounter_date, status, created_at) \
+             VALUES (?1, 'prov-1', ?2, ?3, '2026-07-04T10:00:00Z')",
+            params![id, date, status],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn stats_empty_db_returns_all_zero() {
+        let conn = fresh_db();
+        let (total, signed, today) = query_encounter_stats(&conn, "2026-07-04").unwrap();
+        assert_eq!((total, signed, today), (0, 0, 0));
+    }
+
+    #[test]
+    fn stats_counts_total_signed_and_today_independently() {
+        // 5 rows total: 2 signed (one today, one earlier), 2 drafts (one today,
+        // one earlier), 1 recording (today). Expect total=5, signed=2, today=3.
+        let conn = fresh_db();
+        insert_row(&conn, "a", "signed", "2026-07-04");
+        insert_row(&conn, "b", "signed", "2026-07-01");
+        insert_row(&conn, "c", "draft", "2026-07-04");
+        insert_row(&conn, "d", "draft", "2026-07-02");
+        insert_row(&conn, "e", "recording", "2026-07-04");
+        let (total, signed, today) = query_encounter_stats(&conn, "2026-07-04").unwrap();
+        assert_eq!(total, 5, "total counts every row");
+        assert_eq!(signed, 2, "signed only counts status='signed'");
+        assert_eq!(today, 3, "today counts every status on today's date");
+    }
+
+    #[test]
+    fn stats_today_filter_binds_param_exactly() {
+        // Guard against accidental LIKE/prefix behavior — the filter must
+        // be exact string equality on the parameterized value.
+        let conn = fresh_db();
+        insert_row(&conn, "a", "signed", "2026-07-04");
+        insert_row(&conn, "b", "signed", "2026-07-042"); // pathological suffix
+        let (_, _, today) = query_encounter_stats(&conn, "2026-07-04").unwrap();
+        assert_eq!(today, 1, "?1 must be an exact match, not a prefix");
+    }
+
+    #[test]
+    fn stats_signed_filter_is_case_sensitive() {
+        // Existing writes go through validated status enums, but confirm the
+        // filter itself doesn't silently upcase 'SIGNED'.
+        let conn = fresh_db();
+        insert_row(&conn, "a", "signed", "2026-07-04");
+        insert_row(&conn, "b", "SIGNED", "2026-07-04"); // wouldn't pass the enum, but proves the filter
+        let (_, signed, _) = query_encounter_stats(&conn, "2026-07-04").unwrap();
+        assert_eq!(signed, 1, "filter compares exact lowercase 'signed'");
     }
 }
