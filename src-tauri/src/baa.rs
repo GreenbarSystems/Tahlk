@@ -161,15 +161,7 @@ pub(crate) fn baa_ack_set(
     };
     let json = serde_json::to_string(&ack).map_err(AppError::internal_from)?;
     let conn = state.0.get()?;
-    conn.execute(
-        "INSERT INTO kv (key, value, updated_at) \
-         VALUES (?1, ?2, strftime('%s', 'now')) \
-         ON CONFLICT(key) DO UPDATE SET \
-             value      = excluded.value, \
-             updated_at = excluded.updated_at",
-        params![BAA_ACK_KEY, json],
-    )?;
-    Ok(())
+    crate::kv_ops::upsert_json(&conn, BAA_ACK_KEY, &json)
 }
 
 /// #[tauri::command] wrapper — clears the ack. Idempotent (no error if
@@ -178,7 +170,7 @@ pub(crate) fn baa_ack_set(
 #[tauri::command]
 pub(crate) fn baa_ack_clear(state: State<DbState>) -> Result<(), AppError> {
     let conn = state.0.get()?;
-    conn.execute("DELETE FROM kv WHERE key = ?1", params![BAA_ACK_KEY])?;
+    crate::kv_ops::delete_by_key(&conn, BAA_ACK_KEY)?;
     Ok(())
 }
 

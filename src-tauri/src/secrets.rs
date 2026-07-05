@@ -118,7 +118,7 @@ pub(crate) fn read_api_key(state: &DbState) -> Option<String> {
         // exhausted here the row survives to the next launch, which is
         // still safe (guard_key blocks KV access to the secret namespace).
         if let Ok(conn) = state.0.get() {
-            let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
+            let _ = crate::kv_ops::delete_by_key(&conn, API_KEY_KV);
         }
         return Some(key);
     }
@@ -143,7 +143,7 @@ pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), AppE
     keyring_entry()?.set_password(&key).map_err(AppError::internal_from)?;
     // Remove any legacy plaintext copy so the key no longer lives on disk.
     let conn = state.0.get()?;
-    let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
+    let _ = crate::kv_ops::delete_by_key(&conn, API_KEY_KV);
     Ok(())
 }
 
@@ -153,7 +153,7 @@ pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), AppError> {
         let _ = entry.delete_credential(); // ignore "no entry"
     }
     let conn = state.0.get()?;
-    let _ = conn.execute("DELETE FROM kv WHERE key = ?1", params![API_KEY_KV]);
+    let _ = crate::kv_ops::delete_by_key(&conn, API_KEY_KV);
     Ok(())
 }
 
