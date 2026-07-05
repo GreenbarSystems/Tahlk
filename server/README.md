@@ -6,23 +6,25 @@
 > met (a signed Group customer **and** an audit-safe sync design). Focus is the
 > single-user Solo desktop app. Do not extend this without revisiting the ADR.
 
-> 🛑 **DO NOT DEPLOY.** This service has two open security findings from
-> `tahlk-security-audit.md` that would be **Critical** on any real deployment:
+> 🔐 **Security findings S1 and S2 are now fixed** (see
+> [`docs/security/pre-deploy-checklist.md`](../docs/security/pre-deploy-checklist.md)).
+> This was a scoped, security-only exception to the freeze, permitted by ADR
+> 0001's own unfreeze criterion #3 — **it does not unfreeze the service.** The
+> other two criteria (a signed Group customer **and** an audit-safe sync design)
+> remain unmet, and findings **S3/S4 are still open**, so this must not be
+> deployed against real tenants yet.
 >
-> - **S1 — Auth middleware is a stub.** `src/auth.rs` only checks that the
->   `Authorization` header starts with `Bearer ` (no signature, no expiry, no
->   issuer/audience validation) and reads `x-tenant-id` / `x-provider-id`
->   directly from client headers. Any client can read any tenant by setting
->   `x-tenant-id: <target>`. There is **no tenant isolation** in effect today.
-> - **S2 — No TLS, no rate limits, no body-size limit.** The listener is plain
->   HTTP on `0.0.0.0:8080`. There is no ambient defense against a large-body
->   OOM, no rate limiting, and no accidental-deploy fail-closed guard.
->
-> These are intentionally unfixed because the service is frozen (see ADR 0001).
-> They **must be resolved before any prod deploy** — see
-> [`docs/security/pre-deploy-checklist.md`](../docs/security/pre-deploy-checklist.md).
-> If you find yourself about to run this against real tenants, stop and read
-> that checklist first.
+> - **S1 — real JWT auth (fixed).** `src/auth.rs` now verifies the token
+>   signature against a JWKS fetched from the configured issuer, validates
+>   `iss` / `aud` / `exp` / `nbf`, and derives `TenantCtx.tenant` /
+>   `TenantCtx.provider` **only** from the token's `tenant_id` / `provider_id`
+>   claims. The old header-trust path is gone — `x-tenant-id` is ignored.
+>   Startup fails closed if the JWKS is unreachable.
+> - **S2 — network defenses (fixed).** A 1 MiB request-body limit, a per-tenant
+>   rate limit (100 req/min, keyed on the verified tenant), and a fail-closed
+>   bind gate (refuses a non-loopback bind unless `TAHLK_ALLOW_INSECURE=1`) are
+>   in place. **TLS termination remains an upstream responsibility** (nginx /
+>   ALB / Cloudflare); this service still speaks plain HTTP behind that proxy.
 
 
 Multi-tenant backend the Tahlk desktop app syncs to when a practice is on the
@@ -32,17 +34,39 @@ so the architecture can be exercised before Postgres/Redis are provisioned.
 
 ## Run
 
+The service binds loopback by default and requires real JWT auth config. For
+production, point it at your IdP's JWKS:
+
 ```bash
 cd server
-cargo run            # listens on :8080 (PORT to override)
+export TAHLK_JWT_ISSUER="https://your-idp.example/"
+export TAHLK_JWT_AUDIENCE="tahlk-sync"          # default; override if needed
+export TAHLK_JWKS_URL="https://your-idp.example/.well-known/jwks.json"
+# Binding a non-loopback address requires an explicit opt-in, since TLS is
+# terminated upstream (see below):
+# export TAHLK_ALLOW_INSECURE=1
+cargo run            # listens on 127.0.0.1:8080 (PORT to override)
+```
+
+For local development without a real IdP, a symmetric HS256 bypass is available
+(never enable in production):
+
+```bash
+export TAHLK_AUTH_DEV_BYPASS=1
+export TAHLK_AUTH_DEV_HS256_SECRET="dev-only-shared-secret"
+export TAHLK_JWT_ISSUER="https://issuer.test/"
+export TAHLK_JWT_AUDIENCE="tahlk-sync"
+cargo run
 ```
 
 ```bash
-# health
+# health (unauthenticated — for orchestrator probes)
 curl localhost:8080/healthz
 
-# all requests are tenant-scoped + authenticated (stub auth: bearer + headers)
-H='-H "Authorization: Bearer dev" -H "X-Tenant-Id: t1" -H "X-Provider-Id: p1"'
+# All /v1 requests require a valid bearer JWT. tenant/provider come from the
+# token's claims — the x-tenant-id header is no longer trusted. TOKEN below is a
+# JWT minted by your IdP (or the HS256 dev secret above).
+H="-H \"Authorization: Bearer $TOKEN\""
 
 # upsert + read back (last-writer-wins via server updated_at)
 curl -X PUT localhost:8080/v1/encounters/enc-1 $H \
@@ -72,31 +96,30 @@ constructor lines in `main.rs`; handlers don't change.
 
 Every item below is **mandatory** before any prod deploy — not aspirational.
 See [`docs/security/pre-deploy-checklist.md`](../docs/security/pre-deploy-checklist.md)
-for the checklist that gates unfreeze.
+for the checklist that gates unfreeze. The auth (S1) and network-defense (S2)
+items are **done**; the store/cache swaps are still outstanding.
 
 - **Store → Postgres** (`sqlx`): apply `migrations/0001_init.sql`. Per request,
   `SET app.tenant_id` from the JWT so row-level security enforces isolation at
   the database. Connection pool sized to instance count × pool size.
 - **Cache → Redis**: shared across horizontally-scaled instances; the in-memory
   cache is per-process and only correct at one replica.
-- **Auth (S1)**: replace the header/bearer stub in `auth.rs` with real JWT
-  verification. Concretely: use the `jsonwebtoken` crate; verify signature
-  against a JWKS fetched from the configured issuer (Auth0 / WorkOS / Clerk /
-  self-hosted); validate `iss`, `aud`, `exp`, `nbf`; require `tenant_id` and
-  `provider_id` claims; derive `TenantCtx.tenant` and `TenantCtx.provider` from
-  those claims and **never** from headers. Add `From<jsonwebtoken::errors::Error>`
-  for `ApiError::Unauthorized`. On startup, refuse to serve traffic if the
-  JWKS URL is unreachable (fail closed). The comment on `auth.rs:8` already
-  describes the target design; turn it into code.
-- **Network defenses (S2)**: assume the deployment terminates TLS upstream
-  (nginx / ALB / Cloudflare). In-process, add:
-  - `tower_http::limit::RequestBodyLimitLayer::new(1 * 1024 * 1024)` — 1 MiB
-    body cap so an oversized JSON blob can't OOM a replica.
-  - `tower_governor` per-tenant rate limiter — 100 req/min per tenant is a
-    reasonable starting envelope.
-  - Fail-closed bind gate: refuse to bind unless `TAHLK_ALLOW_INSECURE=1` is
-    explicitly set, so a "just run it" accidental deploy without a TLS-
-    terminating upstream fails safely at startup.
+- **Auth (S1) — done.** `auth.rs` verifies the token signature against a JWKS
+  fetched from the configured issuer (`TAHLK_JWKS_URL`), validates `iss`, `aud`,
+  `exp`, `nbf`, requires `tenant_id` / `provider_id` claims, and derives
+  `TenantCtx` from those claims — never from headers. Startup fails closed if
+  the JWKS is unreachable. Configure via `TAHLK_JWT_ISSUER` /
+  `TAHLK_JWT_AUDIENCE` / `TAHLK_JWKS_URL` (see Run).
+- **Network defenses (S2) — done.** TLS is still terminated **upstream** (nginx
+  / ALB / Cloudflare); this service speaks plain HTTP behind it. In-process it
+  now enforces:
+  - a 1 MiB request-body cap (`RequestBodyLimitLayer`) so an oversized JSON blob
+    can't OOM a replica;
+  - a per-tenant rate limiter (100 req/min, keyed on the **verified** tenant via
+    `governor`, not the source IP);
+  - a fail-closed bind gate: refuses to bind a non-loopback address unless
+    `TAHLK_ALLOW_INSECURE=1` is explicitly set, so an accidental deploy without a
+    TLS-terminating upstream fails safely at startup.
 - **Audio (PHI)**: never transits this service body. Client uploads encrypted
   WAV directly to object storage via a short-lived presigned URL; only the
   object key is stored here.
