@@ -30,7 +30,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use auth::{require_auth, JwtVerifier, TenantCtx};
-use config::Config;
+use cache::{Cache, InMemoryCache, RedisCache};
+use config::{CacheConfig, Config};
 use error::ApiError;
 
 // Max accepted request body. Encounters/audit entries are small JSON documents;
@@ -123,6 +124,24 @@ fn rate_limiter() -> TenantRateLimiter {
     RateLimiter::keyed(quota)
 }
 
+// S4: construct the configured cache backend. `InMemory` is infallible; `Redis`
+// connects eagerly and fails closed (exit 1) if the URL is unreachable, so a
+// horizontally-scaled deployment never silently degrades to a per-replica cache
+// (the stale-read bug S4 is about) — it either shares the cache or refuses to
+// start.
+async fn build_cache(cfg: &CacheConfig) -> Arc<dyn Cache> {
+    match cfg {
+        CacheConfig::InMemory => Arc::new(InMemoryCache::new()),
+        CacheConfig::Redis { url } => match RedisCache::connect(url).await {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                eprintln!("redis cache init failed: {e}");
+                std::process::exit(1);
+            }
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -145,10 +164,17 @@ async fn main() {
         }
     };
 
-    // Swap these two lines for PostgresStore / RedisCache in production.
+    // S4: select the cache backend. Defaults to the process-local in-memory
+    // cache; `TAHLK_CACHE_BACKEND=redis` opts into the shared Redis cache
+    // required before horizontal scaling. Fail closed if a configured Redis is
+    // unreachable rather than silently degrading to a per-replica cache (which
+    // is exactly the stale-read bug S4 is about).
+    let cache = build_cache(&cfg.cache).await;
+
+    // Swap InMemoryStore for PostgresStore in production (see README).
     let state = AppState {
         store: Arc::new(store::InMemoryStore::new()),
-        cache: Arc::new(cache::InMemoryCache::new()),
+        cache,
         auth,
         limiter: Arc::new(rate_limiter()),
     };

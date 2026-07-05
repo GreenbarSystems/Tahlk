@@ -61,6 +61,13 @@ exclusively on finishing the single-user **Solo** desktop product.
    > sync design) are still unmet — and no new Group-tier features, endpoints,
    > or seam expansion were added. This ADR's Status stays **Accepted /
    > frozen**.
+   >
+   > **Note (2026-07-05):** the S3 (redacted structured error logging) and S4
+   > (swap-in `RedisCache`) fixes have since landed under the *same* scoped
+   > security/correctness-only exception, extending the S1/S2 precedent. These
+   > are hardening of existing cache/error-handling code — no new Group-tier
+   > features, endpoints, or seam expansion. The service **remains frozen** for
+   > the unmet criteria #1 and #2; this ADR's Status stays **Accepted / frozen**.
 
 ## Consequences
 

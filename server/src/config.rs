@@ -6,6 +6,17 @@ pub struct Config {
     // S2 fail-closed bind gate: `main` refuses to bind a non-loopback address
     // unless this was explicitly opted into. Sourced from `TAHLK_ALLOW_INSECURE=1`.
     pub allow_insecure_bind: bool,
+    // S4 cache backend selection.
+    pub cache: CacheConfig,
+}
+
+// S4 cache backend. Defaults to the process-local in-memory cache (correct for
+// a single instance). A horizontally-scaled deployment must select `Redis` so
+// invalidations are shared across replicas; `main` then fails closed at startup
+// if the Redis URL is unreachable.
+pub enum CacheConfig {
+    InMemory,
+    Redis { url: String },
 }
 
 // S1 auth configuration. In production all three of `issuer`, `audience`, and
@@ -43,6 +54,21 @@ pub fn from_env() -> Config {
         addr: SocketAddr::from(([0, 0, 0, 0], port)),
         auth,
         allow_insecure_bind: env_flag("TAHLK_ALLOW_INSECURE"),
+        cache: cache_from_env(),
+    }
+}
+
+// `TAHLK_CACHE_BACKEND=redis` selects the shared cache (requires
+// `TAHLK_REDIS_URL`); anything else (including unset) keeps the in-memory
+// default so single-instance behavior is unchanged unless explicitly opted in.
+fn cache_from_env() -> CacheConfig {
+    match std::env::var("TAHLK_CACHE_BACKEND").as_deref() {
+        Ok("redis") => {
+            let url = std::env::var("TAHLK_REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            CacheConfig::Redis { url }
+        }
+        _ => CacheConfig::InMemory,
     }
 }
 

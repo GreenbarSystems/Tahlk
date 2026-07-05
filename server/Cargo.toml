@@ -18,6 +18,7 @@ tracing-subscriber = "0.3"
 jsonwebtoken = { version = "10.4.0", features = ["aws_lc_rs"] }
 governor = "0.10.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+redis = { version = "1.3.0", default-features = false, features = ["tokio-comp", "connection-manager"] }
 
 # Release-mode optimizations for the sync server. Same `lto`/`codegen-units`/
 # `strip` combo as the desktop crate — meaningful bin-size + throughput wins.

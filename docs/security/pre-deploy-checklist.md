@@ -3,10 +3,12 @@
 > **Status:** the service remains FROZEN per
 > [ADR 0001](../adr/0001-freeze-group-tier-and-sync.md). **S1 and S2 are now
 > fixed** in code (scoped freeze exception under ADR 0001 unfreeze criterion #3;
-> see the ADR and `server/README.md`) — their boxes below are checked. This does
-> **not** unfreeze the service: the other unfreeze criteria (signed Group
-> customer, audit-safe sync design) are unmet and the adjacent items below
-> (Postgres RLS, Redis, S3 log redaction, schema drift) are still open.
+> see the ADR and `server/README.md`) — their boxes below are checked. **S3
+> (redacted structured error logging) and S4 (swap-in `RedisCache`) are now
+> fixed in code as well**, under the same scoped exception — their boxes below
+> are checked. This does **not** unfreeze the service: the other unfreeze
+> criteria (signed Group customer, audit-safe sync design) are unmet and the
+> remaining adjacent items below (Postgres RLS, schema drift) are still open.
 >
 > If you are about to `cargo run --release` or `kubectl apply` this service
 > against real tenants and any box below is unchecked, **stop**. These gaps
@@ -106,11 +108,21 @@ Not S1/S2 themselves, but the same "before-deploy" review pass should:
       per request for row-level security). Postgres RLS is the defense-in-depth
       layer for S1 — even if the JWT verification has a bug, RLS blocks
       cross-tenant reads at the database.
-- [ ] Swap `InMemoryCache` for `RedisCache` (S4 from the audit — process-local
-      cache is a correctness issue at >1 replica, not a security issue).
-- [ ] Route the S3 error log through structured `tracing::error!(error = ?e)`
+- [x] Swap `InMemoryCache` for `RedisCache` (S4 from the audit — process-local
+      cache is a correctness issue at >1 replica, not a security issue). The
+      swap-in `RedisCache` now exists behind the `Cache` trait; select it with
+      `TAHLK_CACHE_BACKEND=redis` (+ `TAHLK_REDIS_URL`). `main` fails closed if a
+      configured Redis is unreachable. A single instance may keep the default
+      in-memory cache; **any horizontally-scaled deployment must set
+      `TAHLK_CACHE_BACKEND=redis`** or replicas will serve stale reads past an
+      invalidation. See `server/README.md`.
+- [x] Route the S3 error log through structured `tracing::error!(error = …)`
       with a redaction filter so DB error text doesn't leak SQL fragments
-      containing tenant IDs.
+      containing tenant IDs. Internal-error and JWT-failure logs now pass a
+      redacted detail in a named `error` field (URL userinfo + sensitive
+      `key=value` pairs masked) while the log *message* stays a stable static
+      string. Promotion to a per-field `tracing_subscriber` `Layer` is the
+      documented follow-up once the Postgres store lands (see `error.rs`).
 - [ ] Confirm the two schema drift points between desktop and server
       (`audio_path` vs `audio_object_key`, etc. — see ADR 0001) are resolved
       as part of unfreeze planning, not shipped with a schema split.

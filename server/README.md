@@ -6,13 +6,13 @@
 > met (a signed Group customer **and** an audit-safe sync design). Focus is the
 > single-user Solo desktop app. Do not extend this without revisiting the ADR.
 
-> 🔐 **Security findings S1 and S2 are now fixed** (see
+> 🔐 **Security findings S1, S2, S3 and S4 are now fixed** (see
 > [`docs/security/pre-deploy-checklist.md`](../docs/security/pre-deploy-checklist.md)).
-> This was a scoped, security-only exception to the freeze, permitted by ADR
-> 0001's own unfreeze criterion #3 — **it does not unfreeze the service.** The
-> other two criteria (a signed Group customer **and** an audit-safe sync design)
-> remain unmet, and findings **S3/S4 are still open**, so this must not be
-> deployed against real tenants yet.
+> These landed as scoped, security/correctness-only exceptions to the freeze,
+> permitted by ADR 0001's own unfreeze criterion #3 — **they do not unfreeze the
+> service.** The other two criteria (a signed Group customer **and** an
+> audit-safe sync design) remain unmet, so this must not be deployed against
+> real tenants yet.
 >
 > - **S1 — real JWT auth (fixed).** `src/auth.rs` now verifies the token
 >   signature against a JWKS fetched from the configured issuer, validates
@@ -25,6 +25,17 @@
 >   bind gate (refuses a non-loopback bind unless `TAHLK_ALLOW_INSECURE=1`) are
 >   in place. **TLS termination remains an upstream responsibility** (nginx /
 >   ALB / Cloudflare); this service still speaks plain HTTP behind that proxy.
+> - **S3 — redacted structured error logging (fixed).** `src/error.rs` no longer
+>   string-interpolates raw error text into log messages. Internal-error and
+>   JWT-failure logs carry a redacted detail in a named `error` field (URL
+>   userinfo and sensitive `key=value` pairs masked) while the message stays a
+>   stable static string. Promotion to a per-field `tracing_subscriber` `Layer`
+>   is the documented follow-up once the Postgres store lands.
+> - **S4 — swap-in `RedisCache` (fixed).** A shared-cache backend now exists
+>   behind the `Cache` trait. Single instances keep the default in-memory cache;
+>   **any horizontally-scaled deployment must set `TAHLK_CACHE_BACKEND=redis`**
+>   (see [Cache backend](#cache-backend)) or replicas will serve stale reads past
+>   an invalidation. Startup fails closed if a configured Redis is unreachable.
 
 
 Multi-tenant backend the Tahlk desktop app syncs to when a practice is on the
@@ -81,6 +92,29 @@ curl -X POST localhost:8080/v1/encounters/enc-1/audit $H \
 curl localhost:8080/v1/encounters/enc-1/audit $H
 ```
 
+## Cache backend
+
+The cache is selected at startup from the environment (default: in-memory):
+
+```bash
+# Default — process-local in-memory cache. Correct only at a SINGLE instance.
+# (unset TAHLK_CACHE_BACKEND)
+
+# Shared Redis cache — REQUIRED before running more than one replica.
+export TAHLK_CACHE_BACKEND=redis
+export TAHLK_REDIS_URL="redis://redis.internal:6379"   # default 127.0.0.1:6379
+cargo run
+```
+
+`InMemoryCache` is per-process: once more than one replica runs, instance A can
+keep serving a list that instance B has already invalidated (the S4 stale-read
+bug). Selecting `redis` moves the cache into shared Redis so an invalidate on
+any instance is seen by all. When `TAHLK_CACHE_BACKEND=redis` is set, `main`
+connects eagerly and **fails closed** (exits non-zero) if `TAHLK_REDIS_URL` is
+unreachable — it never silently degrades to a per-replica cache. Transient Redis
+errors *after* startup degrade a single request to "uncached" (the store stays
+the source of truth), never to a failed request.
+
 ## Architecture
 
 ```
@@ -102,8 +136,12 @@ items are **done**; the store/cache swaps are still outstanding.
 - **Store → Postgres** (`sqlx`): apply `migrations/0001_init.sql`. Per request,
   `SET app.tenant_id` from the JWT so row-level security enforces isolation at
   the database. Connection pool sized to instance count × pool size.
-- **Cache → Redis**: shared across horizontally-scaled instances; the in-memory
-  cache is per-process and only correct at one replica.
+- **Cache → Redis (S4) — implemented.** `RedisCache` is shared across
+  horizontally-scaled instances; the in-memory default is per-process and only
+  correct at one replica. Select it with `TAHLK_CACHE_BACKEND=redis` (+
+  `TAHLK_REDIS_URL`) — no code change, no rebuild. See
+  [Cache backend](#cache-backend). Startup fails closed if the configured Redis
+  is unreachable.
 - **Auth (S1) — done.** `auth.rs` verifies the token signature against a JWKS
   fetched from the configured issuer (`TAHLK_JWKS_URL`), validates `iss`, `aud`,
   `exp`, `nbf`, requires `tenant_id` / `provider_id` claims, and derives
