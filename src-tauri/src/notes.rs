@@ -31,6 +31,7 @@
 //! `CONNECT_TIMEOUT` and `REQUEST_TIMEOUT`.
 
 use reqwest::Client;
+use std::sync::OnceLock;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
@@ -174,6 +175,44 @@ fn record_llm_call(state: &State<DbState>, entry: LlmCallEntry) {
     }
 }
 
+/// Process-wide reqwest client for the Anthropic generate_note path.
+///
+/// Built once on first use and reused for the process lifetime. Reqwest's
+/// `Client` is internally an `Arc<Inner>` — cloning is a refcount bump, not
+/// a rebuild — so every caller `.clone()`s from this cell.
+///
+/// Tuning:
+///   - `pool_idle_timeout(90s)`: matches Anthropic's server-side idle window
+///     so we don't hold a half-closed connection.
+///   - `pool_max_idle_per_host(4)`: enough headroom for burst retries and
+///     the streaming request overlapping a fresh one, without hoarding.
+///   - `http2_prior_knowledge()`: skip the ALPN dance — Anthropic speaks
+///     HTTP/2 unconditionally, and HTTP/2 lets multiple in-flight requests
+///     share a single connection, so a slow SSE stream doesn't block the
+///     next generate call from reusing the socket.
+///   - `min_tls_version(TLS 1.2)`, `timeout(REQUEST_TIMEOUT)`,
+///     `connect_timeout(CONNECT_TIMEOUT)`: identical to the previous inline
+///     builder — no policy change (audit L4).
+fn http_client() -> Result<&'static Client, AppError> {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c);
+    }
+    let built = Client::builder()
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_max_idle_per_host(4)
+        .http2_prior_knowledge()
+        .build()
+        .map_err(AppError::internal_from)?;
+    // Race: another caller may have won the set; in that case ours is dropped
+    // and we return the winner. Both are byte-identical builders, so which
+    // one wins doesn't matter.
+    Ok(CLIENT.get_or_init(|| built))
+}
+
 #[tauri::command]
 pub(crate) async fn generate_note(
     app: AppHandle,
@@ -192,17 +231,16 @@ pub(crate) async fn generate_note(
     // lock is held across the await below).
     let key = read_api_key(&state).ok_or(AppError::NoApiKey)?;
 
-    // TLS: reqwest validates the server certificate against the system trust
-    // store by default; we additionally pin the floor to TLS 1.2. Certificate
-    // pinning is intentionally NOT used — Anthropic rotates its certs/CAs, so
-    // pinning a third-party API would cause outages on rotation; the residual
-    // rogue-CA MITM risk is accepted (low for a desktop client). [audit L4]
-    let client = Client::builder()
-        .min_tls_version(reqwest::tls::Version::TLS_1_2)
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .map_err(AppError::internal_from)?;
+    // Reuse a process-lifetime HTTP client (P4). Previously we rebuilt one on
+    // every generate_note call, which meant discarding the connection pool,
+    // the TLS session cache, and any HTTP/2 stream state, then paying a full
+    // DNS + TCP + TLS handshake on the very next call. The client itself is
+    // cheap to Clone (it's an Arc internally) so callers grab their own
+    // handle from the shared instance.
+    //
+    // TLS/pinning policy unchanged from the previous inline builder — see
+    // audit L4 for why cert pinning is deliberately NOT used.
+    let client = http_client()?.clone();
     // Prompt-injection defense (audit H6): wrap the transcript in
     // <transcript> tags and prepend a data-only directive to the system
     // prompt. See module-level helpers for rationale.
