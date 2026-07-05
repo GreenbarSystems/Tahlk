@@ -7,7 +7,7 @@
 import { kvGet } from '../../core/storageBackend.js';
 import { keys } from '../../data/keys.js';
 import { loadDraft } from '../../editor/noteEditor.js';
-import { listTemplates } from '../../templates/templateLibrary.js';
+import { listTemplates, defaultTemplateId } from '../../templates/templateLibrary.js';
 import { displayDate, escapeHtml, statusLabel } from '../../utils/format.js';
 
 export const TRANSCRIPT_KEY = keys.noteTranscript;
@@ -16,7 +16,9 @@ export function renderEncounterPanel(encounter) {
   const isSigned = encounter.status === 'signed';
   const draft = loadDraft(encounter.id) || '';
   const transcript = kvGet(TRANSCRIPT_KEY(encounter.id)) || '';
-  const templates = listTemplates();
+  const providerSpecialty = (kvGet(keys.provider()) || {}).specialty;
+  const templates = listTemplates(providerSpecialty);
+  const defaultId = defaultTemplateId(providerSpecialty);
 
   return `
     <div class="panel encounter-panel" data-encounter-id="${escapeHtml(encounter.id)}">
@@ -60,7 +62,7 @@ export function renderEncounterPanel(encounter) {
                 </button>
                 <div class="generate-group">
                   <select id="template-select">
-                    ${templates.map(t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join('')}
+                    ${templates.map(t => `<option value="${escapeHtml(t.id)}"${t.id === defaultId ? ' selected' : ''}>${escapeHtml(t.name)}</option>`).join('')}
                   </select>
                   <button class="btn btn-primary btn-sm" id="btn-generate"
                           ${!transcript ? 'disabled title="Transcribe first"' : ''}>

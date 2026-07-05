@@ -72,18 +72,6 @@ fn model_path(app: &AppHandle) -> Result<PathBuf, AppError> {
 }
 
 #[tauri::command]
-pub(crate) async fn model_downloaded(app: AppHandle) -> Result<bool, AppError> {
-    Ok(tokio::fs::try_exists(model_path(&app)?).await.unwrap_or(false))
-}
-
-// Retained for API compatibility; model ships with the app so this is a no-op.
-#[tauri::command]
-pub(crate) async fn download_whisper_model(app: AppHandle) -> Result<(), AppError> {
-    let _ = app;
-    Ok(())
-}
-
-#[tauri::command]
 pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Result<String, AppError> {
     let model = model_path(&app)?;
     if !tokio::fs::try_exists(&model).await.unwrap_or(false) {
