@@ -55,12 +55,27 @@ export function renderOnboarding() {
             <div class="step-num">2</div>
             <div class="step-body">
               <h3>Note generation API key</h3>
-              <p class="step-desc">Tahlk uses Claude (Anthropic) to turn transcripts into clinical notes. Enter your Anthropic API key — stored locally on this device only, never sent to Tahlk servers.</p>
+              <p class="step-desc">Tahlk uses Anthropic's AI (Claude) to turn what you say into clinical notes.
+              You'll need your own Anthropic account and API key so your data goes directly to Anthropic under
+              your own agreement with them — Tahlk itself never sees or stores your key on any server. The key
+              is saved only in this device's local database.</p>
+              <details class="onboarding-help" id="ob-apikey-help">
+                <summary>How do I get one?</summary>
+                <div class="onboarding-help-body">
+                  <p>An API key is a private password that lets Tahlk send transcripts to Anthropic on your behalf. To create one:</p>
+                  <ol>
+                    <li>Go to <a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">console.anthropic.com</a> and sign in (or create a free account).</li>
+                    <li>Open <strong>API Keys</strong> and choose <strong>Create Key</strong>.</li>
+                    <li>Copy the key (it starts with <code>sk-ant-</code>) and paste it in the box below.</li>
+                  </ol>
+                  <p class="onboarding-help-note">Anthropic bills you directly for usage. You can revoke or rotate the key from the same page at any time.</p>
+                </div>
+              </details>
               <div class="field-row">
                 <label>Anthropic API key <span class="req">*</span></label>
                 <input id="ob-apikey" type="password" placeholder="sk-ant-…" autocomplete="off" />
               </div>
-              <p class="step-hint"><a href="#" id="ob-apikey-link">Get a key at console.anthropic.com →</a></p>
+              <p class="step-hint"><a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener" id="ob-apikey-link">Get a key at console.anthropic.com →</a></p>
             </div>
           </div>
 
@@ -76,6 +91,23 @@ export function renderOnboarding() {
               <p class="step-desc">Under HIPAA, any protected health information (PHI) sent to Anthropic
               requires an executed Business Associate Agreement (BAA) between your organization and Anthropic.
               Tahlk will not generate notes until you confirm this is in place. You can revoke this in Settings at any time.</p>
+              <details class="onboarding-help" id="ob-baa-help">
+                <summary>What is this?</summary>
+                <div class="onboarding-help-body">
+                  <p>A <strong>Business Associate Agreement (BAA)</strong> is a contract HIPAA requires whenever a
+                  vendor like Anthropic processes patient health information on your behalf. It commits Anthropic to
+                  safeguarding that data. You must have a BAA in place with Anthropic before sending any patient
+                  information through Tahlk.</p>
+                  <p>To request one:</p>
+                  <ol>
+                    <li>Sign in at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">console.anthropic.com</a> with the same account as your API key.</li>
+                    <li>Follow Anthropic's HIPAA / BAA request process (see the link below) and execute the agreement.</li>
+                    <li>Once it's in place, tick the box below to confirm.</li>
+                  </ol>
+                  <p class="onboarding-help-note">Tahlk can't verify the BAA for you — this checkbox is your attestation
+                  that one exists. The block on note generation stays in effect until you confirm.</p>
+                </div>
+              </details>
               <label class="baa-consent">
                 <input id="ob-baa" type="checkbox" />
                 <span>I confirm my organization has an executed BAA with Anthropic covering the API key entered above.</span>
