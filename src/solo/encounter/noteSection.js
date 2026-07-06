@@ -15,6 +15,7 @@ import { getAudioRetention } from '../../domain/retention.js';
 import { toast } from '../../utils/format.js';
 import { userMessage, fromInvoke } from '../../platform/appError.js';
 import { setStatus, clearStatus } from './template.js';
+import { confirmModal } from '../confirmModal.js';
 
 export function wireNoteSection(ctx) {
   let _pendingNote = null;
@@ -135,7 +136,14 @@ export function wireNoteSection(ctx) {
   document.getElementById('btn-sign')?.addEventListener('click', async () => {
     const noteContent = document.getElementById('note-area')?.value || '';
     if (!noteContent.trim()) { toast('Note is empty — cannot sign.'); return; }
-    if (!confirm('Sign and attest this note? The signed version will be locked.')) return;
+    const confirmed = await confirmModal({
+      title: 'Sign & lock this note?',
+      message: 'Signing attests to this clinical note. The signed version will be locked and can no longer be edited.',
+      confirmLabel: 'Sign & Lock',
+      cancelLabel: 'Cancel',
+      confirmClass: 'btn-sign',
+    });
+    if (!confirmed) return;
 
     // Persist any in-flight edit before sealing the chain.
     await flushPendingEdit();

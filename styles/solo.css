@@ -278,6 +278,13 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 .signed-badge{ background: var(--teal-lite); color: var(--teal); font-size: 11px; font-weight: 700;
                text-transform: uppercase; letter-spacing: .4px; border-radius: 3px; padding: 2px 7px; }
 
+.integrity-block { margin-top: 4px; }
+.trust-indicator { font-size: 12px; color: var(--teal); font-weight: 600; }
+.integrity-details { margin-top: 4px; }
+.integrity-details > summary {
+  font-size: 11px; color: var(--gray-500); cursor: pointer; width: fit-content;
+}
+.integrity-details > summary:hover { color: var(--gray-700); }
 .hash-display { font-size: 10px; color: var(--gray-500); margin-top: 4px; word-break: break-all; }
 .hash-display code { background: var(--gray-100); padding: 2px 4px; border-radius: 2px; }
 
@@ -350,6 +357,20 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
   max-width: 400px; text-align: center; box-shadow: var(--shadow-md);
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+
+/* ── Confirmation modal ───────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 10000;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(15, 30, 94, .45); padding: 24px;
+}
+.modal-card {
+  background: var(--white); border-radius: var(--radius-lg); box-shadow: var(--shadow-md);
+  padding: 28px 30px; max-width: 440px; width: 100%;
+}
+.modal-title   { font-size: 18px; font-weight: 800; margin-bottom: 10px; color: var(--gray-900); }
+.modal-message { font-size: 13px; color: var(--gray-700); line-height: 1.6; margin-bottom: 22px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
 /* Diagnostics (opt-in telemetry) controls */
 .diag-toggle { display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer; }
