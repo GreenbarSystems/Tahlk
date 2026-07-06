@@ -26,3 +26,22 @@ export const SPECIALTY_LABELS = {
 export function specialtyLabel(v) {
   return SPECIALTY_LABELS[v] || v;
 }
+
+// Specialty families group related provider/template specialties so the
+// template picker can rank "close enough" templates above unrelated ones.
+// A psychologist with no psychology-specific template should still see the
+// behavioral-health family first — not a podiatry template. Specialties with
+// no family entry (e.g. 'other', 'general', unset) match nothing here and
+// fall back to the generic SOAP default. Keep this the single place that
+// encodes cross-specialty affinity.
+const SPECIALTY_FAMILIES = {
+  psychiatry: 'behavioral-health',
+  'behavioral-health': 'behavioral-health',
+  psychology: 'behavioral-health',
+  podiatry: 'podiatry',
+};
+
+// Family bucket for a specialty value, or null when it belongs to none.
+export function specialtyFamily(v) {
+  return SPECIALTY_FAMILIES[v] || null;
+}

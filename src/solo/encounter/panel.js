@@ -21,6 +21,7 @@ import { wireRecordingSection } from './recordingSection.js';
 import { wireTranscriptSection } from './transcriptSection.js';
 import { wireNoteSection } from './noteSection.js';
 import { wireExportSection } from './exportSection.js';
+import { runScribeChain } from './autoChain.js';
 
 export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   const providerProfile = kvGet(keys.provider()) || {};
@@ -47,8 +48,22 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
 
   const note = wireNoteSection(ctx);
   wireRecordingSection(ctx);
-  wireTranscriptSection(ctx);
+  const transcriptCtl = wireTranscriptSection(ctx);
   wireExportSection(ctx);
+
+  // Auto-chain: once audio is saved, transcribe and then (on success) generate
+  // the note without further clicks. Subscribed AFTER wireRecordingSection so
+  // that recordingSection's audio_saved handler — which sets audio_path on the
+  // encounter synchronously before it awaits — has already run. Manual
+  // "Transcribe" / "Generate Note" buttons stay wired for retries and
+  // template switches. Transcription failure stops the chain (runScribeChain
+  // only generates when transcription succeeded).
+  ctx.sub('scribe:audio_saved', () => {
+    runScribeChain({
+      transcribeNow: transcriptCtl.transcribeNow,
+      generateNow: note.generateNow,
+    });
+  });
 
   // Unmount: flush the pending edit, cancel any streaming frame, then drop
   // every subscription. Safe to call more than once. Returned so the router

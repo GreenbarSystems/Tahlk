@@ -64,12 +64,16 @@ export function wireNoteSection(ctx) {
     });
   });
 
-  // Note generation.
-  document.getElementById('btn-generate')?.addEventListener('click', async () => {
+  // Note generation. Returns true on success, false on failure/no-op. Used by
+  // both the manual "Generate Note" button and the post-transcription
+  // auto-chain; `chain` only documents the call site (the shared status banner
+  // is set the same way either way, so the auto-chain reads as one continuous
+  // "Transcribing… → Writing note…" flow).
+  async function generateNow(_opts = {}) {
     const transcript = ctx.currentTranscript();
-    if (!transcript.trim()) return;
+    if (!transcript.trim()) return false;
     const templateId = document.getElementById('template-select')?.value || 'soap-generic';
-    setStatus('Generating clinical note…');
+    setStatus('Writing note…');
     const noteArea = document.getElementById('note-area');
     if (noteArea) {
       noteArea.value = '';
@@ -94,6 +98,7 @@ export function wireNoteSection(ctx) {
       await encountersRepo.save(ctx.currentEncounter);
       ctx.onEncounterUpdated(ctx.currentEncounter);
       clearStatus();
+      return true;
     } catch (e) {
       if (noteArea) {
         noteArea.placeholder = 'Clinical note will appear here after generation. Review and edit before signing.';
@@ -111,8 +116,11 @@ export function wireNoteSection(ctx) {
       } else {
         toast(userMessage(err, 'Note generation failed.'));
       }
+      return false;
     }
-  });
+  }
+
+  document.getElementById('btn-generate')?.addEventListener('click', () => generateNow());
 
   // Note edits — buffer the value and debounce the durable save. The buffer
   // is also flushed on dispose and before signing (see flushPendingEdit).
@@ -191,6 +199,6 @@ export function wireNoteSection(ctx) {
   });
 
   // Expose the flush + cleanup handles so panel.dispose() can drain them
-  // before tearing down subscriptions.
-  return { flushPendingEdit, cleanup };
+  // before tearing down subscriptions, plus generateNow for the auto-chain.
+  return { flushPendingEdit, cleanup, generateNow };
 }

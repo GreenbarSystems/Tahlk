@@ -47,10 +47,12 @@ the repo), so each dev places the files locally:
    `ggml-cpu-*.dll` (the matching CPU backend is selected at runtime). Copy
    them from the same `Release/` folder into `src-tauri/binaries/`.
 
-4. The Whisper model (`ggml-base.en.bin`, ~142 MB) downloads on first run via
-   onboarding / Settings → Download Transcription Model. It lands in the app
-   data dir (`%APPDATA%/com.tahlk.app/models/` on Windows); drop it there
-   manually to skip the in-app download.
+4. The Whisper model (`ggml-base.en.bin`, ~142 MB) ships bundled with the app —
+   it is packaged as a Tauri resource and loaded from the app's resource
+   directory at transcription time. There is no in-app download step; Settings
+   only reports the bundled model's presence. For a dev build, place
+   `ggml-base.en.bin` in `src-tauri/resources/` so it is picked up as a bundled
+   resource.
 
 > Note: `externalBin` bundles only the exe for `tauri build`. Shipping a
 > distributable still needs the DLLs added as bundle resources placed beside

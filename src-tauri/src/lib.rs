@@ -84,8 +84,6 @@ pub fn run() {
             encounters::clear_encounter_audio_path,
             note_history::note_history_list,
             note_history::note_history_append,
-            whisper::model_downloaded,
-            whisper::download_whisper_model,
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,

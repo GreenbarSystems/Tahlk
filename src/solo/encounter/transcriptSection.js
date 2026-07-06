@@ -11,22 +11,35 @@ import { userMessage } from '../../platform/appError.js';
 import { TRANSCRIPT_KEY, setStatus, clearStatus } from './template.js';
 
 export function wireTranscriptSection(ctx) {
-  document.getElementById('btn-transcribe')?.addEventListener('click', async () => {
-    if (!ctx.currentEncounter.audio_path) return;
+  // Run transcription. Returns true on success, false on failure or when there
+  // is no audio to transcribe. `chain` is set when called as part of the
+  // auto-chain: on success the status banner is left in place so the caller
+  // (note generation) can update it to "Writing note…" without a flicker; on
+  // the manual path the banner is cleared here.
+  async function transcribeNow({ chain = false } = {}) {
+    if (!ctx.currentEncounter.audio_path) return false;
     setStatus('Transcribing… this may take 20–40 seconds.');
+    const btn = document.getElementById('btn-transcribe');
+    if (btn) btn.disabled = true;
     try {
       const transcript = await transcribe(ctx.currentEncounter.audio_path, ctx.currentEncounter.id);
       ctx.setTranscript(transcript);
       kvSet(TRANSCRIPT_KEY(ctx.currentEncounter.id), transcript);
-      document.getElementById('transcript-area').value = transcript;
+      const ta = document.getElementById('transcript-area');
+      if (ta) ta.value = transcript;
       document.getElementById('btn-generate')?.removeAttribute('disabled');
-      clearStatus();
-      toast('Transcription complete.');
+      if (!chain) clearStatus();
+      return true;
     } catch (e) {
       clearStatus();
       toast(userMessage(e, 'Transcription failed.'));
+      return false;
+    } finally {
+      if (btn) btn.disabled = false;
     }
-  });
+  }
+
+  document.getElementById('btn-transcribe')?.addEventListener('click', () => transcribeNow());
 
   // Allow manual transcript edits.
   document.getElementById('transcript-area')?.addEventListener('input', e => {
@@ -36,4 +49,6 @@ export function wireTranscriptSection(ctx) {
       document.getElementById('btn-generate')?.removeAttribute('disabled');
     }
   });
+
+  return { transcribeNow };
 }
