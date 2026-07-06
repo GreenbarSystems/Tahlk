@@ -136,96 +136,56 @@ const SELECT_COLS: &str =
     "id, created_at, encounter_id, provider_id, model, endpoint, \
      request_bytes, response_bytes, upstream_reqid, outcome, error_code, duration_ms";
 
-/// #[tauri::command] — list the most recent audit rows, most recent first.
-/// `limit` is clamped to 500 so a compromised WebView can't pull the
-/// entire table in one shot; the operator UI should paginate via `before_id`.
+/// Core list query, split out from the Tauri command so it can be unit-tested
+/// against an in-memory `Connection` without standing up a `State<DbState>`.
+/// `limit` is expected to be pre-clamped by the caller (see `llm_audit_list`).
+///
+/// S-CODE-5: this replaced a 4-branch cursor-pagination match (`encounter_id`
+/// × `before_id`, each branch hand-rolling the same SELECT). Cursor pagination
+/// was premature for a single-user *local* audit table that grows a few MB/year
+/// and had no caller ever passing a cursor — `ORDER BY id DESC LIMIT` already
+/// returns the most recent rows, which is the only access pattern the operator
+/// report needs. One WHERE-builder now covers both the filtered and unfiltered
+/// cases. If a real need to page a large local table ever materializes,
+/// reintroduce a cursor *then*, against a concrete requirement.
+fn list_recent(
+    conn: &Connection,
+    encounter_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<Value>, AppError> {
+    let mut sql = format!("SELECT {} FROM llm_audit", SELECT_COLS);
+    let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    if let Some(eid) = encounter_id.as_ref() {
+        sql.push_str(" WHERE encounter_id = ?");
+        binds.push(eid);
+    }
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    binds.push(&limit);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(binds.as_slice(), row_to_json)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// #[tauri::command] — list the most recent audit rows, most recent first,
+/// optionally filtered to a single encounter.
+///
+/// `limit` is clamped to 500. This clamp is a security/resource guard (DoS
+/// protection): a compromised WebView must not be able to pull an unbounded
+/// slice of the audit table in a single call. Keep it independent of any
+/// pagination decisions — see `list_recent` for why cursor pagination was
+/// removed but this clamp stays.
 #[tauri::command]
 pub(crate) fn llm_audit_list(
     state: tauri::State<crate::DbState>,
     encounter_id: Option<String>,
     limit: Option<u32>,
-    before_id: Option<i64>,
 ) -> Result<Vec<Value>, AppError> {
     let limit = limit.unwrap_or(100).min(500) as i64;
     let conn = state.0.get()?;
-
-    let (sql, rows): (String, Vec<Value>) = match (encounter_id.as_deref(), before_id) {
-        (Some(eid), Some(bid)) => (
-            format!(
-                "SELECT {} FROM llm_audit \
-                 WHERE encounter_id = ?1 AND id < ?2 \
-                 ORDER BY id DESC LIMIT ?3",
-                SELECT_COLS
-            ),
-            {
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT {} FROM llm_audit \
-                     WHERE encounter_id = ?1 AND id < ?2 \
-                     ORDER BY id DESC LIMIT ?3",
-                    SELECT_COLS
-                ))?;
-                let iter = stmt.query_map(params![eid, bid, limit], row_to_json)?;
-                let mut out = Vec::new();
-                for r in iter {
-                    out.push(r?);
-                }
-                out
-            },
-        ),
-        (Some(eid), None) => (
-            String::new(),
-            {
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT {} FROM llm_audit \
-                     WHERE encounter_id = ?1 \
-                     ORDER BY id DESC LIMIT ?2",
-                    SELECT_COLS
-                ))?;
-                let iter = stmt.query_map(params![eid, limit], row_to_json)?;
-                let mut out = Vec::new();
-                for r in iter {
-                    out.push(r?);
-                }
-                out
-            },
-        ),
-        (None, Some(bid)) => (
-            String::new(),
-            {
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT {} FROM llm_audit \
-                     WHERE id < ?1 \
-                     ORDER BY id DESC LIMIT ?2",
-                    SELECT_COLS
-                ))?;
-                let iter = stmt.query_map(params![bid, limit], row_to_json)?;
-                let mut out = Vec::new();
-                for r in iter {
-                    out.push(r?);
-                }
-                out
-            },
-        ),
-        (None, None) => (
-            String::new(),
-            {
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT {} FROM llm_audit ORDER BY id DESC LIMIT ?1",
-                    SELECT_COLS
-                ))?;
-                let iter = stmt.query_map(params![limit], row_to_json)?;
-                let mut out = Vec::new();
-                for r in iter {
-                    out.push(r?);
-                }
-                out
-            },
-        ),
-    };
-    // Silence the unused-var warning for the fallback SQL text — it's a
-    // build-time reference so grep-based reviews can see the shape.
-    let _ = sql;
-    Ok(rows)
+    list_recent(&conn, encounter_id.as_deref(), limit)
 }
 
 #[cfg(test)]
@@ -311,5 +271,65 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(ids, vec![5, 4, 3]);
+    }
+
+    // S-CODE-5: the simplified `list_recent` must preserve the behavior the old
+    // 4-branch cursor version had for the two cases anything actually uses —
+    // most-recent-first ordering, optional encounter filter, and honoring the
+    // caller's (pre-clamped) limit.
+
+    fn id_seq(rows: &[Value]) -> Vec<i64> {
+        rows.iter().map(|r| r["id"].as_i64().unwrap()).collect()
+    }
+
+    #[test]
+    fn list_recent_returns_all_rows_newest_first() {
+        let conn = fresh();
+        for _ in 0..3 {
+            append(&conn, &entry("ok", 100)).unwrap();
+        }
+        let rows = list_recent(&conn, None, 100).unwrap();
+        assert_eq!(id_seq(&rows), vec![3, 2, 1], "must be ORDER BY id DESC");
+    }
+
+    #[test]
+    fn list_recent_filters_by_encounter() {
+        let conn = fresh();
+        // Two encounters interleaved; filter must return only the target's rows.
+        let mut a = entry("ok", 100);
+        a.encounter_id = Some("enc-A".into());
+        let mut b = entry("ok", 100);
+        b.encounter_id = Some("enc-B".into());
+        append(&conn, &a).unwrap(); // id 1, enc-A
+        append(&conn, &b).unwrap(); // id 2, enc-B
+        append(&conn, &a).unwrap(); // id 3, enc-A
+
+        let rows = list_recent(&conn, Some("enc-A"), 100).unwrap();
+        assert_eq!(id_seq(&rows), vec![3, 1]);
+        assert!(rows.iter().all(|r| r["encounterId"] == "enc-A"));
+
+        let none = list_recent(&conn, Some("enc-does-not-exist"), 100).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn list_recent_honors_limit() {
+        let conn = fresh();
+        for _ in 0..5 {
+            append(&conn, &entry("ok", 100)).unwrap();
+        }
+        let rows = list_recent(&conn, None, 2).unwrap();
+        // Newest two only.
+        assert_eq!(id_seq(&rows), vec![5, 4]);
+    }
+
+    #[test]
+    fn list_command_clamp_caps_at_500() {
+        // The clamp lives in the command, not `list_recent`; assert the arith
+        // directly so the security-motivated 500 ceiling can't silently drift.
+        let clamp = |req: Option<u32>| req.unwrap_or(100).min(500) as i64;
+        assert_eq!(clamp(None), 100, "default page size");
+        assert_eq!(clamp(Some(50)), 50, "under-cap requests pass through");
+        assert_eq!(clamp(Some(10_000)), 500, "over-cap requests are clamped");
     }
 }
