@@ -4,9 +4,16 @@
 // browser UI. Returns a Promise<boolean>: true if confirmed, false if cancelled
 // (via the Cancel button, backdrop click, or Escape).
 
+// The backdrop+card shell and the Escape / backdrop-click / mount-unmount
+// lifecycle are shared scaffolding (src/platform/modal.js). This file keeps
+// only the confirm-specific content and semantics: title/message, the
+// confirm/cancel buttons, Enter-to-confirm, and resolving the promise.
+
 // Nodes are built explicitly (no innerHTML) so untrusted callers can't inject
 // markup through the title/message and so the dialog is drivable in the
 // fake-DOM tests without an HTML parser.
+import { createModal } from '../platform/modal.js';
+
 export function confirmModal({
   title,
   message,
@@ -15,14 +22,24 @@ export function confirmModal({
   confirmClass = 'btn-primary',
 } = {}) {
   return new Promise(resolve => {
-    const backdrop = document.createElement('div');
-    backdrop.className = 'modal-backdrop';
-    backdrop.id = 'modal-backdrop';
+    let settled = false;
+    const settle = result => {
+      if (settled) return;
+      settled = true;
+      modal.close();
+      resolve(result);
+    };
 
-    const card = document.createElement('div');
-    card.className = 'modal-card';
-    card.setAttribute('role', 'dialog');
-    card.setAttribute('aria-modal', 'true');
+    // Escape and backdrop click cancel; Enter confirms — matching the native
+    // confirm() the app's patterns already trained users on.
+    const modal = createModal({
+      backdropId: 'modal-backdrop',
+      onRequestClose: () => settle(false),
+      onKeyDown: e => {
+        if (e.key === 'Enter') { e.preventDefault?.(); settle(true); }
+      },
+    });
+    const { card } = modal;
 
     const heading = document.createElement('h2');
     heading.className = 'modal-title';
@@ -52,31 +69,11 @@ export function confirmModal({
     card.appendChild(heading);
     card.appendChild(body);
     card.appendChild(actions);
-    backdrop.appendChild(card);
 
-    let settled = false;
-    const close = result => {
-      if (settled) return;
-      settled = true;
-      document.removeEventListener('keydown', onKey);
-      backdrop.remove();
-      resolve(result);
-    };
+    confirmBtn.addEventListener('click', () => settle(true));
+    cancelBtn.addEventListener('click', () => settle(false));
 
-    // Escape cancels, Enter confirms — matching the native confirm() the app
-    // patterns already trained users on.
-    const onKey = e => {
-      if (e.key === 'Escape') { e.preventDefault?.(); close(false); }
-      else if (e.key === 'Enter') { e.preventDefault?.(); close(true); }
-    };
-
-    confirmBtn.addEventListener('click', () => close(true));
-    cancelBtn.addEventListener('click', () => close(false));
-    // Click on the dimmed backdrop (but not the card) cancels.
-    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(false); });
-    document.addEventListener('keydown', onKey);
-
-    document.body.appendChild(backdrop);
+    modal.open();
     confirmBtn.focus?.();
   });
 }
