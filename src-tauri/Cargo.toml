@@ -19,6 +19,14 @@ tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 
+# On-disk crash/error log. A GUI process launched from the Start Menu / Finder
+# has no attached terminal, so stderr (and any `panic!`) vanishes — a clinician
+# whose install fails to start would have nothing to send support. The `log`
+# facade plus a LogDir file target give us a persistent, redaction-friendly
+# sink; the panic hook wired in lib.rs routes crashes into it before abort.
+log = "0.4"
+tauri-plugin-log = "2"
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
