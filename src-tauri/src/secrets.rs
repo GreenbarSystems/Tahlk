@@ -1,24 +1,33 @@
-//! Anthropic API key handling.
+//! LLM API key handling.
 //!
 //! The key lives in the OS secure store (Windows Credential Manager /
 //! macOS Keychain / Linux Secret Service) via the `keyring` crate — never
 //! in the app database. It is write-only from JS (set via `set_api_key`,
 //! presence-checked via `has_api_key`) and read only inside `generate_note`.
 //!
+//! The keychain entry name is PROVIDER-SCOPED: each provider stores its key
+//! under its own `keyring` "username" (see `providers::Provider::keyring_user`)
+//! so switching providers reads a different saved key instead of clobbering or
+//! re-requiring one. The set/has/clear commands operate on the CURRENTLY
+//! SELECTED provider (resolved from settings); Anthropic — the only provider
+//! today and the default — maps to the legacy `"anthropic_api_key"` entry, so
+//! existing installs find their saved key unchanged.
+//!
 //! `API_KEY_KV` is the LEGACY SQLite location. It is no longer written; it
 //! is read once and migrated into the keychain (then deleted) so existing
-//! installs stop keeping the key in plaintext on disk.
+//! installs stop keeping the key in plaintext on disk. This legacy sweep is
+//! Anthropic-only — it's the only provider that ever wrote a plaintext key.
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use tauri::State;
 
 use crate::errors::AppError;
+use crate::providers::{self, Provider};
 use crate::DbState;
 
 pub(crate) const API_KEY_KV: &str = "secret_v1::anthropic_api_key";
 const KEYRING_SERVICE: &str = "com.tahlk.app";
-const KEYRING_USER: &str = "anthropic_api_key";
 
 /// Hard ceiling on how many bytes we will accept when a caller tries to set an
 /// API key. Anthropic keys are ~100 chars in practice; 512 bytes is generous
@@ -78,19 +87,31 @@ pub(crate) fn is_secret_key(key: &str) -> bool {
     KEYCHAIN_ONLY_KEYS.contains(&key)
 }
 
-fn keyring_entry() -> Result<keyring::Entry, AppError> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(AppError::internal_from)
+fn keyring_entry_for(user: &str) -> Result<keyring::Entry, AppError> {
+    keyring::Entry::new(KEYRING_SERVICE, user).map_err(AppError::internal_from)
 }
 
-// Read the API key, keychain-first. If absent there but present in the legacy
-// SQLite location, migrate it into the keychain and delete the plaintext copy.
-pub(crate) fn read_api_key(state: &DbState) -> Option<String> {
-    if let Ok(entry) = keyring_entry() {
+// Read the API key for the given keychain entry ("username"), keychain-first.
+// If absent there but present in the legacy SQLite location, migrate it into
+// the keychain and delete the plaintext copy.
+//
+// `user` is the provider-scoped entry name (`Provider::keyring_user`); callers
+// pass the selected provider's entry so switching providers reads its own key.
+// The legacy plaintext migration is Anthropic-only — that entry is the only one
+// that ever had a `secret_v1::anthropic_api_key` row on disk.
+pub(crate) fn read_api_key(state: &DbState, user: &str) -> Option<String> {
+    if let Ok(entry) = keyring_entry_for(user) {
         if let Ok(pw) = entry.get_password() {
             if !pw.is_empty() {
                 return Some(pw);
             }
         }
+    }
+
+    // Legacy fallback only applies to the Anthropic entry — no other provider
+    // ever wrote a plaintext key. Skip the DB round-trip for anything else.
+    if user != Provider::Anthropic.keyring_user() {
+        return None;
     }
 
     // Legacy fallback + one-time migration off plaintext disk. The pool
@@ -111,7 +132,7 @@ pub(crate) fn read_api_key(state: &DbState) -> Option<String> {
         .and_then(|v| v.as_str().map(str::to_string))
     };
     if let Some(key) = legacy {
-        if let Ok(entry) = keyring_entry() {
+        if let Ok(entry) = keyring_entry_for(user) {
             let _ = entry.set_password(&key);
         }
         // Best-effort delete of the legacy plaintext row — if the pool is
@@ -140,7 +161,10 @@ pub(crate) fn guard_key(key: &str) -> Result<(), AppError> {
 #[tauri::command]
 pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), AppError> {
     validate_api_key(&key)?;
-    keyring_entry()?.set_password(&key).map_err(AppError::internal_from)?;
+    let user = providers::selected_provider(&state).keyring_user();
+    keyring_entry_for(user)?
+        .set_password(&key)
+        .map_err(AppError::internal_from)?;
     // Remove any legacy plaintext copy so the key no longer lives on disk.
     let conn = state.0.get()?;
     let _ = crate::kv_ops::delete_by_key(&conn, API_KEY_KV);
@@ -149,7 +173,8 @@ pub(crate) fn set_api_key(state: State<DbState>, key: String) -> Result<(), AppE
 
 #[tauri::command]
 pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), AppError> {
-    if let Ok(entry) = keyring_entry() {
+    let user = providers::selected_provider(&state).keyring_user();
+    if let Ok(entry) = keyring_entry_for(user) {
         let _ = entry.delete_credential(); // ignore "no entry"
     }
     let conn = state.0.get()?;
@@ -159,7 +184,8 @@ pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), AppError> {
 
 #[tauri::command]
 pub(crate) fn has_api_key(state: State<DbState>) -> Result<bool, AppError> {
-    Ok(read_api_key(&state).is_some())
+    let user = providers::selected_provider(&state).keyring_user();
+    Ok(read_api_key(&state, user).is_some())
 }
 
 #[cfg(test)]

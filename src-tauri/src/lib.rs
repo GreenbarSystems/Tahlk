@@ -11,7 +11,8 @@
 //!   - `llm_audit`     — append-only log of Anthropic calls (metadata only, no PHI).
 //!   - `audio`         — session audio save/delete with path-traversal hardening.
 //!   - `whisper`       — local whisper.cpp sidecar transcription.
-//!   - `notes`         — Anthropic streaming note generation (BAA-gated).
+//!   - `providers`     — LLM provider abstraction (trait + per-vendor modules).
+//!   - `notes`         — provider-agnostic streaming note generation (BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
 //!
 //! `DbState` stays at the crate root so every module can name it via
@@ -33,6 +34,7 @@ mod llm_audit;
 mod note_history;
 mod notes;
 mod perms;
+mod providers;
 mod secrets;
 mod whisper;
 

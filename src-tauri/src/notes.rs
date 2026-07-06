@@ -1,14 +1,23 @@
-//! Note generation via Anthropic Messages API (streaming SSE).
+//! Provider-agnostic note generation (streaming SSE).
+//!
+//! This module owns everything provider-INDEPENDENT: the BAA gate, the LLM
+//! audit log, bounded HTTP timeouts, the 1 MiB accumulator cap, the
+//! prompt-injection guardrails, and the streaming loop that emits
+//! `scribe:note_chunk` events. The provider-SPECIFIC bits — request body
+//! shape, auth headers, model/endpoint, and how one SSE `data:` frame decodes
+//! into a normalized `StreamEvent` — live behind the `providers::LlmProvider`
+//! trait. The selected provider is resolved from settings on each call, so
+//! adding a new vendor never touches this file (see `providers/mod.rs`).
 //!
 //! The DB lock is dropped inside `read_api_key` before the HTTP call, so no
-//! lock is held across `.await`. The stream is parsed line-by-line: each
-//! `content_block_delta` is emitted as a `scribe:note_chunk` event AND
+//! lock is held across `.await`. The stream is parsed line-by-line: each text
+//! delta (`StreamEvent::Delta`) is emitted as a `scribe:note_chunk` event AND
 //! accumulated into the returned full note, so callers don't need to
 //! observe events to get the final result.
 //!
 //! Compliance gate (audit finding C2): before ANY network I/O, `baa::require_ack`
 //! is called. If the provider has not explicitly acknowledged that the
-//! Anthropic account behind this API key is covered by a signed BAA, the
+//! account behind this API key is covered by a signed BAA, the
 //! call is refused with `AppError::BaaRequired` — no transcript leaves the
 //! device. Every completed call (success OR failure) is written to the
 //! `llm_audit` table with metadata only (no transcript, no response text)
@@ -31,8 +40,6 @@
 //! `CONNECT_TIMEOUT` and `REQUEST_TIMEOUT`.
 
 use reqwest::Client;
-use serde::Deserialize;
-use serde_json::json;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
@@ -40,13 +47,11 @@ use tauri::{AppHandle, Emitter, State};
 use crate::baa;
 use crate::errors::AppError;
 use crate::llm_audit::{self, LlmCallEntry};
+use crate::providers::{self, StreamEvent};
 use crate::secrets::read_api_key;
 use crate::DbState;
 
-const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
-
-// M8: bounded HTTP timeouts for the Anthropic call. Without these the request
+// M8: bounded HTTP timeouts for the upstream call. Without these the request
 // inherits reqwest's defaults (no total-request timeout, OS-default connect
 // timeout, both effectively "forever" on a broken network path). A hung
 // upstream would block the whole note-generation command indefinitely and
@@ -214,7 +219,7 @@ fn record_llm_call(state: &State<DbState>, entry: LlmCallEntry) {
     }
 }
 
-/// Process-wide reqwest client for the Anthropic generate_note path.
+/// Process-wide reqwest client for the generate_note path (all providers).
 ///
 /// Built once on first use and reused for the process lifetime. Reqwest's
 /// `Client` is internally an `Arc<Inner>` — cloning is a refcount bump, not
@@ -262,49 +267,6 @@ fn http_client() -> Result<&'static Client, AppError> {
     Ok(CLIENT.get_or_init(|| built))
 }
 
-/// View of the Anthropic SSE frames we care about. Only the fields we
-/// actually consume are declared; everything else is ignored by the
-/// (non-`deny_unknown_fields`) deserialization.
-///
-/// Each string field is an owned `String`. This is deliberate and is the
-/// crux of HIPAA integrity finding N1: the previous implementation used a
-/// borrow-only `&'a str` field to avoid an allocation (perf note P3). But a
-/// borrowed `&str` cannot represent a JSON string that requires unescaping —
-/// serde must allocate to turn `\n`, `\"`, `\\`, `\uXXXX`, … into their
-/// decoded bytes. So any note delta containing one of those escapes simply
-/// *failed to deserialize*, and the parent loop silently dropped the whole
-/// frame — losing real clinical note content mid-stream with no error and no
-/// audit trail. Owning the strings lets serde allocate-and-unescape as
-/// needed, so every delta deserializes correctly and is preserved
-/// character-for-character.
-///
-/// (A `Cow<'a, str>` with `#[serde(borrow)]` was evaluated to keep the P3
-/// zero-copy path for the non-escaped common case, but serde_json does not
-/// borrow through these nested `Option` fields — it produced `Cow::Owned`
-/// even for escape-free input — so `Cow` bought the complexity of a lifetime
-/// with none of the savings. Plain `String` is simpler and equivalent here.)
-#[derive(Deserialize)]
-struct SseEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(default)]
-    delta: Option<SseDelta>,
-    #[serde(default)]
-    error: Option<SseErrorBody>,
-}
-
-#[derive(Deserialize)]
-struct SseDelta {
-    #[serde(default)]
-    text: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SseErrorBody {
-    #[serde(default)]
-    message: Option<String>,
-}
-
 #[tauri::command]
 pub(crate) async fn generate_note(
     app: AppHandle,
@@ -315,13 +277,22 @@ pub(crate) async fn generate_note(
 ) -> Result<String, AppError> {
     // BAA gate FIRST — before we look at the key, before we build a client,
     // before we allocate the request body. The compliance failure is that
-    // PHI reaches Anthropic without a BAA, so the check has to sit strictly
-    // upstream of any state that could accidentally get flushed to the wire.
+    // PHI reaches the upstream vendor without a BAA, so the check has to sit
+    // strictly upstream of any state that could accidentally get flushed to
+    // the wire. The gate is provider-independent: it applies to every vendor.
     let ack = baa::require_ack(&state)?;
 
-    // Read the key from the OS keychain (locks drop inside read_api_key — no
-    // lock is held across the await below).
-    let key = read_api_key(&state).ok_or(AppError::NoApiKey)?;
+    // Resolve the selected provider (vendor + model) from settings. Defaults
+    // to Anthropic + the previous model when unset, so existing installs are
+    // unaffected. This is the ONLY vendor-specific branch point — the request
+    // shape, headers, and frame parsing all route through the trait below.
+    let provider = providers::resolve(&state);
+    let model = provider.model().to_string();
+    let endpoint = provider.endpoint().to_string();
+
+    // Read the key from the OS keychain for THIS provider's entry (locks drop
+    // inside read_api_key — no lock is held across the await below).
+    let key = read_api_key(&state, provider.keyring_user()).ok_or(AppError::NoApiKey)?;
 
     // Reuse a process-lifetime HTTP client (P4). Previously we rebuilt one on
     // every generate_note call, which meant discarding the connection pool,
@@ -335,22 +306,13 @@ pub(crate) async fn generate_note(
     let client = http_client()?.clone();
     // Prompt-injection defense (audit H6): wrap the transcript in
     // <transcript> tags and prepend a data-only directive to the system
-    // prompt. See module-level helpers for rationale.
+    // prompt. See module-level helpers for rationale. These guards are
+    // provider-independent and run BEFORE the vendor builds its body.
     let hardened_system = harden_system_prompt(&system_prompt);
     let user_content = wrap_transcript_for_prompt(&transcript);
 
-    let body = json!({
-        "model": ANTHROPIC_MODEL,
-        "max_tokens": 2048,
-        "stream": true,
-        "system": hardened_system,
-        "messages": [
-            {
-                "role": "user",
-                "content": user_content
-            }
-        ]
-    });
+    // Provider owns the vendor-specific request body shape.
+    let body = provider.build_body(&hardened_system, &user_content);
 
     // Snapshot fields we'll need for the audit row up front. `body` is
     // serialized twice — once for the wire, once here — rather than trying
@@ -364,6 +326,8 @@ pub(crate) async fn generate_note(
 
     // Small closure so success + all failure paths funnel through the same
     // audit-write shape. `outcome`/`error_code` mirror the AppError code.
+    // Model + endpoint come from the resolved provider so the audit row
+    // reflects exactly what was called.
     let audit_row = |outcome: &str,
                      error_code: Option<&str>,
                      response_bytes: i64,
@@ -371,8 +335,8 @@ pub(crate) async fn generate_note(
         created_at: created_at.clone(),
         encounter_id: encounter_id.clone(),
         provider_id: ack.provider_id.clone(),
-        model: ANTHROPIC_MODEL.into(),
-        endpoint: ANTHROPIC_ENDPOINT.into(),
+        model: model.clone(),
+        endpoint: endpoint.clone(),
         request_bytes,
         response_bytes,
         upstream_reqid,
@@ -381,15 +345,12 @@ pub(crate) async fn generate_note(
         duration_ms: Some(started_at.elapsed().as_millis() as i64),
     };
 
-    let resp = match client
-        .post(ANTHROPIC_ENDPOINT)
-        .header("x-api-key", &key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-    {
+    // Provider applies its vendor-specific auth/version headers; `.json(&body)`
+    // sets content-type and serializes the body onto the wire.
+    let request = provider
+        .apply_headers(client.post(&endpoint), &key)
+        .json(&body);
+    let resp = match request.send().await {
         Ok(r) => r,
         Err(e) => {
             record_llm_call(&state, audit_row("network", Some("network"), 0, None));
@@ -477,13 +438,14 @@ pub(crate) async fn generate_note(
         //
         // Now: locate line boundaries with memchr::memchr (SIMD on x86/aarch64
         // where available, falls back to a scalar loop), decode UTF-8 by
-        // borrow, and deserialize into an `SseEvent`. Only the delta `text`
-        // (and error `message`) are copied out — into owned `String`s — which
-        // is required for correctness: a borrowed `&str` cannot hold a JSON
-        // string that needs unescaping, and silently dropping those frames was
-        // integrity finding N1 (see the `SseEvent` doc comment). Line
-        // boundaries are still found without copying, and compaction
-        // (`drain(..consumed)`) is still deferred to once per batch.
+        // borrow, and hand each `data:` payload to `provider.parse_frame`.
+        // Only the delta `text` (and error `message`) are copied out — into
+        // owned `String`s — which is required for correctness: a borrowed
+        // `&str` cannot hold a JSON string that needs unescaping, and silently
+        // dropping those frames was integrity finding N1 (see the provider's
+        // frame struct docs). Line boundaries are still found without copying,
+        // and compaction (`drain(..consumed)`) is still deferred to once per
+        // batch.
         let mut consumed: usize = 0;
         let mut cap_exceeded = false;
         let mut stream_error = false;
@@ -503,13 +465,14 @@ pub(crate) async fn generate_note(
                 continue;
             }
 
-            // N1: a deserialize failure here is a genuinely malformed frame
+            // N1: a parse failure here is a genuinely malformed frame
             // (truncated/corrupt JSON) — the old escape-sequence false failure
-            // is gone now that the fields own their strings. Log the drop
-            // (metadata only, no PHI) so the integrity loss is observable,
+            // is gone now that the provider's fields own their strings. Log the
+            // drop (metadata only, no PHI) so the integrity loss is observable,
             // then continue so one bad frame can't take down the rest of the
-            // stream or drop other valid events in the session.
-            let evt = match serde_json::from_str::<SseEvent>(data) {
+            // stream or drop other valid events in the session. The vendor's
+            // frame taxonomy lives behind `provider.parse_frame`.
+            let evt = match provider.parse_frame(data) {
                 Ok(evt) => evt,
                 Err(e) => {
                     log_dropped_sse_frame(data.len(), &e);
@@ -517,10 +480,8 @@ pub(crate) async fn generate_note(
                     continue;
                 }
             };
-            match evt.event_type.as_str() {
-                "content_block_delta" => {
-                    let Some(delta) = evt.delta else { continue };
-                    let Some(t) = delta.text else { continue };
+            match evt {
+                StreamEvent::Delta(t) => {
                     // M9: hard-cap accumulator so a runaway upstream can't
                     // OOM the desktop app. Check BEFORE growing `full`.
                     if full.len().saturating_add(t.len()) > MAX_NOTE_BYTES {
@@ -530,14 +491,13 @@ pub(crate) async fn generate_note(
                     full.push_str(&t);
                     let _ = app.emit("scribe:note_chunk", &t);
                 }
-                "error" => {
+                StreamEvent::Error(msg) => {
                     // M10: keep the upstream error body OUT of the AppError.
-                    let msg = evt.error.and_then(|e| e.message);
                     log_upstream_body("stream error body", msg.as_deref().unwrap_or("unknown"));
                     stream_error = true;
                     break;
                 }
-                _ => {}
+                StreamEvent::Ignore => {}
             }
         }
 
@@ -738,249 +698,5 @@ mod tests {
         log_upstream_body("context", "");
         log_upstream_body("context", "short body");
         log_upstream_body("context", &"x".repeat(10_000));
-    }
-
-    // P3: pin the borrowed SSE parser. These tests deserialize actual
-    // Anthropic frame shapes and verify the fields we consume come out
-    // correctly. Behavior parity vs. the previous serde_json::Value path
-    // is what keeps generate_note wire-compatible.
-
-    #[test]
-    fn sse_content_block_delta_yields_text() {
-        let frame = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
-        let evt: SseEvent = serde_json::from_str(frame).unwrap();
-        assert_eq!(evt.event_type, "content_block_delta");
-        assert_eq!(
-            evt.delta.as_ref().and_then(|d| d.text.as_deref()),
-            Some("Hello")
-        );
-        assert!(evt.error.is_none());
-    }
-
-    #[test]
-    fn sse_content_block_delta_without_text_is_skipped_at_match() {
-        // Some upstream frames carry a non-text delta (e.g. tool_use).
-        // Deserialize succeeds; the consumer sees delta.text == None and
-        // skips — same behavior as the previous v["delta"]["text"].as_str().
-        let frame = r#"{"type":"content_block_delta","delta":{"type":"tool_use_delta"}}"#;
-        let evt: SseEvent = serde_json::from_str(frame).unwrap();
-        assert_eq!(evt.event_type, "content_block_delta");
-        assert!(evt.delta.is_some(), "delta should deserialize even without a text field");
-        assert!(evt.delta.unwrap().text.is_none(), "missing text must be None, not empty string");
-    }
-
-    #[test]
-    fn sse_error_frame_yields_message() {
-        let frame = r#"{"type":"error","error":{"type":"overloaded","message":"upstream busy"}}"#;
-        let evt: SseEvent = serde_json::from_str(frame).unwrap();
-        assert_eq!(evt.event_type, "error");
-        assert_eq!(
-            evt.error.and_then(|e| e.message).as_deref(),
-            Some("upstream busy")
-        );
-    }
-
-    #[test]
-    fn sse_error_frame_without_message_falls_back_to_unknown() {
-        // Mirrors the .unwrap_or("unknown") behavior in the consumer.
-        let frame = r#"{"type":"error","error":{"type":"overloaded"}}"#;
-        let evt: SseEvent = serde_json::from_str(frame).unwrap();
-        let msg = evt.error.and_then(|e| e.message);
-        assert_eq!(msg.as_deref().unwrap_or("unknown"), "unknown");
-    }
-
-    #[test]
-    fn sse_ping_and_other_events_deserialize_but_no_payload() {
-        // Anthropic emits: message_start, content_block_start, ping,
-        // content_block_stop, message_delta, message_stop. None have `text`
-        // or `error` fields we consume — the match arm falls through to _.
-        for frame in [
-            r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-haiku-4-5"}}"#,
-            r#"{"type":"content_block_start","index":0}"#,
-            r#"{"type":"ping"}"#,
-            r#"{"type":"content_block_stop","index":0}"#,
-            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
-            r#"{"type":"message_stop"}"#,
-        ] {
-            let evt: SseEvent = serde_json::from_str(frame)
-                .unwrap_or_else(|e| panic!("failed to deserialize {frame}: {e}"));
-            // All that matters is that the deserialize succeeds and no text
-            // payload leaks out; the consumer's match _ arm handles these.
-            let has_text = evt.delta.as_ref().and_then(|d| d.text.as_deref()).is_some();
-            assert!(!has_text, "frame {} should not carry text", evt.event_type);
-        }
-    }
-
-    #[test]
-    fn sse_delta_text_plain_ascii_round_trips() {
-        // The common case: a plain text delta with no escapes must
-        // deserialize and be preserved exactly.
-        let frame = r#"{"type":"content_block_delta","delta":{"text":"plain text"}}"#;
-        assert_eq!(parse_delta_text(frame).as_deref(), Some("plain text"));
-    }
-
-    #[test]
-    fn sse_malformed_json_is_a_deserialize_error() {
-        // The consumer logs-and-skips deserialize errors (N1). We only need
-        // to know that malformed input produces Err, not Ok(garbage).
-        let frame = r#"{"type":"content_block_delta","delta":{"text":"missing_close""#;
-        let res: Result<SseEvent, _> = serde_json::from_str(frame);
-        assert!(res.is_err(), "malformed JSON must be a Err, not Ok");
-    }
-
-    // N1 (HIPAA §164.312(c)(1) Integrity) — regression tests.
-    //
-    // The previous parser deserialized SSE text into a borrow-only `&'a str`.
-    // JSON strings that require unescaping (`\n`, `\"`, `\\`, `\t`, `\uXXXX`)
-    // cannot be produced as a borrow — serde must allocate — so the borrow
-    // deserialize FAILED, and the parent loop silently dropped the whole
-    // frame. Any clinical note text containing a newline, an embedded quote,
-    // or a backslash was therefore silently lost mid-stream, with no error
-    // and no audit trail. The old test here asserted this drop was
-    // "acceptable"; that assumption was wrong. These tests assert the content
-    // is now preserved character-for-character.
-
-    /// Deserialize an Anthropic `content_block_delta` frame the same way the
-    /// stream loop does, returning the decoded delta text.
-    fn parse_delta_text(frame: &str) -> Option<String> {
-        let evt: SseEvent = serde_json::from_str(frame).unwrap();
-        evt.delta.and_then(|d| d.text)
-    }
-
-    #[test]
-    fn sse_delta_text_with_newline_survives_round_trip() {
-        // A note with a paragraph break. `\n` inside a JSON string must be
-        // unescaped to a real newline and preserved, not dropped.
-        let frame =
-            r#"{"type":"content_block_delta","delta":{"text":"Line one\nLine two"}}"#;
-        assert_eq!(parse_delta_text(frame).as_deref(), Some("Line one\nLine two"));
-    }
-
-    #[test]
-    fn sse_delta_text_with_embedded_quotes_survives_round_trip() {
-        // Clinical notes routinely quote the patient. The escaped `\"` used
-        // to make the whole frame fail to deserialize and vanish.
-        let frame =
-            r#"{"type":"content_block_delta","delta":{"text":"Patient said \"I feel better\" today"}}"#;
-        assert_eq!(
-            parse_delta_text(frame).as_deref(),
-            Some(r#"Patient said "I feel better" today"#)
-        );
-    }
-
-    #[test]
-    fn sse_delta_text_with_backslash_survives_round_trip() {
-        // Backslashes appear in things like "and/or" shorthand or file paths
-        // pasted into a note. `\\` must round-trip to a single `\`.
-        let frame = r#"{"type":"content_block_delta","delta":{"text":"dosage 5\\10mg"}}"#;
-        assert_eq!(parse_delta_text(frame).as_deref(), Some(r"dosage 5\10mg"));
-    }
-
-    #[test]
-    fn sse_delta_text_with_tab_and_unicode_escape_survives_round_trip() {
-        // `\t` and a `\uXXXX` unicode escape both require unescaping. Exercise
-        // them together to prove the owned-allocation path handles every JSON
-        // escape class, not just the three named in the finding. The escape
-        // here decodes to 'A' (U+0041).
-        let frame =
-            "{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"col1\\tcol2 \\u0041\"}}";
-        assert_eq!(parse_delta_text(frame).as_deref(), Some("col1\tcol2 A"));
-    }
-
-    #[test]
-    fn sse_delta_text_with_multibyte_utf8_survives_round_trip() {
-        // Raw multi-byte UTF-8 (emoji, accented chars) arrives unescaped but
-        // must also survive. Combine with a `\n` escape so both a raw
-        // multi-byte run and an unescape happen in the same delta.
-        let frame =
-            "{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"café ☕\\nnext\"}}";
-        assert_eq!(parse_delta_text(frame).as_deref(), Some("café ☕\nnext"));
-    }
-
-    #[test]
-    fn sse_escaped_content_deserializes_instead_of_failing() {
-        // The crux of N1: escaped content must deserialize successfully (into
-        // an owned String) rather than producing a deserialize error that the
-        // old borrow-only `&str` field caused — the failure the loop used to
-        // treat as a silent drop.
-        let frame = r#"{"type":"content_block_delta","delta":{"text":"a\nb"}}"#;
-        let evt: SseEvent = serde_json::from_str(frame).expect(
-            "escaped content must deserialize, not error into a dropped frame",
-        );
-        assert_eq!(evt.delta.and_then(|d| d.text).as_deref(), Some("a\nb"));
-    }
-
-    #[test]
-    fn sse_full_escaped_note_reconstructs_across_deltas() {
-        // End-to-end reconstruction: several deltas, some escaped, are
-        // concatenated exactly as the stream loop does into `full`. Verify
-        // nothing is dropped and the assembled note matches byte-for-byte.
-        let frames = [
-            r#"{"type":"content_block_delta","delta":{"text":"S: Patient reports \"feeling low\".\n"}}"#,
-            r#"{"type":"content_block_delta","delta":{"text":"O: Affect flat.\tMood 3/10.\n"}}"#,
-            r#"{"type":"content_block_delta","delta":{"text":"A/P: Continue plan; path C:\\notes."}}"#,
-        ];
-        let mut full = String::new();
-        for frame in frames {
-            let t = parse_delta_text(frame).expect("every delta must parse and carry text");
-            full.push_str(&t);
-        }
-        let expected = "S: Patient reports \"feeling low\".\n\
-                        O: Affect flat.\tMood 3/10.\n\
-                        A/P: Continue plan; path C:\\notes.";
-        assert_eq!(full, expected);
-    }
-
-    #[test]
-    fn sse_malformed_frame_is_reported_not_silently_swallowed() {
-        // A genuinely corrupt/truncated frame must produce a deserialize Err
-        // that the loop can log (see `log_dropped_sse_frame`) rather than a
-        // silent drop. Assert the error is observable and carries a coarse,
-        // PHI-free classification.
-        let frame = r#"{"type":"content_block_delta","delta":{"text":"oops"#;
-        // Avoid requiring SseEvent: Debug (which unwrap_err would need).
-        let err = match serde_json::from_str::<SseEvent>(frame) {
-            Ok(_) => panic!("truncated frame must not deserialize as Ok"),
-            Err(e) => e,
-        };
-        use serde_json::error::Category;
-        assert!(
-            matches!(err.classify(), Category::Syntax | Category::Eof | Category::Data),
-            "malformed frame should classify as a structural error: {:?}",
-            err.classify()
-        );
-        // Sanity: the logging helper never panics on a real error.
-        log_dropped_sse_frame(frame.len(), &err);
-    }
-
-    #[test]
-    fn sse_malformed_frame_does_not_prevent_other_valid_frames() {
-        // Mirror the loop's behavior: a bad frame is skipped (logged) while
-        // subsequent valid frames in the same session are still consumed.
-        let frames = [
-            r#"{"type":"content_block_delta","delta":{"text":"good one\n"}}"#,
-            r#"{"type":"content_block_delta","delta":{"text":"broken"#, // truncated
-            r#"{"type":"content_block_delta","delta":{"text":"good two"}}"#,
-        ];
-        let mut full = String::new();
-        let mut dropped = 0u64;
-        for frame in frames {
-            match serde_json::from_str::<SseEvent>(frame) {
-                Ok(evt) => {
-                    if let Some(t) = evt.delta.and_then(|d| d.text) {
-                        full.push_str(t.as_ref());
-                    }
-                }
-                Err(e) => {
-                    log_dropped_sse_frame(frame.len(), &e);
-                    dropped += 1;
-                }
-            }
-        }
-        assert_eq!(dropped, 1, "exactly one frame should be dropped");
-        assert_eq!(
-            full, "good one\ngood two",
-            "valid frames on either side of a malformed one must survive"
-        );
     }
 }
