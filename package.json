@@ -8,7 +8,7 @@
     "dev:solo": "vite --mode solo",
     "build:solo": "vite build --mode solo",
     "test:build": "node --test tests/build/test_solo_excludes_group.mjs tests/build/test_template_interpolation_escaped.mjs",
-    "test:js": "node --test tests/js/test_autoChain.mjs tests/js/test_baa.mjs tests/js/test_contentHash.mjs tests/js/test_encounterAutoChain.mjs tests/js/test_eventBus.mjs tests/js/test_exportFormatter.mjs tests/js/test_exportFormatOptions.mjs tests/js/test_integrityAlert.mjs tests/js/test_integrityDisplay.mjs tests/js/test_signoff.mjs tests/js/test_signoffDialog.mjs tests/js/test_telemetry.mjs tests/js/test_templateLibrary.mjs",
+    "test:js": "node --test tests/js/test_autoChain.mjs tests/js/test_baa.mjs tests/js/test_contentHash.mjs tests/js/test_encounterAutoChain.mjs tests/js/test_eventBus.mjs tests/js/test_exportFormatter.mjs tests/js/test_exportFormatOptions.mjs tests/js/test_integrityAlert.mjs tests/js/test_integrityDisplay.mjs tests/js/test_onboarding.mjs tests/js/test_signoff.mjs tests/js/test_signoffDialog.mjs tests/js/test_telemetry.mjs tests/js/test_templateLibrary.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:icons": "tauri icon path/to/source.png",
