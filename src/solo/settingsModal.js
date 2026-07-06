@@ -9,6 +9,13 @@ import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
+import {
+  LLM_PROVIDERS,
+  getLlmProvider,
+  getLlmModel,
+  setLlmProvider,
+  setLlmModel,
+} from '../domain/llmProvider.js';
 
 const PROVIDER_KEY = keys.provider();
 
@@ -19,6 +26,8 @@ export async function renderSettings() {
   const diagOn = telemetry.isEnabled();
   const diagCount = telemetry.getEvents().length;
   const retention = getAudioRetention();
+  const llmProvider = getLlmProvider();
+  const llmModel = getLlmModel();
   // BAA status may be `null` (never acknowledged) or a row for the current
   // attestation version. `.catch` swallows transport errors so the pane still
   // renders — the section then shows as “not acknowledged”, which is the
@@ -80,6 +89,31 @@ export async function renderSettings() {
           <span>I confirm my organization has an executed BAA with Anthropic covering the API key below.</span>
         </label>
         <p class="step-hint"><a href="https://support.anthropic.com/en/articles/8555474-i-need-a-business-associate-agreement-baa-with-anthropic-for-hipaa-compliance-what-do-i-do" target="_blank" rel="noreferrer noopener">How to request a BAA from Anthropic →</a></p>
+      </section>
+
+      <section class="settings-section">
+        <h3>Model Provider</h3>
+        <p class="settings-desc">
+          Choose which LLM vendor and model generate notes from transcripts. The API key
+          below is stored per vendor, so switching providers doesn't lose a saved key.
+        </p>
+        <div class="field-row">
+          <label>Provider</label>
+          <select id="s-llm-provider">
+            ${LLM_PROVIDERS.map(p =>
+              `<option value="${escapeHtml(p.id)}" ${llmProvider === p.id ? 'selected' : ''}>${escapeHtml(p.label)}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="field-row">
+          <label>Model</label>
+          <select id="s-llm-model">
+            ${(LLM_PROVIDERS.find(p => p.id === llmProvider)?.models || []).map(m =>
+              `<option value="${escapeHtml(m)}" ${llmModel === m ? 'selected' : ''}>${escapeHtml(m)}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <button class="btn btn-primary" id="s-save-llm">Save Model Settings</button>
       </section>
 
       <section class="settings-section">
@@ -148,6 +182,31 @@ export function wireSettings() {
     };
     kvSet(PROVIDER_KEY, profile);
     toast('Profile saved.');
+  });
+
+  // Model Provider. Changing the vendor repopulates the model list (each
+  // vendor exposes its own model ids) and pre-selects that vendor's default.
+  // Nothing is persisted until Save, so a mis-click doesn't repoint the
+  // note-generation path mid-edit.
+  const llmProviderSel = document.getElementById('s-llm-provider');
+  const llmModelSel = document.getElementById('s-llm-model');
+  llmProviderSel?.addEventListener('change', () => {
+    const vendor = LLM_PROVIDERS.find(p => p.id === llmProviderSel.value);
+    if (!vendor || !llmModelSel) return;
+    llmModelSel.innerHTML = vendor.models
+      .map((m, i) =>
+        `<option value="${escapeHtml(m)}" ${i === 0 ? 'selected' : ''}>${escapeHtml(m)}</option>`
+      ).join('');
+  });
+
+  document.getElementById('s-save-llm')?.addEventListener('click', () => {
+    try {
+      setLlmProvider(llmProviderSel?.value);
+      if (llmModelSel?.value) setLlmModel(llmModelSel.value);
+      toast('Model settings saved.');
+    } catch (err) {
+      toast(`Could not save model settings: ${userMessage(err, 'unknown error')}`);
+    }
   });
 
   const apiKeyInput = document.getElementById('s-apikey');

@@ -17,6 +17,13 @@ export const keys = {
   customTemplate: id => `note_templates_v1::${id}`,
   telemetryEnabled: () => 'note_settings_v1::telemetry_enabled',
   audioRetention:   () => 'note_settings_v1::audio_retention',
+  // Selected LLM vendor + model for note generation. The Rust side
+  // (providers/mod.rs) owns the canonical read/resolve path; these keys live
+  // under note_settings_v1 so they load with the eager settings warmup. They
+  // hold no secrets — only a vendor id and model name; the API key stays in the
+  // OS keychain. Unrelated to `provider` above, which identifies the clinician.
+  llmProvider:      () => 'note_settings_v1::llm_provider',
+  llmModel:         () => 'note_settings_v1::llm_model',
   // BAA acknowledgment for the Anthropic upstream. The Rust side (baa.rs)
   // owns the canonical read/write path via invoke('baa_ack_*'); this key is
   // named here purely for observability — nothing in JS should read the row
