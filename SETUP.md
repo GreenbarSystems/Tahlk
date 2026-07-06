@@ -142,7 +142,8 @@ row — a bug that skipped one would be caught by the Rust tests.
 **Retention:** rows live for the lifetime of the SQLite database. There is
 no automatic pruning; a future PR can add a rolling retention window.
 Read-side access is via the `llm_audit_list` Tauri command
-(`encounter_id?`, `limit?` — clamped to 500, `before_id?` for pagination).
+(`encounter_id?`, `limit?` — clamped to 500). It returns the most recent rows
+first; cursor pagination was removed as premature for a single-user local table.
 
 **Failure mode:** if inserting an audit row fails, the insert error is
 swallowed and the caller-facing error is returned unchanged. A dropped

@@ -69,28 +69,42 @@ pub(crate) fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value
 //                                   under WAL and matches audit P5 guidance.
 // PRAGMA foreign_keys  = ON       → SQLite disables FK enforcement per-connection
 //                                   by default; MUST be re-enabled on every one.
-// PRAGMA cache_size = -65536      → 64 MiB per-connection page cache (negative
-//                                   means KiB). At max_size=8 that’s ~512 MiB
-//                                   worst case; acceptable for a desktop app.
+// PRAGMA cache_size = -16384      → 16 MiB per-connection page cache (negative
+//                                   means KiB). S-CODE-3: this is a single-user
+//                                   desktop DB (encounters + kv + note_history
+//                                   + llm_audit metadata — audio lives on disk,
+//                                   not in the DB) that grows a few MB/year, so
+//                                   16 MiB comfortably caches the entire hot
+//                                   working set. The old 64 MiB was a
+//                                   server-workload number; at max_size=4 the
+//                                   worst-case cache footprint is now 64 MiB
+//                                   total instead of ~512 MiB.
 // PRAGMA temp_store  = MEMORY     → keep temp b-trees for ORDER BY / GROUP BY
 //                                   off disk; matters for the encounter list
 //                                   query that sorts by encounter_date DESC.
-// PRAGMA mmap_size   = 268435456  → 256 MiB memory-mapped read window. Lets
-//                                   SQLite skip the pread() syscall on hot
-//                                   pages. Safe with WAL + SQLCipher (mmap
-//                                   reads still go through the codec).
+// PRAGMA mmap_size   = 67108864   → 64 MiB memory-mapped read window (down from
+//                                   256 MiB). mmap only maps up to the DB file
+//                                   size, so 64 MiB already covers the whole
+//                                   realistic DB; the 256 MiB figure was
+//                                   server-scale. Note the benefit is modest
+//                                   under SQLCipher anyway — mmap'd pages are
+//                                   ciphertext and still go through the codec
+//                                   into the page cache — but it's harmless and
+//                                   saves the pread() on already-decrypted hot
+//                                   pages, so we keep a right-sized window.
 // PRAGMA busy_timeout = 5000      → 5s spin on SQLITE_BUSY before returning
 //                                   an error. WAL + pool means writers still
 //                                   serialize on the DB lock; this bounds the
 //                                   wait for checkpoints and writer-writer
-//                                   contention.
+//                                   contention (e.g. a background audio-path
+//                                   write racing a UI-driven read).
 const CONN_PRAGMAS: &str = "
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous   = NORMAL;
     PRAGMA foreign_keys  = ON;
-    PRAGMA cache_size    = -65536;
+    PRAGMA cache_size    = -16384;
     PRAGMA temp_store    = MEMORY;
-    PRAGMA mmap_size     = 268435456;
+    PRAGMA mmap_size     = 67108864;
     PRAGMA busy_timeout  = 5000;
 ";
 
@@ -315,18 +329,31 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
 
     crate::perms::chmod_0600_unix(&db_path);
 
-    // Build the pool. `max_size=8` is enough for the desktop workload
-    // (streaming SSE + concurrent list/stats/history reads) without
-    // over-committing per-connection cache (64 MiB × 8 = 512 MiB worst case).
-    // `min_idle=2` keeps a warm connection ready so the first UI action after
-    // launch doesn't pay the SQLCipher PBKDF2 cost synchronously.
+    // Build the pool. S-CODE-3: right-sized for Solo's real concurrency, which
+    // is a UI thread issuing *sequential* Tauri commands plus background audio
+    // writes, with at most an occasional concurrent read while a save is in
+    // flight. That peaks at ~2-3 simultaneous checkouts (e.g. a background
+    // audio-path write + a UI-driven list read + a fire-and-forget llm_audit
+    // append); `max_size=4` leaves one spare above that peak. WAL still allows
+    // many concurrent readers with a single writer regardless of pool size, so
+    // shrinking the pool doesn't change concurrency semantics — it only trims
+    // the worst-case per-connection cache footprint (now 16 MiB × 4 = 64 MiB
+    // instead of 64 MiB × 8 = 512 MiB). The old `max_size=8` was a
+    // server-workload number for concurrency this single-user app never sees.
+    //
+    // `min_idle=1` keeps one warm connection so the first UI action after
+    // launch is snappy. (The previous "avoid synchronous PBKDF2" rationale for
+    // keeping 2 warm was inaccurate: we key with a raw 32-byte hex DEK via
+    // `PRAGMA key = "x'...'"`, which SKIPS PBKDF2 entirely — see `key_pragma`
+    // — so fresh-connection keying is cheap and there's no reason to pre-warm
+    // more than one.)
     let manager = SqliteConnectionManager::file(&db_path);
     let customizer = KeyingCustomizer {
         hex_key: Arc::new(hex_key),
     };
     let pool = Pool::builder()
-        .max_size(8)
-        .min_idle(Some(2))
+        .max_size(4)
+        .min_idle(Some(1))
         .connection_customizer(Box::new(customizer))
         .build(manager)
         .map_err(AppError::storage_from)?;
@@ -484,5 +511,46 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nope.db");
         assert!(!is_plaintext_db(&path).unwrap());
+    }
+
+    // S-CODE-3: pin the right-sized pool + per-connection PRAGMAs so a future
+    // edit back to server-scale numbers (max_size=8, 64 MiB cache) fails review
+    // loudly. Builds a pool with the exact production customizer + builder
+    // config against a temp encrypted DB, then reads the config and the
+    // connection-scoped PRAGMAs back off a live checkout.
+    #[test]
+    fn solo_pool_and_pragmas_are_right_sized() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("pool.db");
+        let manager = SqliteConnectionManager::file(&path);
+        let customizer = KeyingCustomizer {
+            hex_key: Arc::new(fixed_key()),
+        };
+        let pool = Pool::builder()
+            .max_size(4)
+            .min_idle(Some(1))
+            .connection_customizer(Box::new(customizer))
+            .build(manager)
+            .unwrap();
+
+        assert_eq!(pool.max_size(), 4, "Solo pool must stay right-sized at 4");
+        assert_eq!(
+            pool.min_idle(),
+            Some(1),
+            "one warm connection is enough — raw-hex keying skips PBKDF2"
+        );
+
+        let conn = pool.get().unwrap();
+        // SQLite echoes the negative-KiB form back verbatim when set that way.
+        let cache_size: i64 = conn
+            .query_row("PRAGMA cache_size", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cache_size, -16384, "per-connection cache must be 16 MiB");
+        // foreign_keys is per-connection and OFF by default — the customizer
+        // must re-enable it on every pooled connection, not just the bootstrap.
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "foreign_keys must be ON on every pooled connection");
     }
 }

@@ -220,18 +220,29 @@ fn record_llm_call(state: &State<DbState>, entry: LlmCallEntry) {
 /// `Client` is internally an `Arc<Inner>` — cloning is a refcount bump, not
 /// a rebuild — so every caller `.clone()`s from this cell.
 ///
-/// Tuning:
+/// Tuning (right-sized for the Solo desktop workload — one sequential
+/// generate_note call at a time, no overlapping requests, no client-side
+/// retries):
 ///   - `pool_idle_timeout(90s)`: matches Anthropic's server-side idle window
 ///     so we don't hold a half-closed connection.
-///   - `pool_max_idle_per_host(4)`: enough headroom for burst retries and
-///     the streaming request overlapping a fresh one, without hoarding.
-///   - `http2_prior_knowledge()`: skip the ALPN dance — Anthropic speaks
-///     HTTP/2 unconditionally, and HTTP/2 lets multiple in-flight requests
-///     share a single connection, so a slow SSE stream doesn't block the
-///     next generate call from reusing the socket.
+///   - `pool_max_idle_per_host(1)`: the UI is modal during generation, so
+///     calls never overlap — exactly one kept-alive connection is ever reused.
+///     The previous `4` was headroom for "burst retries" and overlapping
+///     streams that this single-user app doesn't have.
+///   - ALPN negotiation (reqwest default): we deliberately do NOT force
+///     `http2_prior_knowledge()`. Prior-knowledge HTTP/2 skips ALPN and sends
+///     the h2 preface blind — if ANY hop can't do prior-knowledge h2 the call
+///     fails hard with no HTTP/1.1 fallback. Clinical users routinely sit
+///     behind TLS-inspecting corporate/hospital proxies (Zscaler, Palo Alto,
+///     etc.) that terminate as HTTP/1.1; forcing h2 would turn every note
+///     generation on those networks into an un-diagnosable hard failure.
+///     Standard ALPN still negotiates h2 with Anthropic directly (keeping the
+///     multiplexing win on a clean path) while transparently falling back to
+///     HTTP/1.1 through an intermediary that needs it. Robustness > a
+///     marginal socket-reuse optimization for a single sequential caller.
 ///   - `min_tls_version(TLS 1.2)`, `timeout(REQUEST_TIMEOUT)`,
-///     `connect_timeout(CONNECT_TIMEOUT)`: identical to the previous inline
-///     builder — no policy change (audit L4).
+///     `connect_timeout(CONNECT_TIMEOUT)`: unchanged TLS/timeout policy
+///     (audit L4).
 fn http_client() -> Result<&'static Client, AppError> {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     if let Some(c) = CLIENT.get() {
@@ -242,8 +253,7 @@ fn http_client() -> Result<&'static Client, AppError> {
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .pool_max_idle_per_host(4)
-        .http2_prior_knowledge()
+        .pool_max_idle_per_host(1)
         .build()
         .map_err(AppError::internal_from)?;
     // Race: another caller may have won the set; in that case ours is dropped
@@ -675,6 +685,24 @@ mod tests {
         assert!(
             CONNECT_TIMEOUT < REQUEST_TIMEOUT,
             "connect timeout must be strictly less than total timeout"
+        );
+    }
+
+    // S-CODE-4: the shared client must build successfully (a bad builder
+    // combination surfaces as an AppError here, not at first request) and be a
+    // true process-lifetime singleton — every caller reuses the same instance
+    // rather than paying a fresh DNS+TCP+TLS handshake. Asserting pointer
+    // identity guards the OnceLock reuse invariant. reqwest doesn't expose the
+    // builder's ALPN/pool settings for inspection, so the removal of
+    // http2_prior_knowledge() (standard ALPN with HTTP/1.1 fallback) is
+    // verified by construction + code review rather than a runtime assert.
+    #[test]
+    fn http_client_is_reused_singleton() {
+        let a = http_client().expect("client must build");
+        let b = http_client().expect("client must build");
+        assert!(
+            std::ptr::eq(a, b),
+            "http_client must return the same process-lifetime instance"
         );
     }
 
