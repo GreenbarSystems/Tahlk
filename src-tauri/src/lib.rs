@@ -47,17 +47,40 @@ pub(crate) struct DbState(pub(crate) db::SqlitePool);
 
 pub fn run() {
     tauri::Builder::default()
+        // First plugin: stand up file logging before anything else can fail so
+        // even a crash during setup lands in the on-disk log. Targets default
+        // to Stdout + Webview + the OS log dir (macOS ~/Library/Logs/com.tahlk.app,
+        // Windows %LOCALAPPDATA%\com.tahlk.app\logs, Linux ~/.local/share). Info
+        // keeps our own diagnostics without drowning them in reqwest/hyper trace.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            // A GUI process launched from the Start Menu / Finder has no attached
+            // terminal, so a `panic!` would otherwise disappear. Route panics to
+            // the log file (then chain the default hook so dev builds still print
+            // to stderr) — this is the artifact a clinician sends support when the
+            // app fails to start.
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                log::error!("panic: {info}");
+                default_hook(info);
+            }));
+
             // Fail-closed on any DB open error — including keychain unreachable
             // (M1) or wrong-key (tampered / corrupted DEK). We would rather
             // refuse to launch than silently fall back to an unencrypted DB and
-            // expose PHI. The `Display` impl on AppError formats the code so
-            // logs point straight at the failure (e.g. "Storage error: ...").
-            let pool = db::open_database(&app.handle())
-                .unwrap_or_else(|e| panic!("failed to open encrypted SQLite database: {}", e));
+            // expose PHI. Log the failure before the panic so the on-disk log
+            // names the cause (e.g. "Storage error: ...") even on a GUI launch.
+            let pool = db::open_database(&app.handle()).unwrap_or_else(|e| {
+                log::error!("failed to open encrypted SQLite database: {e}");
+                panic!("failed to open encrypted SQLite database: {e}");
+            });
             app.manage(db::new_state(pool));
             Ok(())
         })

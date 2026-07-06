@@ -77,6 +77,60 @@ jobs:
 Store the cert as a GitHub Actions secret (base64 PFX + password), never in the
 repo. The desktop build still needs the sidecar/DLLs/model present — see SETUP.md.
 
+**Why this workflow isn't committed yet (deliberate).** A committed
+`release.yml` would today be aspirational scaffolding referencing things that
+don't exist: (1) no code-signing certificate has been acquired, so it could
+only ever produce an *unsigned* installer clinicians' machines will SmartScreen-
+block; and (2) the whisper sidecar, 12 DLLs, and 142 MB model are gitignored and
+**not hosted anywhere CI can fetch them** (see SETUP.md) — so CI cannot bundle a
+working installer. `ci.yml`'s desktop job stubs them with zero-byte files for
+`cargo check` only. The workflow becomes worth committing the moment those two
+preconditions are met (cert in a secret + an artifact source for the whisper
+files); until then the manual `npm run tauri -- build` above is the release path
+and the sketch above is the template to lift.
+
+## Getting fixes to clinicians (updates)
+
+Tahlk ships **no in-app auto-updater**, and that is a deliberate choice for now,
+not an oversight. The Tauri updater plugin is a real subsystem: it needs its own
+**update-signing keypair** (separate from the code-signing cert), a **hosted
+update manifest + artifact endpoint**, and `createUpdaterArtifacts` wired into
+the bundle. Standing that up before we even have a code-signing certificate — the
+GA gate above — would be premature. Until it's warranted:
+
+- **Distribution is manual.** A new version is a new signed installer; clinicians
+  re-download and re-run it. Installing over an existing install preserves the
+  local encrypted DB (it lives in the app data dir, not the install dir).
+- **Bump `version` in `tauri.conf.json` and `src-tauri/Cargo.toml` together** so
+  the About screen and the installer file name agree.
+
+Add the updater only when there are enough installs that manual re-download is a
+real support burden — at which point the keypair + a static manifest on any
+object store is a small, well-trodden addition. Track it as a follow-up, not a
+blocker.
+
+## Support diagnostics: the crash/error log
+
+The desktop app writes a rolling log to the OS log directory via
+`tauri-plugin-log` (wired first in `src-tauri/src/lib.rs::run`):
+
+| OS | Path |
+|---|---|
+| Windows | `%LOCALAPPDATA%\com.tahlk.app\logs\` |
+| macOS | `~/Library/Logs/com.tahlk.app/` |
+| Linux | `~/.local/share/com.tahlk.app/logs/` |
+
+This exists because a GUI launch has no attached terminal — without it, a
+`panic!` (e.g. the fail-closed DB-open guard when the keychain is locked or the
+DEK is corrupt) and every `eprintln!` diagnostic would vanish, leaving a broken
+install with nothing to send support. A panic hook routes crashes into this file
+before the process aborts. **The log is metadata/diagnostics only — it must never
+contain PHI**; if a future log line would include transcript or note text,
+redact at the call site, matching the server-side redaction precedent (S3).
+
+When triaging a clinician report, the first ask is: *"send us the newest file in
+that folder."*
+
 ## macOS (future)
 
 Requires an Apple **Developer ID Application** cert + **notarization**
