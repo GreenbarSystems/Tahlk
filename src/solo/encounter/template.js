@@ -8,9 +8,33 @@ import { kvGet } from '../../core/storageBackend.js';
 import { keys } from '../../data/keys.js';
 import { loadDraft } from '../../editor/noteEditor.js';
 import { listTemplates, defaultTemplateId } from '../../templates/templateLibrary.js';
+import { specialtyFamily } from '../../domain/specialties.js';
 import { displayDate, escapeHtml, statusLabel } from '../../utils/format.js';
 
 export const TRANSCRIPT_KEY = keys.noteTranscript;
+
+// Export presets whose brand names only make sense to behavioral-health
+// providers. Plain text is specialty-agnostic and always offered. The
+// underlying formatters (exportFormatter.js) stay available regardless — this
+// only governs which presets are SHOWN, so a podiatrist isn't offered two EHR
+// brand names ("SimplePractice"/"TherapyNotes") that mean nothing to them.
+const BEHAVIORAL_HEALTH_EXPORTS = [
+  { value: 'simplepractice', label: 'SimplePractice' },
+  { value: 'therapynotes',   label: 'TherapyNotes' },
+];
+
+// Build the <option> list for the export-format selector, filtered to the
+// provider's specialty. Behavioral-health-specific presets appear only for
+// behavioral-health-family specialties; everyone always gets Plain text.
+export function exportFormatOptions(providerSpecialty) {
+  const options = [{ value: 'plain', label: 'Plain text' }];
+  if (specialtyFamily(providerSpecialty) === 'behavioral-health') {
+    options.push(...BEHAVIORAL_HEALTH_EXPORTS);
+  }
+  return options
+    .map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`)
+    .join('');
+}
 
 export function renderEncounterPanel(encounter) {
   const isSigned = encounter.status === 'signed';
@@ -19,6 +43,7 @@ export function renderEncounterPanel(encounter) {
   const providerSpecialty = (kvGet(keys.provider()) || {}).specialty;
   const templates = listTemplates(providerSpecialty);
   const defaultId = defaultTemplateId(providerSpecialty);
+  const exportOptions = exportFormatOptions(providerSpecialty);
 
   return `
     <div class="panel encounter-panel" data-encounter-id="${escapeHtml(encounter.id)}">
@@ -101,9 +126,7 @@ export function renderEncounterPanel(encounter) {
                 </button>
                 <div class="export-controls">
                   <select id="export-format">
-                    <option value="plain">Plain text</option>
-                    <option value="simplepractice">SimplePractice</option>
-                    <option value="therapynotes">TherapyNotes</option>
+                    ${exportOptions}
                   </select>
                   <button class="btn btn-secondary btn-sm" id="btn-copy" ${!draft ? 'disabled' : ''}>Copy</button>
                   <button class="btn btn-secondary btn-sm" id="btn-save-file" ${!draft ? 'disabled' : ''}>Save File</button>
@@ -113,9 +136,7 @@ export function renderEncounterPanel(encounter) {
                   <span class="signed-at">Signed ${escapeHtml(displayDate(encounter.signed_at))}</span>
                   <div class="export-controls">
                     <select id="export-format">
-                      <option value="plain">Plain text</option>
-                      <option value="simplepractice">SimplePractice</option>
-                      <option value="therapynotes">TherapyNotes</option>
+                      ${exportOptions}
                     </select>
                     <button class="btn btn-secondary btn-sm" id="btn-copy">Copy</button>
                     <button class="btn btn-secondary btn-sm" id="btn-save-file">Save File</button>
