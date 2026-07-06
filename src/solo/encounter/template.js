@@ -125,7 +125,13 @@ export function renderEncounterPanel(encounter) {
                   </div>
                 </div>
                 ${encounter.signed_hash ? `
-                  <p class="hash-display">SHA-256: <code>${escapeHtml(encounter.signed_hash)}</code></p>
+                  <div class="integrity-block">
+                    <span class="trust-indicator">✓ Tamper-evident record</span>
+                    <details class="integrity-details">
+                      <summary>View integrity details</summary>
+                      <p class="hash-display">SHA-256: <code>${escapeHtml(encounter.signed_hash)}</code></p>
+                    </details>
+                  </div>
                 ` : ''}
               `}
             </div>
