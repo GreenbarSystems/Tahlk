@@ -1,5 +1,8 @@
 # Tahlk — Developer Setup
 
+> This is the developer/IT setup guide. For a plain-language, clinician-facing
+> walkthrough of using the app, see [GETTING_STARTED.md](GETTING_STARTED.md).
+
 ## Prerequisites
 
 1. **Node.js 18+** — for Vite and JS tooling
