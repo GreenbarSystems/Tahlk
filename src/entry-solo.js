@@ -5,7 +5,7 @@ import { encounterCacheKeys, keys } from './data/keys.js';
 import { installCapabilities } from './core/capabilities.js';
 import { loadHistory } from './domain/historyChain.js';
 import { verifyHistoryChain } from './utils/contentHash.js';
-import { toast } from './utils/format.js';
+import { reportIntegrityFailure } from './solo/integrityAlert.js';
 import * as telemetry from './core/telemetry.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
@@ -92,7 +92,7 @@ async function renderMainContent() {
     if (_openEncounter.status === 'signed') {
       const integrity = await verifyHistoryChain(await loadHistory(_openEncounter.id));
       if (!integrity.ok) {
-        toast('⚠ Integrity check failed for this signed note — its audit chain may have been altered.', 6000);
+        reportIntegrityFailure(integrity);
       }
     }
 
