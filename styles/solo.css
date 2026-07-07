@@ -325,6 +325,10 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
   padding: 36px 40px; max-width: 560px; width: 100%;
 }
 .onboarding-logo  { display: flex; align-items: center; gap: 10px; font-size: 22px; font-weight: 700; color: var(--navy); margin-bottom: 16px; }
+.onboarding-badge {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+  background: var(--teal-lite); color: var(--teal); border-radius: 3px; padding: 2px 6px;
+}
 .onboarding-title { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
 .onboarding-sub   { color: var(--gray-500); font-size: 13px; margin-bottom: 28px; }
 

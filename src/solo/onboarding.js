@@ -20,7 +20,7 @@ export function renderOnboarding() {
   return `
     <div class="onboarding-backdrop">
       <div class="onboarding-card">
-        <div class="onboarding-logo">${LOGO_SVG_LG}<span>Tahlk</span></div>
+        <div class="onboarding-logo">${LOGO_SVG_LG}<span>Tahlk</span><span class="onboarding-badge">Beta</span></div>
         <h1 class="onboarding-title">Welcome. Let's get you set up.</h1>
         <p class="onboarding-sub">Takes about 3 minutes. Your data stays on this device.</p>
 
@@ -58,7 +58,8 @@ export function renderOnboarding() {
               <p class="step-desc">Tahlk uses Anthropic's AI (Claude) to turn what you say into clinical notes.
               You'll need your own Anthropic account and API key so your data goes directly to Anthropic under
               your own agreement with them — Tahlk itself never sees or stores your key on any server. The key
-              is saved only in this device's local database.</p>
+              is saved in your operating system's secure credential store (the same place your computer keeps
+              other app passwords), not in Tahlk's database.</p>
               <details class="onboarding-help" id="ob-apikey-help">
                 <summary>How do I get one?</summary>
                 <div class="onboarding-help-body">

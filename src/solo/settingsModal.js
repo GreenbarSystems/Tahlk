@@ -85,7 +85,7 @@ export async function renderSettings() {
       <section class="settings-section">
         <h3>Note Generation (Anthropic API)</h3>
         <p class="settings-desc">
-          Your API key is stored on this device only and used to call Anthropic's Claude model to generate clinical notes from transcripts.
+          Your API key is stored in your operating system's secure credential store (Keychain / Credential Manager) — not in Tahlk's database — and is used to call Anthropic's Claude model to generate clinical notes from transcripts.
           <br>Status: ${hasKey ? '<strong>Key configured</strong>' : '<strong style="color:var(--danger)">No key set</strong>'}
         </p>
         <div class="field-row">
