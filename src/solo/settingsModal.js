@@ -132,7 +132,7 @@ export async function renderSettings() {
         </label>
       </section>
 
-      <section class="settings-section settings-section--danger">
+      <section class="settings-section settings-section--muted">
         <h3>Privacy</h3>
         <p class="settings-desc">Audio recordings are stored in your OS app data directory and never leave this device. Transcripts and notes are stored in a local SQLite database. Nothing is sent to Tahlk servers.</p>
       </section>
