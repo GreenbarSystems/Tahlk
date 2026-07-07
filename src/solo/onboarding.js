@@ -123,6 +123,7 @@ export function renderOnboarding() {
           <button class="btn btn-primary btn-lg" id="ob-finish">Start using Tahlk</button>
         </div>
       </div>
+      <div class="toast" id="toast"><span id="toast-msg"></span></div>
     </div>
   `;
 }

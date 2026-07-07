@@ -35,6 +35,19 @@ beforeEach(() => {
   nextResult = { ok: null };
 });
 
+// ── Toast container: regression test ──────────────────────────────────────
+// The onboarding screen must render its own #toast/#toast-msg container (the
+// same shape entry-solo.js's post-onboarding app shell uses). Without it,
+// toast()'s `if (!el || !msgEl) { console.warn(...); return; }` guard makes
+// every failure during onboarding — e.g. the OS keychain rejecting the API
+// key write — completely silent: no visible error, the "Start using Tahlk"
+// button just appears to do nothing.
+
+test('onboarding renders its own toast container', () => {
+  const html = renderOnboarding();
+  assert.match(html, /<div class="toast" id="toast"><span id="toast-msg"><\/span><\/div>/);
+});
+
 // ── API-key step: explanation + "How do I get one?" disclosure ───────────────
 
 test('API-key step explains what the key is and that Tahlk never stores it', () => {
