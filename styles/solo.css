@@ -40,7 +40,9 @@
   --gray-900:   #111827;
   --gray-700:   #374151;
   --gray-500:   #6b7280;
+  --gray-400:   #9ca3af;
   --gray-300:   #d1d5db;
+  --gray-200:   #e5e9f5;
   --gray-100:   #f0f4ff;   /* very light blue-lavender app background */
   --white:      #ffffff;
   --danger:     #dc2626;
@@ -71,7 +73,6 @@ a:hover { text-decoration: underline; }
   box-shadow: var(--shadow); flex-shrink: 0;
 }
 .header-brand { display: flex; align-items: center; gap: 8px; }
-.header-logo  { font-size: 18px; }
 .header-name  { font-weight: 700; font-size: 15px; letter-spacing: -.3px; }
 .header-badge {
   font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
@@ -161,7 +162,7 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 }
 .status-chip--recording       { background: #fee2e2; color: var(--danger); }
 .status-chip--recording_done  { background: #fef3c7; color: var(--warn); }
-.status-chip--draft           { background: #e0f2fe; color: #0369a1; }
+.status-chip--draft           { background: var(--gray-200); color: var(--gray-700); }
 .status-chip--signed          { background: var(--teal-lite); color: var(--teal); }
 .status-chip--exported        { background: var(--green-lite); color: var(--green); }
 
@@ -317,7 +318,7 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 /* ── Onboarding ───────────────────────────────────────────────────────── */
 .onboarding-backdrop {
   min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  background: linear-gradient(135deg, var(--green) 0%, #0d3d21 100%);
+  background: var(--navy);
   padding: 24px;
 }
 .onboarding-card {
@@ -411,6 +412,10 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 .btn-secondary .btn-spinner, .btn-ghost .btn-spinner {
   border-color: rgba(0,0,0,.15); border-top-color: var(--gray-700);
 }
+
+/* Small inline SVG icons (see solo/icons.js) — sits on the text baseline like
+   a glyph would, but with consistent stroke weight/geometry across platforms. */
+.icon-inline { vertical-align: -1.5px; margin-right: 3px; flex-shrink: 0; }
 
 /* Auto-save indicator beside "Clinical Note" heading */
 .note-save-indicator {

@@ -9,6 +9,7 @@ import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
+import { iconCheck } from './icons.js';
 
 const PROVIDER_KEY = keys.provider();
 
@@ -55,7 +56,7 @@ export async function renderSettings() {
         <h3>Transcription Model (Whisper)</h3>
         <p class="settings-desc">Local speech recognition — runs on this device. No audio sent to any server.</p>
         <div class="model-status-row">
-          <span class="model-status-icon">✓</span>
+          <span class="model-status-icon">${iconCheck()}</span>
           <span>Whisper base.en — included with Tahlk</span>
         </div>
       </section>

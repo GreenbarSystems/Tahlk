@@ -39,6 +39,8 @@ const SCANNED_FILES = [
 const SAFE_CALL_HELPERS = new Set([
   'escapeHtml',
   'statusLabel', // src/utils/format.js: returns fixed literal per known status
+  'iconCheck',   // src/solo/icons.js: returns a fixed, hand-authored SVG literal
+  'iconClose',   // src/solo/icons.js: returns a fixed, hand-authored SVG literal
 ]);
 
 // Pull the expression text out of a `${ ... }` in a way that tolerates one

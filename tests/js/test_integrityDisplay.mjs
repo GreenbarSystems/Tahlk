@@ -42,7 +42,9 @@ test('signed hash is a real 64-char hex (guards the fixture)', () => {
 
 test('trust indicator is shown by default on a signed note', () => {
   const html = signedPanel();
-  assert.match(html, /✓ Tamper-evident record/);
+  // The checkmark is a small inline SVG (src/solo/icons.js), not a text glyph
+  // — assert on the element and its label text, not literal markup shape.
+  assert.match(html, /<span class="trust-indicator">[\s\S]*?Tamper-evident record<\/span>/);
 });
 
 test('raw SHA-256 is NOT part of the default (pre-disclosure) display', () => {

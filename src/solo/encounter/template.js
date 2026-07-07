@@ -10,6 +10,7 @@ import { loadDraft } from '../../editor/noteEditor.js';
 import { listTemplates, defaultTemplateId } from '../../templates/templateLibrary.js';
 import { specialtyFamily } from '../../domain/specialties.js';
 import { displayDate, escapeHtml, statusLabel } from '../../utils/format.js';
+import { iconCheck, iconClose } from '../icons.js';
 
 export const TRANSCRIPT_KEY = keys.noteTranscript;
 
@@ -57,7 +58,7 @@ export function renderEncounterPanel(encounter) {
                  placeholder="Add alias…" maxlength="40" />
           <span class="status-chip status-chip--${escapeHtml(encounter.status)}">${statusLabel(encounter.status)}</span>
         </div>
-        <button class="btn btn-ghost btn-sm" id="btn-close-panel">✕ Close</button>
+        <button class="btn btn-ghost btn-sm" id="btn-close-panel">${iconClose()} Close</button>
       </div>
 
       <!-- Two-column workspace -->
@@ -73,7 +74,7 @@ export function renderEncounterPanel(encounter) {
                 <span id="record-label">Start Recording</span>
               </button>
               <span class="record-timer" id="record-timer"></span>
-              ${encounter.audio_path ? '<span class="audio-saved">✓ Audio saved</span>' : ''}
+              ${encounter.audio_path ? `<span class="audio-saved">${iconCheck()} Audio saved</span>` : ''}
             </div>
           </section>
 
@@ -111,7 +112,7 @@ export function renderEncounterPanel(encounter) {
             <div class="section-header">
               <h3 class="section-title">Clinical Note</h3>
               ${isSigned
-                ? '<span class="signed-badge">✓ Signed</span>'
+                ? `<span class="signed-badge">${iconCheck()} Signed</span>`
                 : '<span class="note-save-indicator" id="note-save-indicator"></span>'}
             </div>
 
@@ -147,7 +148,7 @@ export function renderEncounterPanel(encounter) {
                 </div>
                 ${encounter.signed_hash ? `
                   <div class="integrity-block">
-                    <span class="trust-indicator">✓ Tamper-evident record</span>
+                    <span class="trust-indicator">${iconCheck()} Tamper-evident record</span>
                     <details class="integrity-details">
                       <summary>View integrity details</summary>
                       <p class="hash-display">SHA-256: <code>${escapeHtml(encounter.signed_hash)}</code></p>

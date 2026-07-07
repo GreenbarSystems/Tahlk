@@ -4,12 +4,17 @@
 // developer terminology mean nothing at a support-critical moment. The technical
 // mismatch detail (which entry itself failed, and why) is preserved in the opt-in
 // diagnostics log for support/debugging — it just no longer surfaces in the toast.
+//
+// No decorative glyph on this message by design: toast() renders via
+// textContent (safe, but plain-text only), and an emoji-style ⚠ on a serious
+// compliance alert reads as informal rather than urgent — the wording alone
+// carries the severity.
 
 import { toast } from '../utils/format.js';
 import * as telemetry from '../core/telemetry.js';
 
 export const INTEGRITY_FAILURE_MESSAGE =
-  '⚠ This signed note may have been changed on disk. Contact support before relying on it.';
+  'This signed note may have been changed on disk. Contact support before relying on it.';
 
 // Record the technical detail (opt-in, PHI-scrubbed) and show the plain-language toast.
 export function reportIntegrityFailure(integrity) {
