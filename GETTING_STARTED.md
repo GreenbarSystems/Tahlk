@@ -53,8 +53,9 @@ The welcome screen has three quick steps:
    recorded as the signer on each note.
 2. **Note generation API key** — paste your Anthropic API key (it starts with
    `sk-ant-`). If you don't have one yet, expand **"How do I get one?"** for a
-   step-by-step. Your key is saved only in this device's local database and is
-   never sent to any Tahlk server.
+   step-by-step. Your key is saved in your operating system's secure
+   credential store (the same place your computer keeps other app passwords)
+   and is never sent to any Tahlk server.
 3. **Anthropic BAA acknowledgment** — tick the box confirming your organization
    has an executed BAA with Anthropic covering that key. Expand **"What is
    this?"** if you'd like the plain-language explanation and a link to

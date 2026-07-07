@@ -57,18 +57,28 @@ the repo), so each dev places the files locally:
    `ggml-base.en.bin` in `src-tauri/resources/` so it is picked up as a bundled
    resource.
 
-> Note: `externalBin` bundles only the exe for `tauri build`. Shipping a
-> distributable still needs the DLLs added as bundle resources placed beside
-> the sidecar — TODO before release. Dev (`tauri:dev`) runs fine as above.
+> The 12 runtime DLLs are bundled as Windows-specific resources in
+> `src-tauri/tauri.windows.conf.json` (Tauri merges platform config files
+> automatically), so `tauri build` on Windows packages the sidecar exe *and*
+> its DLLs together — no manual step needed beyond placing them in
+> `src-tauri/binaries/` locally as described above. See
+> [docs/RELEASE.md](docs/RELEASE.md) for the full build/sign runbook.
 
 ## Anthropic API Key (note generation)
 
 In the app's onboarding or Settings page, enter your Anthropic API key
-(console.anthropic.com → API Keys). The key is stored in the local SQLite
-database only — never sent to any server.
+(console.anthropic.com → API Keys). The key is stored in the OS secure store
+(Windows Credential Manager / macOS Keychain / Linux Secret Service) —
+**never** in the SQLite database, and never sent to any Tahlk server. It is
+write-only from JS: `set_api_key` / `has_api_key` / `clear_api_key` are the
+only surfaces, and there is no command that returns the key to the frontend.
+See [Encryption at Rest](#encryption-at-rest-sqlcipher) below for how this
+relates to the (separate) database encryption key.
 
-Long-term: once a HIPAA BAA is signed with Anthropic, the app will switch
-to a managed key and users won't need to provide their own.
+Tahlk is bring-your-own-key by design, not a transitional state: transcripts
+go directly from the provider's device to Anthropic under the *provider's own*
+Anthropic account and BAA — Tahlk is never in that data path as a party to the
+agreement. See the BAA acknowledgment gate below.
 
 ## Anthropic BAA acknowledgment (HIPAA)
 
@@ -152,27 +162,71 @@ unrelated storage error.
 
 ## Architecture
 
+Frontend (`src/`) — layered so the UI never talks to the Tauri transport
+directly:
+
 ```
-src/core/       — storage, eventBus, capabilities seam
+src/platform/   — the ONLY module touching the Tauri runtime (tauri.js);
+                  also modal.js (shared dialog scaffolding), appError.js
+src/data/       — repositories owning the IPC command contract per aggregate:
+                  encountersRepo.js, secretsRepo.js, baa.js, keys.js
+src/domain/     — transport-agnostic domain logic: historyChain.js
+                  (tamper-evident chain), specialties.js, retention.js
+src/core/       — storageBackend (KV cache), eventBus, capabilities seam,
+                  auditLog, telemetry (opt-in, PHI-scrubbed diagnostics)
 src/scribe/     — recorder.js, transcriber.js, noteGenerator.js
-src/editor/     — noteEditor.js (sign-off + SHA-256 audit chain)
-src/templates/  — 5 built-in behavioral health templates
+src/editor/     — noteEditor.js (sign-off + SHA-256 audit chain, audio purge)
+src/templates/  — built-in templates across psychiatry, behavioral-health,
+                  podiatry, and a generic-SOAP fallback (see src/templates/data/)
 src/export/     — plain text / SimplePractice / TherapyNotes formatters
-src/solo/       — Solo UX: home, encounter panel, settings, onboarding
-src-tauri/      — Rust backend: SQLite KV + encounters + audio + LLM + export
+src/solo/       — Solo UX: home, settings, onboarding, and solo/encounter/*
+                  (the encounter panel, split into per-section modules)
 ```
+
+Backend (`src-tauri/src/`) — split into per-concern modules, each with its own
+unit tests (see the Hardening sections below for what several of them enforce):
+
+```
+lib.rs           — command registration + app setup
+db.rs, db_key.rs — SQLCipher connection + DEK management
+kv.rs, kv_ops.rs — generic key/value store (size-capped, LIKE-escaped)
+encounters.rs    — encounter CRUD, signed-row immutability, status allowlist
+note_history.rs  — the note_history table (tamper-evident hash chain)
+notes.rs         — generate_note: BAA gate, Anthropic call, SSE parsing
+llm_audit.rs     — append-only audit row per Anthropic call attempt
+secrets.rs       — Anthropic API key via the OS keychain
+baa.rs           — BAA acknowledgment gate + attestation versioning
+audio.rs         — save/delete session audio, input-size ceilings
+whisper.rs       — local transcription via the whisper.cpp sidecar
+export.rs        — save-to-file via the native dialog
+perms.rs         — owner-only file permissions for PHI-bearing files
+errors.rs        — the AppError type shared across every command
+```
+
+`server/` is a **separate, frozen** multi-tenant sync service — not part of
+the Solo desktop app. See [server/README.md](server/README.md).
 
 ## Privacy Architecture
 
-- **Local-first**: all data in SQLite on the user's device
-- **SHA-256 hash chain**: every note edit logged; sign-off binds to exact content
-- **API key in LOCAL_ONLY storage**: stored in Rust/SQLite, never accessible from JS
+- **Local-first**: all data in an encrypted SQLite database on the user's
+  device (see [Encryption at Rest](#encryption-at-rest-sqlcipher) below)
+- **SHA-256 hash chain**: every note edit logged in the `note_history` table;
+  sign-off binds to exact content; the chain is verified on opening a signed
+  encounter, not just built
+- **API key in the OS keychain**: write-only from JS, never in the database,
+  never accessible from JS
 - **BAA gate in Rust**: `generate_note` refuses to call Anthropic unless a
   current-version BAA acknowledgment row is present — unbypassable from JS
 - **LLM call audit log**: every Anthropic call is recorded (metadata only,
   never transcript or response text) in the `llm_audit` table
-- **Audio never leaves the device**: WAV written to app data dir, transcribed locally via whisper.cpp
-- **Tauri CSP**: no external scripts; Anthropic API whitelisted in connect-src only
+- **Audio never leaves the device**: WAV written to app data dir, transcribed
+  locally via whisper.cpp; deletable on demand (retention setting)
+- **Tauri CSP**: `script-src 'self'` (no external scripts); `connect-src` does
+  not include Anthropic — the WebView never calls it directly, only Rust does,
+  behind the keychain and the BAA gate
+- **No global Tauri object**: `withGlobalTauri` is off; the IPC surface is
+  imported as an ESM module (`@tauri-apps/api`) rather than hung off `window`,
+  shrinking what an XSS payload could reach
 
 ## Encryption at Rest (SQLCipher)
 
