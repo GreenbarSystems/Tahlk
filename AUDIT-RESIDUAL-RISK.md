@@ -30,6 +30,7 @@ For this item to stay in "accepted risk" status rather than "open gap," **both**
 1. **In-product disclosure.** The export flow (dialog copy, tooltip, or a one-time confirmation) must state, in substance: *"Exported files are not encrypted by Tahlk. Save exports only to an encrypted device or secure location — you are responsible for protecting this file once it leaves the app."* This applies to both `export_note_to_file` (.txt) and `export_note_pdf_to_file` (.pdf).
    **Shipped in `a607490`:** persistent helper text (`.export-disclosure` in `src/solo/encounter/template.js`) under the export controls in both the draft and signed states, plus a matching `title` tooltip on the Save File / Save as PDF buttons. Shown on every render, not a dismissible one-time modal — the risk applies to every export, not just the first.
 2. **Compliance documentation.** Tahlk's HIPAA risk assessment / Business Associate context documentation must name this exact behavior (unencrypted, provider-directed export) as a known, accepted data flow — not omit it.
+   **Shipped:** [`docs/security/hipaa-risk-assessment.md`](docs/security/hipaa-risk-assessment.md), Flow C, names this exact behavior, its mitigations, and its ongoing conditions.
 
 If either of these is missing, this item reverts to an **open gap**, not an accepted risk — see the checklist below.
 
@@ -76,7 +77,7 @@ Run through this before every production release. Each item should be checked by
 - [x] Export dialog / UI copy for `export_note_to_file` (.txt) states exported files are unencrypted and the provider's responsibility to secure — shipped `a607490`
 - [x] Export dialog / UI copy for `export_note_pdf_to_file` (.pdf) states the same — shipped `a607490` (same disclosure line covers both buttons)
 - [x] Diagnostics log export (`telemetry.js`'s `exportLog()`, which also routes through `export_note_to_file`) has its own disclosure — shipped `404bd82`. **Deliberately narrower copy, not a copy-paste of the note-export line**: verified the diagnostics log content is non-PHI by design (`scrubProps()`'s number/boolean/6-key allowlist; `recordError()`'s two PHI-adjacent call sites in `transcriber.js`/`noteGenerator.js` both flow through Rust `AppError` paths already redacted — `redact_whisper_stderr`, and `notes.rs`'s `UpstreamApi` which never carries the response body or request content), so the tooltip + helper text on "Export Log" in Settings state the *file* is unencrypted without implying it holds patient data — which would otherwise contradict the "No patient data...are ever recorded" copy one paragraph above it
-- [ ] Current HIPAA risk assessment / compliance documentation names unencrypted provider-directed export as a known, accepted data flow
+- [x] Current HIPAA risk assessment / compliance documentation names unencrypted provider-directed export as a known, accepted data flow — shipped `docs/security/hipaa-risk-assessment.md` (Flow C)
 - [x] No new export command was added since the last release without the same disclosure treatment (`grep -n "export_note\|fs::write" src-tauri/src/export.rs` — confirmed exactly the 2 known commands, no silent third path, as of `404bd82`)
 
 ### Transcript/audio scratch-file window (Item 2)
