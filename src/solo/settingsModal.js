@@ -13,6 +13,18 @@ import { iconCheck } from './icons.js';
 
 const PROVIDER_KEY = keys.provider();
 
+// Disclosure for the diagnostics log export button. NOTE this is narrower
+// than the note-export disclosure in src/solo/encounter/template.js: the
+// diagnostics log itself contains no PHI by design (telemetry.js's
+// scrubProps() allowlists only numbers/booleans/6 non-PHI string keys, and
+// recordError() truncates through already-hardened Rust error paths — see
+// AUDIT-RESIDUAL-RISK.md Item 1 verification notes). So this only needs to
+// disclose that the exported FILE is unencrypted at rest — it must NOT imply
+// the log contains patient data, which would contradict the "No patient
+// data...are ever recorded" copy directly above it.
+const DIAG_EXPORT_DISCLOSURE =
+  'This log contains no patient data, but the exported file itself is not encrypted — save it only to a secure location.';
+
 export async function renderSettings() {
   const provider = kvGet(PROVIDER_KEY) || {};
   const hasKey = await secretsRepo.hasApiKey().catch(() => false);
@@ -111,9 +123,10 @@ export async function renderSettings() {
         </label>
         <div class="diag-actions">
           <span class="settings-desc" id="s-diag-count">${diagCount} event${diagCount === 1 ? '' : 's'} stored</span>
-          <button class="btn btn-secondary btn-sm" id="s-diag-export" ${diagCount === 0 ? 'disabled' : ''}>Export Log</button>
+          <button class="btn btn-secondary btn-sm" id="s-diag-export" ${diagCount === 0 ? 'disabled' : ''} title="${DIAG_EXPORT_DISCLOSURE}">Export Log</button>
           <button class="btn btn-ghost btn-sm" id="s-diag-clear" ${diagCount === 0 ? 'disabled' : ''}>Clear Log</button>
         </div>
+        <p class="settings-desc export-disclosure">${DIAG_EXPORT_DISCLOSURE}</p>
       </section>
 
       <section class="settings-section">
