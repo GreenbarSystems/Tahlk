@@ -7,6 +7,7 @@
 **Prior remediation already shipped:**
 - `0e32611` — session audio encrypted at rest (AES-256-GCM)
 - `065b7ff` — log-file PHI guardrail (CI static check + `log_safety.rs` redaction wrapper)
+- `a607490` — export dialog disclosure copy (Item 1's in-product disclosure requirement, below)
 
 This document formally closes the two remaining audit items that are **not** code defects — they are either a user-directed action working as designed, or an inherent, already-mitigated side effect of shelling out to an external transcription binary. Both are accepted as residual risk under the conditions below. This is the paper trail for that decision.
 
@@ -27,6 +28,7 @@ HIPAA's at-rest encryption requirement (§164.312(a)(2)(iv)) governs data the **
 For this item to stay in "accepted risk" status rather than "open gap," **both** of the following must be true at all times:
 
 1. **In-product disclosure.** The export flow (dialog copy, tooltip, or a one-time confirmation) must state, in substance: *"Exported files are not encrypted by Tahlk. Save exports only to an encrypted device or secure location — you are responsible for protecting this file once it leaves the app."* This applies to both `export_note_to_file` (.txt) and `export_note_pdf_to_file` (.pdf).
+   **Shipped in `a607490`:** persistent helper text (`.export-disclosure` in `src/solo/encounter/template.js`) under the export controls in both the draft and signed states, plus a matching `title` tooltip on the Save File / Save as PDF buttons. Shown on every render, not a dismissible one-time modal — the risk applies to every export, not just the first.
 2. **Compliance documentation.** Tahlk's HIPAA risk assessment / Business Associate context documentation must name this exact behavior (unencrypted, provider-directed export) as a known, accepted data flow — not omit it.
 
 If either of these is missing, this item reverts to an **open gap**, not an accepted risk — see the checklist below.
@@ -71,8 +73,8 @@ Run through this before every production release. Each item should be checked by
 
 ### Export disclosure (Item 1)
 
-- [ ] Export dialog / UI copy for `export_note_to_file` (.txt) states exported files are unencrypted and the provider's responsibility to secure
-- [ ] Export dialog / UI copy for `export_note_pdf_to_file` (.pdf) states the same
+- [x] Export dialog / UI copy for `export_note_to_file` (.txt) states exported files are unencrypted and the provider's responsibility to secure — shipped `a607490`
+- [x] Export dialog / UI copy for `export_note_pdf_to_file` (.pdf) states the same — shipped `a607490` (same disclosure line covers both buttons)
 - [ ] Diagnostics log export (`telemetry.js`'s `exportLog()`, which also routes through `export_note_to_file`) is covered by the same disclosure — confirm no separate/missing copy path was introduced
 - [ ] Current HIPAA risk assessment / compliance documentation names unencrypted provider-directed export as a known, accepted data flow
 - [ ] No new export command was added since the last release without the same disclosure treatment (`grep -n "export_note\|fs::write" src-tauri/src/export.rs` — confirm exactly the 2 known commands, no silent third path)
