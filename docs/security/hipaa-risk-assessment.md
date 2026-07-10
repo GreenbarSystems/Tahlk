@@ -5,7 +5,7 @@
 the `tahlk-sync` Group-tier backend — are explicitly out of scope; that
 service is frozen per [ADR 0001](../adr/0001-freeze-group-tier-and-sync.md)
 and has zero validated demand or production deployment as of this writing).
-**As of commit:** `461f9e7`
+**As of commit:** `{next commit}`
 **Prior source material this assessment consolidates:**
 - `tahlk-security-audit.md` — the original numbered finding set (C1–C2, H1–H6,
   M1–M10, L1–L5), referenced throughout the codebase (e.g. `notes.rs:334,336`,
@@ -42,7 +42,7 @@ call the provider explicitly triggers.
 | A | Session audio recording | Patient conversation audio | At rest (device) | Yes — AES-256-GCM (`0e32611`) |
 | B | Transcription (whisper.cpp sidecar) | Patient conversation, audio + text | Transient at rest (device) | No — bounded-window plaintext, see [§2 Flow B](#flow-b--transcript-and-audio-scratch-files-transient-plaintext) |
 | C | Note export (.txt / .pdf) | Full clinical note | At rest (device, provider-chosen path) | No — by design, see [§2 Flow C](#flow-c--provider-directed-note-pdftxt-export-unencrypted) |
-| D | Note generation (Anthropic API, BYOK mode) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; see [§2 Flow D](#flow-d--note-generation-via-anthropic-byok-mode) for the BAA gate that governs whether this call is permitted at all |
+| D | Note generation (Anthropic API, BYOK mode) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; **BAA with Anthropic applied for, not yet confirmed executed** — see [§2 Flow D](#flow-d--note-generation-via-anthropic-byok-mode) |
 | E | Signed note, transcript, audit log, provider/patient records | Everything above, persisted | At rest (device, app-managed SQLite) | Yes — SQLCipher (confirmed clean in the prior PHI-at-rest audit) |
 | F | Diagnostics log export | App diagnostics only | At rest (device, provider-chosen path) | No, but confirmed non-PHI, see [§2 Flow F](#flow-f--diagnostics-log-export-unencrypted-file-no-phi-content) |
 
@@ -149,7 +149,10 @@ mode; this is the only mode currently shipped — the managed-key proxy
 described in `MANAGED-KEY-PROXY-CONTRACT.md` is a v1 draft, not yet built).
 
 **Risk classification:** Conditionally permitted third-party PHI disclosure —
-gated, not blanket-accepted.
+gated, not blanket-accepted. **Condition currently unmet / in progress:** the
+BAA with Anthropic has been applied for but is not yet confirmed executed as
+of this writing (see below) — this flow should be treated as an open item,
+not a fully closed one, until that's confirmed.
 
 **Why sending PHI to Anthropic is not an automatic compliance violation:**
 HIPAA permits disclosing PHI to a third party that has signed a Business
@@ -172,16 +175,27 @@ technical gate, not a policy statement:
   generic string (audit findings M9/M10, `notes.rs:408-422`) — so a failed
   generation call can't leak transcript content through the error path.
 
+**Current real-world BAA status (as of this document, self-reported by the
+product owner, not independently verified by code inspection — code cannot
+confirm the state of a legal agreement):** an application for a BAA with
+Anthropic has been submitted; **it is not yet confirmed executed/countersigned**
+as of this writing. This is a live gap, not a closed item — see action items
+below.
+
 **What this means for your BAA obligations (action item, not a code
 concern):** Tahlk's technical gate only enforces that *some* acknowledgment
 exists in the local database — it does not itself constitute or replace a
 signed BAA between the provider (or your organization, if Tahlk is acting as
 the Business Associate here) and Anthropic. **Confirm and keep current:**
 (1) which entity is the Covered Entity and which is the Business Associate in
-this flow for your deployment model, (2) that a real, signed BAA with
-Anthropic is in effect for every account using BYOK note generation, and (3)
-that the in-app acknowledgment (`baa_ack_set`, `src-tauri/src/baa.rs:143`)
-is kept in sync with that real-world agreement — the gate trusts the local
+this flow for your deployment model, (2) **track the pending Anthropic BAA
+application above through to actual execution, and re-run this section's
+status line once it's confirmed countersigned — do not treat "applied" as
+equivalent to "in effect" for compliance purposes**, (3) confirm a real,
+signed BAA with Anthropic is in effect for every account using BYOK note
+generation once executed, and (4) that the in-app acknowledgment
+(`baa_ack_set`, `src-tauri/src/baa.rs:143`) is kept in sync with that
+real-world agreement — the gate trusts the local
 flag; it cannot verify the underlying paperwork exists.
 
 **Conditions to remain accepted:** `require_ack` must remain the first
@@ -276,3 +290,7 @@ This document should be re-reviewed:
   export) which were not previously documented as named data flows anywhere
   in the repo, and satisfies the outstanding compliance-documentation
   condition for `AUDIT-RESIDUAL-RISK.md` Item 1.
+- `{next commit}` — updated Flow D with the current real-world BAA status
+  (Anthropic BAA application submitted, not yet confirmed executed) per the
+  product owner. This is recorded as an open item, not resolved — re-update
+  this section once the BAA is confirmed countersigned.
