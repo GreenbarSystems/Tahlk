@@ -191,7 +191,7 @@ pub(crate) fn migrate_plaintext_audio_at_rest(
     let entries = match std::fs::read_dir(audio_dir) {
         Ok(e) => e,
         Err(e) => {
-            log::error!("audio at-rest migration: cannot read audio dir: {e}");
+            log::error!("audio at-rest migration: cannot read audio dir: {}", crate::log_safety::cap_len(&e.to_string()));
             return Ok(0);
         }
     };
@@ -212,20 +212,20 @@ pub(crate) fn migrate_plaintext_audio_at_rest(
         let plaintext = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
-                log::error!("audio at-rest migration: read {name} failed: {e}");
+                log::error!("audio at-rest migration: read {} failed: {}", crate::log_safety::redact_filename(name), crate::log_safety::cap_len(&e.to_string()));
                 continue;
             }
         };
         let ciphertext = match encrypt(key, &plaintext) {
             Ok(c) => c,
             Err(e) => {
-                log::error!("audio at-rest migration: encrypt {name} failed: {e}");
+                log::error!("audio at-rest migration: encrypt {} failed: {}", crate::log_safety::redact_filename(name), crate::log_safety::cap_len(&e.to_string()));
                 continue;
             }
         };
         let enc_path = path.with_file_name(format!("{name}.enc"));
         if let Err(e) = std::fs::write(&enc_path, &ciphertext) {
-            log::error!("audio at-rest migration: write {name}.enc failed: {e}");
+            log::error!("audio at-rest migration: write {}.enc failed: {}", crate::log_safety::redact_filename(name), crate::log_safety::cap_len(&e.to_string()));
             continue;
         }
         crate::perms::chmod_0600_unix(&enc_path);
@@ -239,7 +239,7 @@ pub(crate) fn migrate_plaintext_audio_at_rest(
         ) {
             // Leave the plaintext in place so a later run can retry the whole
             // step — never delete before the DB is consistent.
-            log::error!("audio at-rest migration: DB update for {name} failed: {e}");
+            log::error!("audio at-rest migration: DB update for {} failed: {}", crate::log_safety::redact_filename(name), crate::log_safety::cap_len(&e.to_string()));
             continue;
         }
 
@@ -248,7 +248,7 @@ pub(crate) fn migrate_plaintext_audio_at_rest(
             // The encrypted copy and DB row are already correct; a lingering
             // plaintext is a leak we log, and the next run will retry the
             // delete (re-encrypt is a harmless overwrite).
-            log::error!("audio at-rest migration: delete plaintext {name} failed: {e}");
+            log::error!("audio at-rest migration: delete plaintext {} failed: {}", crate::log_safety::redact_filename(name), crate::log_safety::cap_len(&e.to_string()));
             continue;
         }
         migrated += 1;

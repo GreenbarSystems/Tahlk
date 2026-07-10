@@ -12,6 +12,7 @@
 //!   - `audio`         — session audio save/delete with path-traversal hardening.
 //!   - `audio_crypto`  — AES-256-GCM at-rest encryption for session audio + migration.
 //!   - `whisper`       — local whisper.cpp sidecar transcription.
+//!   - `log_safety`    — filename/error redaction for the (unencrypted) app log.
 //!   - `notes`         — Anthropic streaming note generation (BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
 //!
@@ -32,6 +33,7 @@ mod export;
 mod kv;
 mod kv_ops;
 mod llm_audit;
+mod log_safety;
 mod note_history;
 mod notes;
 mod patients;
@@ -71,7 +73,7 @@ pub fn run() {
             // app fails to start.
             let default_hook = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
-                log::error!("panic: {info}");
+                log::error!("panic: {}", log_safety::cap_len(&info.to_string()));
                 default_hook(info);
             }));
 
@@ -81,8 +83,9 @@ pub fn run() {
             // expose PHI. Log the failure before the panic so the on-disk log
             // names the cause (e.g. "Storage error: ...") even on a GUI launch.
             let pool = db::open_database(&app.handle()).unwrap_or_else(|e| {
-                log::error!("failed to open encrypted SQLite database: {e}");
-                panic!("failed to open encrypted SQLite database: {e}");
+                let safe = log_safety::cap_len(&e.to_string());
+                log::error!("failed to open encrypted SQLite database: {safe}");
+                panic!("failed to open encrypted SQLite database: {safe}");
             });
 
             // One-shot at-rest audio migration: encrypt any legacy plaintext
@@ -103,7 +106,7 @@ pub fn run() {
                 audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)
             })() {
                 Ok(_) => {}
-                Err(e) => log::error!("audio at-rest migration skipped: {e}"),
+                Err(e) => log::error!("audio at-rest migration skipped: {}", log_safety::cap_len(&e.to_string())),
             }
 
             app.manage(db::new_state(pool));

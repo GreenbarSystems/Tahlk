@@ -27,6 +27,17 @@ jobs:
       - run: npm run test:build   # static import-graph guard
       - run: npm run test:js      # unit + integration tests
 
+  log-phi-guard:
+    name: log PHI guardrail
+    # Lightweight standalone job: just checkout + a grep. Kept separate so it
+    # never adds time to the web/desktop build jobs, and its failure points
+    # straight at the offending log:: line. See scripts/check_log_phi.sh for
+    # what it enforces and its (intentional) bluntness.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check_log_phi.sh
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
