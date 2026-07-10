@@ -24,6 +24,21 @@ const BEHAVIORAL_HEALTH_EXPORTS = [
   { value: 'therapynotes',   label: 'TherapyNotes' },
 ];
 
+// Disclosure copy for file-based note export (Save File / Save as PDF).
+// export_note_to_file / export_note_pdf_to_file (src-tauri/src/export.rs)
+// write plaintext to a location the provider picks via the OS Save-As
+// dialog — outside Tahlk's own encrypted storage (SQLCipher DB, AES-256-GCM
+// audio) and outside the app's control from that point on. This is
+// documented and accepted in AUDIT-RESIDUAL-RISK.md "Item 1" on the
+// condition that this disclosure stays visible; do not remove or silence it
+// without updating that document. Shown as persistent helper text (not a
+// dismissible one-time modal) because the risk applies to every export, not
+// just the first one.
+const EXPORT_DISCLOSURE_TEXT =
+  'Exported files are not encrypted by Tahlk. Save only to an encrypted device or secure location — you are responsible for protecting this file once it leaves the app.';
+const EXPORT_DISCLOSURE_TITLE =
+  'Exported files are not encrypted by Tahlk — save only to an encrypted device or secure location.';
+
 // Build the <option> list for the export-format selector, filtered to the
 // provider's specialty. Behavioral-health-specific presets appear only for
 // behavioral-health-family specialties; everyone always gets Plain text.
@@ -130,9 +145,10 @@ export function renderEncounterPanel(encounter) {
                     ${exportOptions}
                   </select>
                   <button class="btn btn-secondary btn-sm" id="btn-copy" ${!draft ? 'disabled' : ''}>Copy</button>
-                  <button class="btn btn-secondary btn-sm" id="btn-save-file" ${!draft ? 'disabled' : ''}>Save File</button>
-                  <button class="btn btn-secondary btn-sm" id="btn-save-pdf" ${!draft ? 'disabled' : ''}>Save as PDF</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-save-file" ${!draft ? 'disabled' : ''} title="${EXPORT_DISCLOSURE_TITLE}">Save File</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-save-pdf" ${!draft ? 'disabled' : ''} title="${EXPORT_DISCLOSURE_TITLE}">Save as PDF</button>
                 </div>
+                <p class="settings-desc export-disclosure">${EXPORT_DISCLOSURE_TEXT}</p>
               ` : `
                 <div class="signed-export-row">
                   <span class="signed-at">Signed ${escapeHtml(displayDate(encounter.signed_at))}</span>
@@ -141,12 +157,13 @@ export function renderEncounterPanel(encounter) {
                       ${exportOptions}
                     </select>
                     <button class="btn btn-secondary btn-sm" id="btn-copy">Copy</button>
-                    <button class="btn btn-secondary btn-sm" id="btn-save-file">Save File</button>
-                    <button class="btn btn-secondary btn-sm" id="btn-save-pdf">Save as PDF</button>
+                    <button class="btn btn-secondary btn-sm" id="btn-save-file" title="${EXPORT_DISCLOSURE_TITLE}">Save File</button>
+                    <button class="btn btn-secondary btn-sm" id="btn-save-pdf" title="${EXPORT_DISCLOSURE_TITLE}">Save as PDF</button>
                     ${encounter.audio_path
                       ? '<button class="btn btn-ghost btn-danger btn-sm" id="btn-purge-audio" title="Delete the recorded audio from this device">Delete Audio</button>'
                       : ''}
                   </div>
+                  <p class="settings-desc export-disclosure">${EXPORT_DISCLOSURE_TEXT}</p>
                 </div>
                 ${encounter.signed_hash ? `
                   <div class="integrity-block">

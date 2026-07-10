@@ -282,6 +282,7 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 
 .export-controls{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .export-controls select { min-width: 148px; }
+.export-disclosure { margin: 0; }
 .signed-at   { font-size: 12px; color: var(--teal); font-weight: 600; }
 .signed-badge{ background: var(--teal-lite); color: var(--teal); font-size: 11px; font-weight: 700;
                text-transform: uppercase; letter-spacing: .4px; border-radius: 3px; padding: 2px 7px; }
