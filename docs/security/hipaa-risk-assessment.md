@@ -5,7 +5,7 @@
 the `tahlk-sync` Group-tier backend — are explicitly out of scope; that
 service is frozen per [ADR 0001](../adr/0001-freeze-group-tier-and-sync.md)
 and has zero validated demand or production deployment as of this writing).
-**As of commit:** `0d285ad`
+**As of commit:** `461f9e7`
 **Prior source material this assessment consolidates:**
 - `tahlk-security-audit.md` — the original numbered finding set (C1–C2, H1–H6,
   M1–M10, L1–L5), referenced throughout the codebase (e.g. `notes.rs:334,336`,
@@ -271,7 +271,7 @@ This document should be re-reviewed:
   not silently carried forward.
 
 **Document history:**
-- `{this commit}` — initial version. Consolidates `AUDIT-RESIDUAL-RISK.md`
+- `461f9e7` — initial version. Consolidates `AUDIT-RESIDUAL-RISK.md`
   Items 1–2, adds Flow D (Anthropic BYOK generation) and Flow F (diagnostics
   export) which were not previously documented as named data flows anywhere
   in the repo, and satisfies the outstanding compliance-documentation
