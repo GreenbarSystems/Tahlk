@@ -157,6 +157,30 @@ jobs:
           }
           "INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # softprops/action-gh-release creates the release via GitHub's REST API,
+      # which reads the tag through a different (eventually-consistent) path
+      # than the one the workflow's own "push: tags" trigger just used. When
+      # the release-create call lands before that read path catches up,
+      # GitHub silently falls back to a synthetic "untagged-<hash>" slug for
+      # the release URL — tag_name in the release object is still correct,
+      # but every link is ugly and confusing. Poll the ref API first so the
+      # create call only fires once the tag is genuinely visible there too.
+      - name: Wait for tag to be discoverable via API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          for i in $(seq 1 10); do
+            if gh api "repos/${{ github.repository }}/git/ref/tags/${{ github.ref_name }}" >/dev/null 2>&1; then
+              echo "Tag ${{ github.ref_name }} is discoverable via API."
+              exit 0
+            fi
+            echo "Tag not yet discoverable, retrying in 3s... ($i/10)"
+            sleep 3
+          done
+          echo "::error::Tag ${{ github.ref_name }} never became discoverable via API."
+          exit 1
+
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
