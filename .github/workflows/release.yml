@@ -157,41 +157,51 @@ jobs:
           }
           "INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # softprops/action-gh-release creates the release via GitHub's REST API,
-      # which reads the tag through a different (eventually-consistent) path
-      # than the one the workflow's own "push: tags" trigger just used. When
-      # the release-create call lands before that read path catches up,
-      # GitHub silently falls back to a synthetic "untagged-<hash>" slug for
-      # the release URL — tag_name in the release object is still correct,
-      # but every link is ugly and confusing. Poll the ref API first so the
-      # create call only fires once the tag is genuinely visible there too.
-      - name: Wait for tag to be discoverable via API
+      # softprops/action-gh-release has an internal read-after-write race:
+      # it creates the release object via the REST API, then immediately
+      # re-fetches "get release by tag" to attach the uploaded asset. That
+      # second read hits GitHub before the newly created release is fully
+      # associated with the tag, so it silently falls back to a synthetic
+      # "untagged-<hash>" slug for both the release URL and every asset
+      # download URL. tag_name in the release object is still correct, but
+      # every link is wrong. Waiting for the *tag* to be visible first
+      # (tried previously) doesn't help — the tag is already visible by
+      # this point; the race is on the *release* the action itself just
+      # created. `gh release create` doesn't have this bug (it creates and
+      # returns the canonical tag-based URL directly), so create the
+      # release and upload the asset with two plain `gh` calls instead.
+      - name: Create draft release and upload installer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
         shell: bash
         run: |
-          for i in $(seq 1 10); do
-            if gh api "repos/${{ github.repository }}/git/ref/tags/${{ github.ref_name }}" >/dev/null 2>&1; then
-              echo "Tag ${{ github.ref_name }} is discoverable via API."
-              exit 0
-            fi
-            echo "Tag not yet discoverable, retrying in 3s... ($i/10)"
-            sleep 3
-          done
-          echo "::error::Tag ${{ github.ref_name }} never became discoverable via API."
-          exit 1
+          set -euo pipefail
 
-      - name: Create draft release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: Tahlk ${{ github.ref_name }}
-          draft: true
-          prerelease: false
-          files: ${{ env.INSTALLER_PATH }}
-          body: |
-            Signed Windows installer for Tahlk ${{ github.ref_name }}.
+          notes_file="$(mktemp)"
+          {
+            echo "Signed Windows installer for Tahlk ${REF_NAME}."
+            echo
+            echo "**Before publishing:** run the clean-Windows-VM QA pass described in"
+            echo 'docs/RELEASE.md ("Final QA gate") -- record -> transcribe -> generate'
+            echo "note -> sign -> export -- then publish this draft."
+          } > "$notes_file"
 
-            **Before publishing:** run the clean-Windows-VM QA pass described in
-            docs/RELEASE.md ("Final QA gate") — record -> transcribe -> generate
-            note -> sign -> export — then publish this draft.
+          gh release create "$REF_NAME" \
+            --repo "${{ github.repository }}" \
+            --title "Tahlk $REF_NAME" \
+            --notes-file "$notes_file" \
+            --draft
+
+          gh release upload "$REF_NAME" "${{ env.INSTALLER_PATH }}" \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+          url="$(gh release view "$REF_NAME" --repo "${{ github.repository }}" --json url -q .url)"
+          echo "Release ready at $url"
+          case "$url" in
+            *untagged-*)
+              echo "::error::Release URL still has an untagged-<hash> slug: $url"
+              exit 1
+              ;;
+          esac
