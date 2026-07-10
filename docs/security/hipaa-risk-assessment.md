@@ -5,7 +5,7 @@
 the `tahlk-sync` Group-tier backend — are explicitly out of scope; that
 service is frozen per [ADR 0001](../adr/0001-freeze-group-tier-and-sync.md)
 and has zero validated demand or production deployment as of this writing).
-**As of commit:** `{next commit}`
+**As of commit:** `63ffbbc`
 **Prior source material this assessment consolidates:**
 - `tahlk-security-audit.md` — the original numbered finding set (C1–C2, H1–H6,
   M1–M10, L1–L5), referenced throughout the codebase (e.g. `notes.rs:334,336`,
@@ -290,7 +290,7 @@ This document should be re-reviewed:
   export) which were not previously documented as named data flows anywhere
   in the repo, and satisfies the outstanding compliance-documentation
   condition for `AUDIT-RESIDUAL-RISK.md` Item 1.
-- `{next commit}` — updated Flow D with the current real-world BAA status
+- `63ffbbc` — updated Flow D with the current real-world BAA status
   (Anthropic BAA application submitted, not yet confirmed executed) per the
   product owner. This is recorded as an open item, not resolved — re-update
   this section once the BAA is confirmed countersigned.
