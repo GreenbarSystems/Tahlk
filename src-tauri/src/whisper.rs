@@ -33,6 +33,25 @@ impl Drop for TxtCleanup {
     }
 }
 
+// Session audio lives on disk encrypted (`<id>.wav.enc`), but whisper.cpp only
+// reads plaintext `.wav`. transcribe_audio decrypts to a transient plaintext
+// `.wav` next to the encrypted file, points the sidecar at it, and MUST unlink
+// it afterward — otherwise decrypting for transcription would silently leave
+// plaintext PHI on disk, defeating the whole at-rest-encryption feature.
+//
+// Same RAII shape and rationale as TxtCleanup: `Drop` runs on the success
+// path, every error/early-return path, and panics alike. Errors from
+// `remove_file` are swallowed intentionally — the file may already be gone
+// (decrypt failed before write, disk unmount) and there is nothing sensible to
+// do at drop time. [audit: at-rest audio]
+struct WavCleanup(PathBuf);
+
+impl Drop for WavCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 // Redact a whisper.cpp stderr blob for surfacing through `AppError` /
 // telemetry. Raw stderr echoes absolute paths (appdata layout, home dir)
 // and, in some failure modes, the model file name — not PHI, but a
@@ -96,7 +115,32 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
         ));
     }
 
-    let output_base = audio_path.trim_end_matches(".wav").to_string();
+    // Session audio is encrypted at rest (`<id>.wav.enc`). whisper.cpp can't
+    // read ciphertext, so decrypt to a transient plaintext `.wav` inside the
+    // (already containment-checked) audio directory. The WavCleanup guard
+    // below unlinks it on EVERY exit path so plaintext PHI never lingers.
+    let key = crate::audio_crypto::audio_key()?;
+    let ciphertext = tokio::fs::read(&canon).await.map_err(AppError::storage_from)?;
+    let plaintext = crate::audio_crypto::decrypt(&key, &ciphertext)?;
+
+    // Unique temp name inside audio_dir so a decrypt can't collide with (or
+    // have its cleanup clobber) a concurrent one. Random suffix from getrandom.
+    let mut rand = [0u8; 8];
+    getrandom::getrandom(&mut rand).map_err(AppError::internal_from)?;
+    let suffix: String = rand.iter().map(|b| format!("{:02x}", b)).collect();
+    let temp_wav = audio_dir.join(format!("transcribe-{}.wav", suffix));
+    let temp_wav_str = temp_wav.to_string_lossy().into_owned();
+
+    tokio::fs::write(&temp_wav, &plaintext).await.map_err(AppError::storage_from)?;
+    // Guard registered immediately after the write so any early return past
+    // this point still unlinks the plaintext scratch file. [at-rest audio]
+    let _wav_cleanup = WavCleanup(temp_wav.clone());
+    // Defense-in-depth: clamp the transient plaintext to owner-only 0600 for
+    // the brief window it exists (same treatment as the encrypted file and the
+    // .txt scratch). No-op on Windows.
+    crate::perms::chmod_0600_unix(&temp_wav);
+
+    let output_base = temp_wav_str.trim_end_matches(".wav").to_string();
 
     let output = app
         .shell()
@@ -104,7 +148,7 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
         .map_err(AppError::internal_from)?
         .args([
             "-m", &model.to_string_lossy(),
-            "-f", &audio_path,
+            "-f", &temp_wav_str,
             "--output-txt",
             "--output-file", &output_base,
             "--language", "en",
@@ -213,5 +257,46 @@ mod tests {
         let path = dir.path().join("never_existed.txt");
         let _g = TxtCleanup(path.clone()); // dropped at end of test
         // No panic — test passes.
+    }
+
+    // WavCleanup unlinks the transient decrypted plaintext on scope exit —
+    // the guarantee that decrypting for transcription can't leak plaintext PHI.
+    #[test]
+    fn wav_cleanup_removes_file_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcribe-abcd.wav");
+        std::fs::write(&path, b"decrypted pcm").unwrap();
+        assert!(path.exists());
+        {
+            let _g = WavCleanup(path.clone());
+        } // Drop runs here.
+        assert!(!path.exists(), "WavCleanup should have removed the plaintext");
+    }
+
+    // Missing file must not panic — decrypt may fail before the temp write, so
+    // the guard can outlive a never-created file.
+    #[test]
+    fn wav_cleanup_ignores_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("never_written.wav");
+        let _g = WavCleanup(path.clone());
+        // No panic — test passes.
+    }
+
+    // The whole point of RAII: the plaintext is unlinked even when the scope
+    // exits via a panic (an error path in transcribe_audio unwinds through
+    // Drop). Catch the unwind and assert the file is gone.
+    #[test]
+    fn wav_cleanup_removes_file_on_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcribe-panic.wav");
+        std::fs::write(&path, b"decrypted pcm").unwrap();
+        let p = path.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _g = WavCleanup(p);
+            panic!("simulated error path after decrypt");
+        });
+        assert!(result.is_err(), "the closure should have panicked");
+        assert!(!path.exists(), "WavCleanup must unlink even on panic unwind");
     }
 }

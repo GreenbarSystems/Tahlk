@@ -56,6 +56,12 @@ parking_lot = "0.12"
 # via `keyring`/`ring`; naming it here keeps the dependency explicit.
 getrandom = "0.2"
 
+# AEAD + HKDF for at-rest session-audio encryption (audio_crypto.rs). `ring`
+# is already transitive via `keyring`; promoting it to a direct dependency
+# keeps the audio-encryption usage explicit and pins the version we build
+# against. We use `ring::aead` (AES-256-GCM) and `ring::hkdf` (SHA-256) only.
+ring = "0.17"
+
 # HTTP client for Anthropic API calls and Whisper model download.
 reqwest = { version = "0.12", features = ["json", "stream"] }
 # memchr: SIMD-accelerated byte search on x86_64/aarch64 with a scalar

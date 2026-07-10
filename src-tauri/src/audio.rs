@@ -25,6 +25,15 @@ pub(crate) const MAX_AUDIO_BYTES: usize = 512 * 1024 * 1024;
 /// avoids off-by-one rejection of borderline-legal inputs.
 pub(crate) const MAX_BASE64_LEN: usize = (MAX_AUDIO_BYTES / 3) * 4 + 8;
 
+/// On-disk filename for an encounter's encrypted session audio. Single source
+/// of truth so `save_session_audio` and `delete_session_audio` can never drift
+/// onto different extensions (a drift would make delete silently no-op and
+/// leave PHI ciphertext behind). Audio is stored AES-256-GCM encrypted, hence
+/// the `.wav.enc` suffix (see audio_crypto).
+pub(crate) fn enc_filename(encounter_id: &str) -> String {
+    format!("{}.wav.enc", encounter_id)
+}
+
 pub(crate) fn safe_id(id: &str) -> Result<(), AppError> {
     let ok = !id.is_empty()
         && id.len() <= 128
@@ -62,12 +71,20 @@ pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, bas
         .map_err(AppError::internal_from)?
         .join("audio");
     tokio::fs::create_dir_all(&audio_dir).await.map_err(AppError::storage_from)?;
-    let path = audio_dir.join(format!("{}.wav", encounter_id));
-    tokio::fs::write(&path, &data).await.map_err(AppError::storage_from)?;
+    // At-rest encryption (§164.312(a)(2)(iv)): encrypt the raw audio with the
+    // HKDF-derived audio key BEFORE it ever hits disk, and store it under a
+    // `.wav.enc` name so the extension advertises the on-disk format. The
+    // returned path (`.wav.enc`) is what gets persisted as `audio_path` and
+    // later handed to `transcribe_audio`, which decrypts to a transient temp
+    // file. delete_session_audio derives the same `.wav.enc` name.
+    let key = crate::audio_crypto::audio_key()?;
+    let ciphertext = crate::audio_crypto::encrypt(&key, &data)?;
+    let path = audio_dir.join(enc_filename(&encounter_id));
+    tokio::fs::write(&path, &ciphertext).await.map_err(AppError::storage_from)?;
     // M1: `tokio::fs::write` (like `File::create`) leaves the file at the
     // process umask default — typically 0644 on Unix, which lets any other
-    // local user read raw PHI audio. Clamp to owner-only 0600. No-op on
-    // Windows (see perms.rs).
+    // local user read the ciphertext. Clamp to owner-only 0600 (defense in
+    // depth on top of the encryption). No-op on Windows (see perms.rs).
     crate::perms::chmod_0600_unix(&path);
     Ok(path.to_string_lossy().into_owned())
 }
@@ -84,7 +101,10 @@ pub(crate) async fn delete_session_audio(app: AppHandle, encounter_id: String) -
         .app_data_dir()
         .map_err(AppError::internal_from)?
         .join("audio")
-        .join(format!("{}.wav", encounter_id));
+        // Audio is stored encrypted as `<id>.wav.enc` (see save_session_audio).
+        // Delete MUST target the same extension or it would silently no-op and
+        // leave PHI ciphertext on disk after a purge.
+        .join(enc_filename(&encounter_id));
     match tokio::fs::remove_file(&path).await {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -106,6 +126,18 @@ mod tests {
         assert!(super::safe_id("a\\b").is_err());
         assert!(super::safe_id("C:evil").is_err());
         assert!(super::safe_id("").is_err());
+    }
+
+    // save and delete both derive the on-disk name from enc_filename, so this
+    // pins the `.wav.enc` contract they share. If a future edit changed the
+    // extension on one path only, delete would silently no-op and leave PHI
+    // ciphertext behind — this test fails loudly instead.
+    #[test]
+    fn enc_filename_uses_wav_enc_suffix() {
+        assert_eq!(super::enc_filename("enc-1"), "enc-1.wav.enc");
+        assert!(super::enc_filename("enc_abc").ends_with(".wav.enc"));
+        // Never the bare .wav that the pre-encryption code used.
+        assert!(!super::enc_filename("x").ends_with(".wav"));
     }
 
     #[test]

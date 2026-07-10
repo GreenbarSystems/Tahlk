@@ -10,6 +10,7 @@
 //!   - `note_history`  — relational note-history append-log + KV→table migration.
 //!   - `llm_audit`     — append-only log of Anthropic calls (metadata only, no PHI).
 //!   - `audio`         — session audio save/delete with path-traversal hardening.
+//!   - `audio_crypto`  — AES-256-GCM at-rest encryption for session audio + migration.
 //!   - `whisper`       — local whisper.cpp sidecar transcription.
 //!   - `notes`         — Anthropic streaming note generation (BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
@@ -21,6 +22,7 @@
 use tauri::Manager;
 
 mod audio;
+mod audio_crypto;
 mod baa;
 mod db;
 mod db_key;
@@ -82,6 +84,28 @@ pub fn run() {
                 log::error!("failed to open encrypted SQLite database: {e}");
                 panic!("failed to open encrypted SQLite database: {e}");
             });
+
+            // One-shot at-rest audio migration: encrypt any legacy plaintext
+            // `<id>.wav` files and rewrite their DB paths to `<id>.wav.enc`.
+            // Best-effort — a migration hiccup is logged but must not block
+            // launch (the DB is already open and the app is usable; a lingering
+            // plaintext is a leak we surface in the log, not a hard failure).
+            // Runs before we hand the pool to state so it borrows the pool
+            // directly. Idempotent/resumable — see audio_crypto.
+            match (|| -> Result<usize, errors::AppError> {
+                let conn = pool.get()?;
+                let audio_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(errors::AppError::internal_from)?
+                    .join("audio");
+                let key = audio_crypto::audio_key()?;
+                audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)
+            })() {
+                Ok(_) => {}
+                Err(e) => log::error!("audio at-rest migration skipped: {e}"),
+            }
+
             app.manage(db::new_state(pool));
             Ok(())
         })
