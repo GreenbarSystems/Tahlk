@@ -5,8 +5,8 @@ name: Build and release
 # The release is created in DRAFT state — a human runs the clean-Windows-VM
 # QA pass (docs/RELEASE.md, "Final QA gate": record -> transcribe -> generate
 # note -> sign -> export) and publishes the draft only once that passes.
-# Signing uses Azure Trusted Signing (account "ryanmoore-codesign", profile
-# "default") via `trusted-signing-cli`, wired through Tauri's signCommand in
+# Signing uses Azure Artifact Signing (account "ryanmoore-codesign", profile
+# "default") via `artifact-signing-cli`, wired through Tauri's signCommand in
 # src-tauri/tauri.release.conf.json (see docs/RELEASE.md "Drop-in B").
 
 on:
@@ -103,8 +103,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
           Invoke-WebRequest -Uri 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin' -OutFile src-tauri/resources/ggml-base.en.bin
 
-      - name: Install trusted-signing-cli
-        run: cargo install trusted-signing-cli --locked
+      # trusted-signing-cli is deprecated in favor of artifact-signing-cli
+      # (same maintainer/repo, same flags) following Microsoft's Trusted
+      # Signing -> Artifact Signing rebrand; the RBAC role Azure now assigns
+      # is "Artifact Signing Certificate Profile Signer", which the old tool
+      # doesn't call the right API surface for.
+      - name: Install artifact-signing-cli
+        run: cargo install artifact-signing-cli --locked
 
       # Self-test the signing binary before the real build — catches a
       # broken install or a Mark-of-the-Web block while it's still cheap to
@@ -112,15 +117,15 @@ jobs:
       - name: Self-test signing binary
         shell: pwsh
         run: |
-          $cli = (Get-Command trusted-signing-cli).Source
+          $cli = (Get-Command artifact-signing-cli).Source
           Unblock-File -Path $cli -ErrorAction SilentlyContinue
-          & trusted-signing-cli --help
+          & artifact-signing-cli --help
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::trusted-signing-cli --help exited $LASTEXITCODE - signing binary is broken."
+            Write-Host "::error::artifact-signing-cli --help exited $LASTEXITCODE - signing binary is broken."
             exit 1
           }
 
-      # --verbose surfaces the real trusted-signing-cli error inline instead
+      # --verbose surfaces the real artifact-signing-cli error inline instead
       # of Tauri's generic "failed to run signing command" wrapper.
       - name: Build and sign installer
         shell: pwsh

@@ -1,7 +1,7 @@
 {
   "bundle": {
     "windows": {
-      "signCommand": "trusted-signing-cli -e https://eus.codesigning.azure.net -a ryanmoore-codesign -c default %1",
+      "signCommand": "artifact-signing-cli -e https://eus.codesigning.azure.net -a ryanmoore-codesign -c default %1",
       "timestampUrl": "http://timestamp.acs.microsoft.com"
     }
   }

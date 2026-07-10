@@ -44,17 +44,26 @@ Add the thumbprint to `tauri.conf.json` → `bundle.windows`:
 Get the thumbprint: `Get-ChildItem Cert:\CurrentUser\My | Select Thumbprint, Subject`.
 That's the entire change — rebuild and the installer is signed + timestamped.
 
-## Drop-in B — EV hardware token or cloud signing (Azure Trusted Signing)
+## Drop-in B — EV hardware token or cloud signing (Azure Artifact Signing)
 
 The private key isn't exportable, so use a custom `signCommand` instead of a
-thumbprint (Tauri ≥ 2.1). Example (Azure Trusted Signing via `trusted-signing-cli`):
+thumbprint (Tauri ≥ 2.1). Example (Azure Artifact Signing, formerly "Trusted
+Signing," via `artifact-signing-cli`):
 
 ```json
 "windows": {
-  "signCommand": "trusted-signing-cli -e https://eus.codesigning.azure.net -a <account> -c <profile> %1",
+  "signCommand": "artifact-signing-cli -e https://eus.codesigning.azure.net -a <account> -c <profile> %1",
   "timestampUrl": "http://timestamp.acs.microsoft.com"
 }
 ```
+
+> **Naming note:** Microsoft renamed the service from "Trusted Signing" to
+> "Artifact Signing." The RBAC role is now **"Artifact Signing Certificate
+> Profile Signer"** and the CLI tool is `artifact-signing-cli` (same
+> maintainer/repo as the older `trusted-signing-cli`, which is deprecated but
+> still calls the old API surface — using it against an account whose role
+> was assigned under the new name will 403 even with a correct role
+> assignment). Use `artifact-signing-cli`.
 
 `%1` is the file to sign. For a SafeNet/USB token, point `signCommand` at
 `signtool` with the token CSP and supply the PIN via the token's keystore.
@@ -70,7 +79,7 @@ thumbprint (Tauri ≥ 2.1). Example (Azure Trusted Signing via `trusted-signing-
 3. Downloads the whisper.cpp sidecar/DLLs and the `ggml-base.en.bin` model
    from the same public URLs a developer uses locally (see SETUP.md) — these
    still aren't hosted anywhere else, so CI fetches them fresh on every run.
-4. Installs `trusted-signing-cli`, self-tests it (`--help` + exit code),
+4. Installs `artifact-signing-cli`, self-tests it (`--help` + exit code),
    then builds with `--config src-tauri/tauri.release.conf.json` (Drop-in B
    above) and `--verbose` so a real signing failure surfaces inline.
 5. Independently verifies the Authenticode signature on the produced
@@ -80,7 +89,7 @@ thumbprint (Tauri ≥ 2.1). Example (Azure Trusted Signing via `trusted-signing-
    human runs the clean-Windows-VM QA pass below and publishes the draft
    manually — nothing auto-publishes.
 
-The Trusted Signing resource is `ryanmoore-codesign` / profile `default`,
+The Artifact Signing resource is `ryanmoore-codesign` / profile `default`,
 authenticated via the `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` /
 `AZURE_CLIENT_SECRET` / `AZURE_SUBSCRIPTION_ID` repo secrets — never in the repo.
 
