@@ -131,6 +131,7 @@ export function renderEncounterPanel(encounter) {
                   </select>
                   <button class="btn btn-secondary btn-sm" id="btn-copy" ${!draft ? 'disabled' : ''}>Copy</button>
                   <button class="btn btn-secondary btn-sm" id="btn-save-file" ${!draft ? 'disabled' : ''}>Save File</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-save-pdf" ${!draft ? 'disabled' : ''}>Save as PDF</button>
                 </div>
               ` : `
                 <div class="signed-export-row">
@@ -141,6 +142,7 @@ export function renderEncounterPanel(encounter) {
                     </select>
                     <button class="btn btn-secondary btn-sm" id="btn-copy">Copy</button>
                     <button class="btn btn-secondary btn-sm" id="btn-save-file">Save File</button>
+                    <button class="btn btn-secondary btn-sm" id="btn-save-pdf">Save as PDF</button>
                     ${encounter.audio_path
                       ? '<button class="btn btn-ghost btn-danger btn-sm" id="btn-purge-audio" title="Delete the recorded audio from this device">Delete Audio</button>'
                       : ''}

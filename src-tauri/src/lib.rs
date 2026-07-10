@@ -115,6 +115,7 @@ pub fn run() {
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,
+            export::export_note_pdf_to_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

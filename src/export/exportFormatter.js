@@ -64,10 +64,10 @@ export async function copyToClipboard(text, encounterId, format) {
 // it may contain a real name, and filenames leak via listings, backups, and
 // recent-files. The encounter id is a non-PHI slug; identification lives in the
 // note content, not the filename.
-export function exportFilename(encounter) {
+export function exportFilename(encounter, ext = 'txt') {
   const date = (encounter.encounter_date || '').slice(0, 10).replace(/-/g, '');
   const id = String(encounter.id || '').replace(/[^A-Za-z0-9_-]/g, '');
-  return `note_${date || 'undated'}_${id || 'note'}.txt`;
+  return `note_${date || 'undated'}_${id || 'note'}.${ext}`;
 }
 
 // Save to a .txt file via the native save dialog.
