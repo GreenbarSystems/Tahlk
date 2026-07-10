@@ -13,6 +13,7 @@ import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
 import { renderEncounterPanel, wireEncounterPanel } from './solo/encounter/index.js';
 import { renderSettings, wireSettings } from './solo/settingsModal.js';
 import { renderTemplatesView } from './solo/templatesView.js';
+import { renderPatientsView, wirePatientsView } from './solo/patientsView.js';
 
 let _currentTab = 'sessions';
 let _openEncounter = null;
@@ -111,6 +112,9 @@ async function renderMainContent() {
       _openEncounter = encounter;
       renderMainContent();
     });
+  } else if (_currentTab === 'patients') {
+    main.innerHTML = await renderPatientsView();
+    wirePatientsView(() => renderMainContent());
   } else if (_currentTab === 'templates') {
     main.innerHTML = renderTemplatesView();
   } else if (_currentTab === 'settings') {

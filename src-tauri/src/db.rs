@@ -57,6 +57,22 @@ pub(crate) fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value
     }))
 }
 
+// Column order shared by list_patients and get_patient. Same rationale as
+// ENCOUNTER_COLS: keeping the SELECT list identical between the two paths lets
+// patient_row_to_json be reused without positional drift.
+pub(crate) const PATIENT_COLS: &str = "id, alias, dob, notes, created_at, updated_at";
+
+pub(crate) fn patient_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id":         r.get::<_, String>(0)?,
+        "alias":      r.get::<_, String>(1)?,
+        "dob":        r.get::<_, Option<String>>(2)?,
+        "notes":      r.get::<_, Option<String>>(3)?,
+        "created_at": r.get::<_, String>(4)?,
+        "updated_at": r.get::<_, String>(5)?,
+    }))
+}
+
 // Per-connection PRAGMAs. Applied by the pool's `KeyingCustomizer` on EVERY
 // fresh connection, right after the SQLCipher key. journal_mode/synchronous/
 // foreign_keys/cache_size/temp_store/mmap_size are connection-scoped in
@@ -134,6 +150,17 @@ const SCHEMA_TABLES: &str = "
     CREATE INDEX IF NOT EXISTS enc_date_idx ON encounters (encounter_date DESC);
     CREATE INDEX IF NOT EXISTS enc_status_idx ON encounters (status);
     CREATE INDEX IF NOT EXISTS enc_created_idx ON encounters (created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS patients (
+        id         TEXT PRIMARY KEY,
+        alias      TEXT NOT NULL,
+        dob        TEXT,
+        notes      TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS pt_alias_idx ON patients (alias);
+    CREATE INDEX IF NOT EXISTS pt_updated_idx ON patients (updated_at DESC);
 ";
 
 /// r2d2 connection customizer that runs on every fresh SQLite connection the

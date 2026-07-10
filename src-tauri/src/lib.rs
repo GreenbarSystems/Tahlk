@@ -32,6 +32,7 @@ mod kv_ops;
 mod llm_audit;
 mod note_history;
 mod notes;
+mod patients;
 mod perms;
 mod secrets;
 mod whisper;
@@ -105,6 +106,10 @@ pub fn run() {
             audio::save_session_audio,
             audio::delete_session_audio,
             encounters::clear_encounter_audio_path,
+            patients::list_patients,
+            patients::get_patient,
+            patients::upsert_patient,
+            patients::delete_patient,
             note_history::note_history_list,
             note_history::note_history_append,
             whisper::transcribe_audio,

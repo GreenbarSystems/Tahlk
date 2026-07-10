@@ -1,10 +1,11 @@
-// Top nav bar — Sessions | Templates | Settings
+// Top nav bar — Sessions | Patients | Templates | Settings
 
 import { LOGO_SVG } from './logoSvg.js';
 
 export function renderHeader(activeTab) {
   const tabs = [
-    { id: 'sessions',  label: 'Sessions' },
+    { id: 'sessions',  label: 'Sessions'  },
+    { id: 'patients',  label: 'Patients'  },
     { id: 'templates', label: 'Templates' },
     { id: 'settings',  label: 'Settings'  },
   ];
