@@ -1,0 +1,167 @@
+name: Build and release
+
+# Tag-triggered release for the signed Windows installer.
+#
+# The release is created in DRAFT state — a human runs the clean-Windows-VM
+# QA pass (docs/RELEASE.md, "Final QA gate": record -> transcribe -> generate
+# note -> sign -> export) and publishes the draft only once that passes.
+# Signing uses Azure Trusted Signing (account "ryanmoore-codesign", profile
+# "default") via `trusted-signing-cli`, wired through Tauri's signCommand in
+# src-tauri/tauri.release.conf.json (see docs/RELEASE.md "Drop-in B").
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail fast — before paying for Node/Rust install and the Tauri
+      # compile — on a malformed signing secret. A stray whitespace
+      # character pasted into a secret is the failure mode that cost the
+      # most debugging time historically, so it's checked explicitly here
+      # rather than surfacing as an opaque `trusted-signing-cli` auth error
+      # 10 minutes into the build.
+      - name: Validate Azure signing secrets
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          $failures = @()
+
+          foreach ($name in @('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_SUBSCRIPTION_ID')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              $failures += "$name is missing or empty."
+            } elseif ($value -notmatch $guidPattern) {
+              $failures += "$name is not a well-formed GUID (check for stray whitespace or a copy-paste error)."
+            }
+          }
+
+          $clientSecret = $env:AZURE_CLIENT_SECRET
+          if ([string]::IsNullOrWhiteSpace($clientSecret)) {
+            $failures += "AZURE_CLIENT_SECRET is missing or empty."
+          } elseif ($clientSecret -ne $clientSecret.Trim()) {
+            $failures += "AZURE_CLIENT_SECRET has leading/trailing whitespace - re-save it as a single trimmed value."
+          }
+
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Host "::error::$_" }
+            exit 1
+          }
+          Write-Host "Azure signing secrets look well-formed."
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lock gates (test:build + test:js)
+        run: |
+          npm run test:build
+          npm run test:js
+
+      # The whisper sidecar, its DLLs, and the model are gitignored (see
+      # SETUP.md) and not hosted anywhere else yet — CI fetches the same
+      # public releases a developer would grab by hand.
+      - name: Download whisper.cpp sidecar + DLLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip' -OutFile whisper-bin-x64.zip
+          Expand-Archive -Path whisper-bin-x64.zip -DestinationPath whisper-extracted
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Copy-Item whisper-extracted/Release/whisper-cli.exe src-tauri/binaries/whisper-cpp-x86_64-pc-windows-msvc.exe
+          Copy-Item whisper-extracted/Release/*.dll src-tauri/binaries/
+
+      - name: Download Whisper base.en model
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+          Invoke-WebRequest -Uri 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin' -OutFile src-tauri/resources/ggml-base.en.bin
+
+      - name: Install trusted-signing-cli
+        run: cargo install trusted-signing-cli --locked
+
+      # Self-test the signing binary before the real build — catches a
+      # broken install or a Mark-of-the-Web block while it's still cheap to
+      # fail, instead of discovering it after a 10+ minute Rust compile.
+      - name: Self-test signing binary
+        shell: pwsh
+        run: |
+          $cli = (Get-Command trusted-signing-cli).Source
+          Unblock-File -Path $cli -ErrorAction SilentlyContinue
+          & trusted-signing-cli --help
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::trusted-signing-cli --help exited $LASTEXITCODE - signing binary is broken."
+            exit 1
+          }
+
+      # --verbose surfaces the real trusted-signing-cli error inline instead
+      # of Tauri's generic "failed to run signing command" wrapper.
+      - name: Build and sign installer
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          npm run tauri -- build --bundles nsis --config src-tauri/tauri.release.conf.json --verbose
+
+      # Never trust the build-log claim alone — independently confirm the
+      # Authenticode signature is present and valid on the actual artifact
+      # before it's attached to a release.
+      - name: Verify Authenticode signature
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) {
+            Write-Host "::error::No installer found in bundle/nsis output."
+            exit 1
+          }
+          $sig = Get-AuthenticodeSignature -FilePath $installer.FullName
+          Write-Host "Signature status: $($sig.Status)"
+          Write-Host "Signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') {
+            Write-Host "::error::Installer is not validly signed (status: $($sig.Status))."
+            exit 1
+          }
+          "INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Tahlk ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          files: ${{ env.INSTALLER_PATH }}
+          body: |
+            Signed Windows installer for Tahlk ${{ github.ref_name }}.
+
+            **Before publishing:** run the clean-Windows-VM QA pass described in
+            docs/RELEASE.md ("Final QA gate") — record -> transcribe -> generate
+            note -> sign -> export — then publish this draft.

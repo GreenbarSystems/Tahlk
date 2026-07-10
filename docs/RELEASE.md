@@ -2,7 +2,9 @@
 
 How to produce a distributable Tahlk installer. The bundling (sidecar exe + 12
 whisper DLLs + 144 MB model, co-located at the resource root) is done and
-verified. **Code signing is the remaining GA gate** and needs a certificate.
+verified. Code signing infrastructure (Azure Trusted Signing account +
+`release.yml`, below) is wired up — **the remaining GA gate is running the
+first signed build and the clean-VM QA pass**, not acquiring a certificate.
 
 ## Build the installer
 
@@ -57,37 +59,36 @@ thumbprint (Tauri ≥ 2.1). Example (Azure Trusted Signing via `trusted-signing-
 `%1` is the file to sign. For a SafeNet/USB token, point `signCommand` at
 `signtool` with the token CSP and supply the PIN via the token's keystore.
 
-## CI-signed releases (recommended, reproducible)
+## CI-signed releases
 
-Add a tag-triggered release job that imports the cert from a secret. Sketch:
+`.github/workflows/release.yml` is a tag-triggered (`v*`) Windows build that:
 
-```yaml
-on: { push: { tags: ['v*'] } }
-jobs:
-  release:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      # import PFX from a base64 secret into the store, then set the thumbprint
-      # env TAURI_SIGNING ... (or write certificateThumbprint), then:
-      - run: npm ci && npm run tauri -- build --bundles nsis
-      # upload Tahlk_*_x64-setup.exe as a release asset
-```
+1. Validates the four `AZURE_*` signing secrets (GUID format + whitespace
+   check) before installing any toolchain, so a bad secret fails in seconds
+   instead of after a 10+ minute Rust compile.
+2. Runs the same lock gates as `ci.yml` (`test:build`, `test:js`).
+3. Downloads the whisper.cpp sidecar/DLLs and the `ggml-base.en.bin` model
+   from the same public URLs a developer uses locally (see SETUP.md) — these
+   still aren't hosted anywhere else, so CI fetches them fresh on every run.
+4. Installs `trusted-signing-cli`, self-tests it (`--help` + exit code),
+   then builds with `--config src-tauri/tauri.release.conf.json` (Drop-in B
+   above) and `--verbose` so a real signing failure surfaces inline.
+5. Independently verifies the Authenticode signature on the produced
+   installer via `Get-AuthenticodeSignature` — never trusts the build log's
+   claim alone.
+6. Opens a **draft** GitHub Release with the signed installer attached. A
+   human runs the clean-Windows-VM QA pass below and publishes the draft
+   manually — nothing auto-publishes.
 
-Store the cert as a GitHub Actions secret (base64 PFX + password), never in the
-repo. The desktop build still needs the sidecar/DLLs/model present — see SETUP.md.
+The Trusted Signing resource is `ryanmoore-codesign` / profile `default`,
+authenticated via the `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` /
+`AZURE_CLIENT_SECRET` / `AZURE_SUBSCRIPTION_ID` repo secrets — never in the repo.
 
-**Why this workflow isn't committed yet (deliberate).** A committed
-`release.yml` would today be aspirational scaffolding referencing things that
-don't exist: (1) no code-signing certificate has been acquired, so it could
-only ever produce an *unsigned* installer clinicians' machines will SmartScreen-
-block; and (2) the whisper sidecar, 12 DLLs, and 142 MB model are gitignored and
-**not hosted anywhere CI can fetch them** (see SETUP.md) — so CI cannot bundle a
-working installer. `ci.yml`'s desktop job stubs them with zero-byte files for
-`cargo check` only. The workflow becomes worth committing the moment those two
-preconditions are met (cert in a secret + an artifact source for the whisper
-files); until then the manual `npm run tauri -- build` above is the release path
-and the sketch above is the template to lift.
+**Known gaps, tracked as follow-ups, not blockers:** the whisper artifacts are
+re-downloaded from public URLs on every release run rather than pinned to
+internal storage (fine for now — they're static upstream releases — but worth
+mirroring if `ggml-org/whisper.cpp` or the HuggingFace model URL ever moves).
+macOS is not built here yet (see below).
 
 ## Getting fixes to clinicians (updates)
 
