@@ -153,3 +153,27 @@ Install the produced `.exe` on a **clean Windows VM** (no dev tools, no whisper
 libs on PATH) and run record → transcribe → generate → sign → export. This is
 the only check that proves the sidecar resolves its DLLs and finds the model
 *as installed* — bundle-layout verification is necessary but not sufficient.
+
+## Draft release shows an "untagged-<hash>" URL — this is expected
+
+The draft release the workflow creates will show a URL like
+`.../releases/tag/untagged-a1b2c3d4e5f6` in its address bar, and the asset
+download link will use the same slug. **This is normal GitHub behavior, not
+a bug** — GitHub only associates a release with its git tag in URL routing
+once the release is *published*. A draft, no matter how it was created (web
+UI, `gh release create`, or any Actions release library) or how long you wait
+after the tag push, always reports an `untagged-<hash>` slug while in draft
+state. `tag_name` inside the release object is correct the whole time; only
+the display URL is affected.
+
+The moment you click **Publish release** (or run
+`gh release edit <tag> --draft=false`), the URL and every asset link snap to
+the clean `/releases/tag/vX.Y.Z` form immediately — no extra step needed.
+
+Do not spend time trying to "fix" this in the workflow again — it was
+investigated in depth (see the `Create draft release and upload installer`
+step in `.github/workflows/release.yml` and the git history on that file
+around 2026-07-10): waiting for tag discoverability and swapping
+`softprops/action-gh-release` for plain `gh` CLI calls were both tried and
+neither changes this, because the cause is draft state, not a timing race
+or a specific tool's bug.

@@ -157,19 +157,19 @@ jobs:
           }
           "INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # softprops/action-gh-release has an internal read-after-write race:
-      # it creates the release object via the REST API, then immediately
-      # re-fetches "get release by tag" to attach the uploaded asset. That
-      # second read hits GitHub before the newly created release is fully
-      # associated with the tag, so it silently falls back to a synthetic
-      # "untagged-<hash>" slug for both the release URL and every asset
-      # download URL. tag_name in the release object is still correct, but
-      # every link is wrong. Waiting for the *tag* to be visible first
-      # (tried previously) doesn't help — the tag is already visible by
-      # this point; the race is on the *release* the action itself just
-      # created. `gh release create` doesn't have this bug (it creates and
-      # returns the canonical tag-based URL directly), so create the
-      # release and upload the asset with two plain `gh` calls instead.
+      # NOTE on the "untagged-<hash>" URL: this is not a CI race and cannot
+      # be fixed by waiting or by swapping tools (tried both -- see git log
+      # on this file). It's plain GitHub platform behavior: a *draft*
+      # release is never associated with its tag in GitHub's URL routing --
+      # only a *published* release gets the clean /releases/tag/vX.Y.Z
+      # slug. `gh release view`/`gh api` on a draft will always report
+      # "untagged-<random-hash>" for its url and asset download links, no
+      # matter how long you wait after the tag push. Confirmed by toggling
+      # draft on/off on this exact release: publishing snapped the URL to
+      # /releases/tag/v0.1.0 immediately; re-drafting reverted it to a new
+      # untagged-<hash> just as fast. See docs/RELEASE.md for the pointer
+      # so this doesn't get "fixed" again. tag_name inside the release
+      # object is correct throughout -- only the URL slug is affected.
       - name: Create draft release and upload installer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,6 +185,11 @@ jobs:
             echo "**Before publishing:** run the clean-Windows-VM QA pass described in"
             echo 'docs/RELEASE.md ("Final QA gate") -- record -> transcribe -> generate'
             echo "note -> sign -> export -- then publish this draft."
+            echo
+            echo "Note: this draft's URL will show an untagged-<hash> slug in the"
+            echo "address bar and in the asset download link -- that is expected for"
+            echo "any draft release and resolves to the clean v${REF_NAME#v} URL the"
+            echo "moment this is published. See docs/RELEASE.md."
           } > "$notes_file"
 
           gh release create "$REF_NAME" \
@@ -198,10 +203,4 @@ jobs:
             --clobber
 
           url="$(gh release view "$REF_NAME" --repo "${{ github.repository }}" --json url -q .url)"
-          echo "Release ready at $url"
-          case "$url" in
-            *untagged-*)
-              echo "::error::Release URL still has an untagged-<hash> slug: $url"
-              exit 1
-              ;;
-          esac
+          echo "Draft release ready at $url (will become releases/tag/$REF_NAME once published)"
