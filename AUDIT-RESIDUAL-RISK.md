@@ -75,9 +75,9 @@ Run through this before every production release. Each item should be checked by
 
 - [x] Export dialog / UI copy for `export_note_to_file` (.txt) states exported files are unencrypted and the provider's responsibility to secure — shipped `a607490`
 - [x] Export dialog / UI copy for `export_note_pdf_to_file` (.pdf) states the same — shipped `a607490` (same disclosure line covers both buttons)
-- [ ] Diagnostics log export (`telemetry.js`'s `exportLog()`, which also routes through `export_note_to_file`) is covered by the same disclosure — confirm no separate/missing copy path was introduced
+- [x] Diagnostics log export (`telemetry.js`'s `exportLog()`, which also routes through `export_note_to_file`) has its own disclosure — shipped `404bd82`. **Deliberately narrower copy, not a copy-paste of the note-export line**: verified the diagnostics log content is non-PHI by design (`scrubProps()`'s number/boolean/6-key allowlist; `recordError()`'s two PHI-adjacent call sites in `transcriber.js`/`noteGenerator.js` both flow through Rust `AppError` paths already redacted — `redact_whisper_stderr`, and `notes.rs`'s `UpstreamApi` which never carries the response body or request content), so the tooltip + helper text on "Export Log" in Settings state the *file* is unencrypted without implying it holds patient data — which would otherwise contradict the "No patient data...are ever recorded" copy one paragraph above it
 - [ ] Current HIPAA risk assessment / compliance documentation names unencrypted provider-directed export as a known, accepted data flow
-- [ ] No new export command was added since the last release without the same disclosure treatment (`grep -n "export_note\|fs::write" src-tauri/src/export.rs` — confirm exactly the 2 known commands, no silent third path)
+- [x] No new export command was added since the last release without the same disclosure treatment (`grep -n "export_note\|fs::write" src-tauri/src/export.rs` — confirmed exactly the 2 known commands, no silent third path, as of `404bd82`)
 
 ### Transcript/audio scratch-file window (Item 2)
 
