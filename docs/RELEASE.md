@@ -89,7 +89,7 @@ Signing," via `artifact-signing-cli`):
    human runs the clean-Windows-VM QA pass below and publishes the draft
    manually — nothing auto-publishes.
 
-The Artifact Signing resource is `ryanmoore-codesign` / profile `default`,
+The Artifact Signing resource is `ryanmoore-codesign` / profile `greenbar-public-signing`,
 authenticated via the `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` /
 `AZURE_CLIENT_SECRET` / `AZURE_SUBSCRIPTION_ID` repo secrets — never in the repo.
 

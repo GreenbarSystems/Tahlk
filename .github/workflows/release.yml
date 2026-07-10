@@ -6,8 +6,9 @@ name: Build and release
 # QA pass (docs/RELEASE.md, "Final QA gate": record -> transcribe -> generate
 # note -> sign -> export) and publishes the draft only once that passes.
 # Signing uses Azure Artifact Signing (account "ryanmoore-codesign", profile
-# "default") via `artifact-signing-cli`, wired through Tauri's signCommand in
-# src-tauri/tauri.release.conf.json (see docs/RELEASE.md "Drop-in B").
+# "greenbar-public-signing") via `artifact-signing-cli`, wired through Tauri's
+# signCommand in src-tauri/tauri.release.conf.json (see docs/RELEASE.md
+# "Drop-in B").
 
 on:
   push:
