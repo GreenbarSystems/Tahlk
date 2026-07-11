@@ -4,6 +4,7 @@
 import { kvGet, kvSet, kvList } from '../core/storageBackend.js';
 import { genId } from '../utils/format.js';
 import { specialtyFamily } from '../domain/specialties.js';
+import { keys } from '../data/keys.js';
 
 import psychEval        from './data/psych-eval.json'          with { type: 'json' };
 import medMgmt         from './data/med-mgmt.json'            with { type: 'json' };
@@ -28,7 +29,7 @@ const BUILT_IN_MAP = new Map(BUILT_IN.map(t => [t.id, t]));
 // Returns a template by id — built-in first, then custom.
 export function getTemplate(id) {
   if (BUILT_IN_MAP.has(id)) return BUILT_IN_MAP.get(id);
-  const key = `note_templates_v1::${id}`;
+  const key = keys.customTemplate(id);
   return kvGet(key) || null;
 }
 
@@ -55,7 +56,7 @@ function templateRank(t, providerSpecialty) {
 // templates stay reachable at the bottom. The sort is stable, preserving the
 // authored order within each rank.
 export function listTemplates(providerSpecialty) {
-  const custom = kvList('note_templates_v1::').map(key => kvGet(key)).filter(Boolean);
+  const custom = kvList(keys.customTemplate('')).map(key => kvGet(key)).filter(Boolean);
   const all = [...BUILT_IN, ...custom];
   if (!providerSpecialty) return all;
   return all
@@ -83,12 +84,12 @@ export function defaultTemplateId(providerSpecialty) {
 export function saveTemplate(template) {
   const id = template.id || genId('tmpl');
   const t = { ...template, id, custom: true };
-  kvSet(`note_templates_v1::${id}`, t);
+  kvSet(keys.customTemplate(id), t);
   return t;
 }
 
 // Delete a custom template (built-ins cannot be deleted).
 export function deleteTemplate(id) {
   if (BUILT_IN_MAP.has(id)) throw new Error('Cannot delete built-in templates');
-  kvSet(`note_templates_v1::${id}`, null);
+  kvSet(keys.customTemplate(id), null);
 }
