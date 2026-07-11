@@ -23,12 +23,26 @@ pub(crate) async fn export_note_to_file(
     content: String,
     suggested_name: String,
 ) -> Result<(), AppError> {
-    let path = app
-        .dialog()
-        .file()
-        .set_file_name(&suggested_name)
-        .add_filter("Text", &["txt"])
-        .blocking_save_file();
+    // L8: blocking_save_file() parks the calling thread on a sync_channel
+    // recv() until the user closes the native Save dialog — the dialog
+    // plugin's own doc comment says this "should NOT be used when running
+    // on the main thread." A Tauri async command runs on a Tokio worker
+    // thread, not the main thread, but blocking that worker thread for
+    // however long the user takes to pick a location still starves the
+    // async runtime's thread pool of a worker for the whole dialog lifetime
+    // (seconds to indefinitely, if the user walks away). spawn_blocking
+    // moves the blocking call onto Tokio's dedicated blocking-thread pool,
+    // which exists exactly for this kind of call and doesn't starve the
+    // async worker threads.
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(&suggested_name)
+            .add_filter("Text", &["txt"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(AppError::storage_from)?;
 
     match path {
         Some(p) => {
@@ -55,12 +69,16 @@ pub(crate) async fn export_note_pdf_to_file(
         .decode(data_base64.as_bytes())
         .map_err(|e| AppError::invalid(format!("malformed base64 PDF payload: {}", e)))?;
 
-    let path = app
-        .dialog()
-        .file()
-        .set_file_name(&suggested_name)
-        .add_filter("PDF", &["pdf"])
-        .blocking_save_file();
+    // L8: see export_note_to_file's comment — same spawn_blocking rationale.
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(&suggested_name)
+            .add_filter("PDF", &["pdf"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(AppError::storage_from)?;
 
     match path {
         Some(p) => {
