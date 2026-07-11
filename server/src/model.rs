@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // encrypted object in object storage — and `updated_at` is a server-assigned
 // clock used for last-writer-wins sync. Unknown fields (e.g. the client's
 // `audio_path`) are ignored; every field defaults so partial payloads decode.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Encounter {
     #[serde(default)]
     pub id: String,
@@ -32,7 +32,7 @@ pub struct Encounter {
 // Append-only audit / hash-chain entry. The server stamps `received_at`; the
 // chain fields (content_hash/prev_hash/entry_hash) are computed on the client
 // and stored verbatim so tamper-evidence is preserved end to end.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct AuditEntry {
     #[serde(default)]
     pub encounter_id: String,

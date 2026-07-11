@@ -6,16 +6,43 @@ use std::time::{Duration, Instant};
 
 // Cache boundary. The in-memory impl is process-local; swap for the Redis impl
 // (same trait) to share the cache across horizontally-scaled instances.
+//
+// `bump_version` exists to close a stale-set-after-invalidate race in the
+// list-cache flow (see api.rs): a naive "write store, then invalidate(key)"
+// on the write path racing a concurrent "miss, read store, then set(key)" on
+// the read path can let the reader's *stale* snapshot land in the cache AFTER
+// the writer's invalidate has already run, because the reader started before
+// the write but its `set()` completes after the `invalidate()`. That stale
+// entry then sits there for a full TTL with nothing to correct it.
+//
+// The fix is cache-key versioning rather than explicit deletion: callers
+// fold `current_version(prefix)` into the cache key they read/write
+// (e.g. "enc:list:{tenant}:v{n}"). A write bumps the version atomically
+// *before* any concurrent reader's stale `set()` can land — even if that
+// stale `set()` still executes after the bump, it writes under the OLD
+// version's key, which no future reader will ever ask for again (they always
+// read the current version). No explicit delete, so no race window: the
+// property that matters is "the write is visible to the very next read",
+// which an atomic increment gives us for free, whereas invalidate-then-set
+// ordering cannot without a lock the whole point of caching is to avoid.
 #[async_trait]
 pub trait Cache: Send + Sync {
     async fn get(&self, key: &str) -> Option<String>;
     async fn set(&self, key: &str, value: String, ttl: Duration);
     async fn invalidate(&self, key: &str);
+    // Atomically increment and return the new version counter for `prefix`.
+    // Starts at 1 on first use (i.e. an absent counter behaves as if it were
+    // 0 before the increment).
+    async fn bump_version(&self, prefix: &str) -> u64;
+    // Read the current version for `prefix` without incrementing it. Absent
+    // counters read as 0, matching `bump_version`'s starting point.
+    async fn current_version(&self, prefix: &str) -> u64;
 }
 
 #[derive(Default)]
 pub struct InMemoryCache {
     map: Mutex<HashMap<String, (String, Instant)>>,
+    versions: Mutex<HashMap<String, u64>>,
 }
 
 impl InMemoryCache {
@@ -44,6 +71,17 @@ impl Cache for InMemoryCache {
 
     async fn invalidate(&self, key: &str) {
         self.map.lock().remove(key);
+    }
+
+    async fn bump_version(&self, prefix: &str) -> u64 {
+        let mut guard = self.versions.lock();
+        let v = guard.entry(prefix.to_string()).or_insert(0);
+        *v += 1;
+        *v
+    }
+
+    async fn current_version(&self, prefix: &str) -> u64 {
+        self.versions.lock().get(prefix).copied().unwrap_or(0)
     }
 }
 
@@ -102,6 +140,43 @@ impl Cache for RedisCache {
             tracing::warn!(error = %e, "redis DEL failed; stale entry may persist until TTL");
         }
     }
+
+    // Redis's INCR is atomic across all connected instances, which is exactly
+    // the property that makes the version-keyed cache race-free in a
+    // horizontally-scaled deployment (not just within one process, unlike a
+    // local counter would be).
+    async fn bump_version(&self, prefix: &str) -> u64 {
+        let mut conn = self.conn.clone();
+        let version_key = format!("{prefix}::version");
+        match conn.incr::<_, _, i64>(&version_key, 1).await {
+            Ok(v) => v.max(0) as u64,
+            Err(e) => {
+                // Fail open on the side of correctness: if we can't confirm the
+                // bump, callers should assume the version DID move and treat any
+                // in-flight read as unsafe to cache. Returning a value derived
+                // from time keeps every caller's view moving forward even
+                // without a working counter, rather than silently staying at
+                // whatever version reads last observed.
+                tracing::warn!(error = %e, "redis INCR failed for cache version; degrading to a time-based version");
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    async fn current_version(&self, prefix: &str) -> u64 {
+        let mut conn = self.conn.clone();
+        let version_key = format!("{prefix}::version");
+        match conn.get::<_, Option<i64>>(&version_key).await {
+            Ok(v) => v.unwrap_or(0).max(0) as u64,
+            Err(e) => {
+                tracing::warn!(error = %e, "redis GET failed for cache version; treating as version 0");
+                0
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +209,44 @@ mod tests {
     #[tokio::test]
     async fn redis_connect_rejects_malformed_url() {
         assert!(RedisCache::connect("not-a-redis-url").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn version_starts_at_zero_and_increments_monotonically() {
+        let c = InMemoryCache::new();
+        assert_eq!(c.current_version("p").await, 0);
+        assert_eq!(c.bump_version("p").await, 1);
+        assert_eq!(c.current_version("p").await, 1);
+        assert_eq!(c.bump_version("p").await, 2);
+        assert_eq!(c.bump_version("p").await, 3);
+        assert_eq!(c.current_version("p").await, 3);
+    }
+
+    #[tokio::test]
+    async fn version_counters_are_isolated_per_prefix() {
+        let c = InMemoryCache::new();
+        c.bump_version("tenant-a").await;
+        c.bump_version("tenant-a").await;
+        c.bump_version("tenant-b").await;
+        assert_eq!(c.current_version("tenant-a").await, 2);
+        assert_eq!(c.current_version("tenant-b").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_set_under_a_stale_version_key_never_resurfaces_once_bumped() {
+        // This is the core property the versioning scheme relies on: writing
+        // to an old version's key must be permanently invisible once the
+        // version has moved on, even though nothing ever explicitly deletes
+        // that stale entry.
+        let c = InMemoryCache::new();
+        let v0 = c.current_version("enc:list:tenant-a").await;
+        let stale_key = format!("enc:list:tenant-a:v{v0}");
+        c.bump_version("enc:list:tenant-a").await; // a concurrent write happens
+        // The stale reader's set() still lands, but under the old key.
+        c.set(&stale_key, "stale-snapshot".to_string(), Duration::from_secs(30)).await;
+        let v1 = c.current_version("enc:list:tenant-a").await;
+        let fresh_key = format!("enc:list:tenant-a:v{v1}");
+        assert_ne!(stale_key, fresh_key);
+        assert_eq!(c.get(&fresh_key).await, None, "the current key was never populated by the stale writer");
     }
 }

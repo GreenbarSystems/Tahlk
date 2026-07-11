@@ -18,6 +18,7 @@
 //     unless the operator explicitly opts into the local dev-bypass mode.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
@@ -52,6 +53,16 @@ struct Claims {
     provider_id: String,
 }
 
+// Minimum time between JWKS fetches triggered by a `kid` cache miss. Without
+// this, a client that sends requests with random/unknown `kid` values forces
+// one JWKS HTTP round-trip PER REQUEST (`select_key` refreshes on every miss),
+// which is an amplification vector: a small stream of bad requests to us turns
+// into sustained load against the IdP's JWKS endpoint, and each of our own
+// requests now blocks on that extra network hop too. A real key rotation still
+// gets picked up promptly (worst case one cooldown window of delay), which is
+// an acceptable trade for not being an amplifier.
+const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+
 pub struct JwtVerifier {
     issuer: String,
     audience: String,
@@ -63,6 +74,12 @@ pub struct JwtVerifier {
     // Empty in dev-bypass mode.
     jwks_url: String,
     http: reqwest::Client,
+    // Last time `refresh_jwks` actually hit the network, plus a single-flight
+    // lock so concurrent misses coalesce into one fetch instead of a thundering
+    // herd. `tokio::sync::Mutex` (not `parking_lot`) because we hold it across
+    // the `.await` of the HTTP call.
+    last_refresh: RwLock<Option<Instant>>,
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl JwtVerifier {
@@ -89,6 +106,8 @@ impl JwtVerifier {
                 dev_hs256: Some(DecodingKey::from_secret(secret.as_bytes())),
                 jwks_url: String::new(),
                 http: reqwest::Client::new(),
+                last_refresh: RwLock::new(None),
+                refresh_lock: tokio::sync::Mutex::new(()),
             });
         }
 
@@ -107,6 +126,8 @@ impl JwtVerifier {
             dev_hs256: None,
             jwks_url: cfg.jwks_url.clone(),
             http: reqwest::Client::new(),
+            last_refresh: RwLock::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
         };
         // Fail closed: if we can't load the signing keys at startup, refuse to
         // serve rather than fall through to accepting nothing (or, worse, no
@@ -145,7 +166,34 @@ impl JwtVerifier {
             return Err("JWKS contained no usable keys with a kid".into());
         }
         *self.keys.write() = fresh;
+        *self.last_refresh.write() = Some(Instant::now());
         Ok(())
+    }
+
+    // Refresh path used by the `kid`-miss lookup in `select_key`, guarded so a
+    // stream of requests bearing unknown `kid`s can't turn into unlimited JWKS
+    // fetches (see `JWKS_REFRESH_COOLDOWN`).
+    //
+    // Two layers:
+    //   * Single-flight: `refresh_lock` ensures only one refresh is ever
+    //     in-flight; concurrent callers queue behind it rather than each firing
+    //     their own HTTP request. Once the lock is acquired, we re-check the
+    //     cooldown (another caller may have just refreshed while we waited).
+    //   * Cooldown: if the last successful refresh was within
+    //     `JWKS_REFRESH_COOLDOWN`, skip the network call entirely and return Ok
+    //     without changing `keys` — the caller's subsequent `keys.read().get()`
+    //     will then correctly report "still not found" for a genuinely-unknown
+    //     kid, rather than us refetching once per request.
+    async fn refresh_jwks_throttled(&self) -> Result<(), String> {
+        let _guard = self.refresh_lock.lock().await;
+        let recently_refreshed = self
+            .last_refresh
+            .read()
+            .is_some_and(|t| t.elapsed() < JWKS_REFRESH_COOLDOWN);
+        if recently_refreshed {
+            return Ok(());
+        }
+        self.refresh_jwks().await
     }
 
     // Pick the decoding key + algorithm for a token. In dev-bypass mode the
@@ -159,7 +207,7 @@ impl JwtVerifier {
         if let Some(key) = self.keys.read().get(&kid).cloned() {
             return Ok((key, header.alg));
         }
-        self.refresh_jwks().await.map_err(|_| ApiError::Unauthorized)?;
+        self.refresh_jwks_throttled().await.map_err(|_| ApiError::Unauthorized)?;
         self.keys
             .read()
             .get(&kid)
@@ -336,6 +384,8 @@ EazcBoQzeLMAdK4yNGlpoaw=
             dev_hs256: None,
             jwks_url: String::new(),
             http: reqwest::Client::new(),
+            last_refresh: RwLock::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -529,5 +579,165 @@ mod tests {
         assert_eq!(bearer_token(&hdr("Bearer   ")), None); // whitespace-only
         assert_eq!(bearer_token(&hdr("Basic abc")), None); // wrong scheme
         assert_eq!(bearer_token(&axum::http::HeaderMap::new()), None); // absent
+    }
+
+    // --- JWKS refresh cooldown / single-flight (amplification regression) ---
+    //
+    // A minimal raw-TCP JWKS stub: no mock-HTTP crate is in the dependency
+    // tree, so this hand-rolls just enough HTTP/1.1 to satisfy `reqwest`'s
+    // GET + `JwkSet` JSON parse, while counting how many times it was hit.
+    // That hit count is exactly what the amplification bug (a full JWKS fetch
+    // per request on every `kid` miss) would blow up.
+    struct JwksStub {
+        addr: std::net::SocketAddr,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl JwksStub {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let hits_clone = hits.clone();
+            // Precomputed JWK for `testkit::PUB_PEM` (n/e extracted once
+            // offline); embedding the literal avoids pulling in an RSA-parsing
+            // crate just for this test stub.
+            const TEST_KEY_N: &str = "p0K6ybwZIP827N-RZsK1bWVKMEf6YgDP-6ydy28IqfypljfdNrcyRALAsLn_YjzbNo4CgrluTZjLKJHmOtPltGRjlX0sz_coTt76sqd8wRJmAa0HYgcnqUSZMpG5XQVihzpLYdEgHN0-_PLHjY_w2yG7FkGcBn7popK-RCShd9r37EgXjgxRqphjIQ_QvG-u_S0yg-JedUx4Jn24be4q_4PRlhWxQNUEBzBbQP5eRktrYRBq-5EER9J6hpoZvdiuzRUMVdE-2xd4VD-_7f_YHOSX6_m20BPnjiE9GbsQQqZeCRC8mBoUWbjHaKGVzllJ7Txv5Uz57B-Mj0DIbNsEiw";
+            let body = serde_json::json!({
+                "keys": [{
+                    "kty": "RSA",
+                    "use": "sig",
+                    "alg": "RS256",
+                    "kid": KID,
+                    "n": TEST_KEY_N,
+                    "e": "AQAB",
+                }]
+            })
+            .to_string();
+            tokio::spawn(async move {
+                loop {
+                    let (mut sock, _) = match listener.accept().await {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    hits_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body = body.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        // Drain the request (don't care about its contents).
+                        let mut buf = [0u8; 1024];
+                        let _ = sock.read(&mut buf).await;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        let _ = sock.shutdown().await;
+                    });
+                }
+            });
+            Self { addr, hits }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}/jwks.json", self.addr)
+        }
+
+        fn hit_count(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn verifier_with_jwks_url(url: String) -> JwtVerifier {
+        let v = verifier();
+        JwtVerifier {
+            jwks_url: url,
+            keys: RwLock::new(HashMap::new()), // start with no cached keys, forcing a miss
+            ..v
+        }
+    }
+
+    #[tokio::test]
+    async fn kid_miss_storm_triggers_only_one_jwks_fetch_within_cooldown() {
+        let stub = JwksStub::start().await;
+        let v = verifier_with_jwks_url(stub.url());
+        // Every one of these tokens has the SAME known kid but the verifier's
+        // cache starts empty, so each individual `verify()` call is a `kid`
+        // miss until the first refresh populates the cache. Fire many in a
+        // row, simulating a burst of requests.
+        let token = mint(&MintOpts::default());
+        for _ in 0..25 {
+            let _ = v.verify(&token).await;
+        }
+        // Without the cooldown/single-flight guard this would be up to 25 hits
+        // (one JWKS fetch per request). With it, concurrent/rapid misses
+        // coalesce: the very first refresh populates the kid, so every
+        // subsequent call hits the warm cache and never calls refresh again.
+        assert_eq!(
+            stub.hit_count(),
+            1,
+            "expected exactly one JWKS fetch for a burst of requests bearing the same known kid"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_storm_is_bounded_by_cooldown_not_unbounded() {
+        let stub = JwksStub::start().await;
+        let v = verifier_with_jwks_url(stub.url());
+        // These tokens carry a kid the JWKS will never contain, so every call
+        // is a genuine, permanent miss. The old code would refetch the JWKS on
+        // every single one of these (amplification). The guarded code should
+        // fetch once (the first miss, cache empty) and then respect the
+        // cooldown for the rest of the burst.
+        let token = mint(&MintOpts { kid: "kid-that-does-not-exist", ..Default::default() });
+        for _ in 0..40 {
+            let result = v.verify(&token).await;
+            assert!(matches!(result, Err(ApiError::Unauthorized)));
+        }
+        assert_eq!(
+            stub.hit_count(),
+            1,
+            "unknown-kid burst should be throttled to one fetch per cooldown window, not one per request"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_kid_misses_single_flight_into_one_fetch() {
+        let stub = JwksStub::start().await;
+        let v = std::sync::Arc::new(verifier_with_jwks_url(stub.url()));
+        let token = mint(&MintOpts::default());
+        // Fire many verifications truly concurrently (not sequentially) so the
+        // single-flight lock — not just the cooldown timestamp — is what's
+        // under test: without it, N concurrent misses would race to the
+        // network before any of them observes a fresh `last_refresh`.
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let v = v.clone();
+            let token = token.clone();
+            handles.push(tokio::spawn(async move { v.verify(&token).await }));
+        }
+        for h in handles {
+            assert!(h.await.unwrap().is_ok());
+        }
+        assert_eq!(
+            stub.hit_count(),
+            1,
+            "concurrent misses should coalesce into a single in-flight JWKS fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_genuine_rotation_is_still_picked_up_after_the_cooldown_elapses() {
+        // Proves the guard is a throttle, not a permanent latch: once the
+        // cooldown window has passed, a still-unknown kid triggers a fresh
+        // fetch again (e.g. to observe a newly-rotated key at the IdP).
+        let stub = JwksStub::start().await;
+        let mut v = verifier_with_jwks_url(stub.url());
+        v.last_refresh = RwLock::new(Some(Instant::now() - JWKS_REFRESH_COOLDOWN - Duration::from_millis(50)));
+        let token = mint(&MintOpts::default());
+        let result = v.verify(&token).await;
+        assert!(result.is_ok(), "expected the cooldown to have elapsed and the fetch to succeed");
+        assert_eq!(stub.hit_count(), 1, "expected exactly one fetch once the cooldown window had passed");
     }
 }

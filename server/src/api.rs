@@ -41,8 +41,19 @@ const ALLOWED_STATUS: [&str; 6] = [
 
 // Cache the full recent window once per tenant and truncate per request, so any
 // limit is served from one cache entry and invalidation is a single key.
-fn list_cache_key(tenant: &str) -> String {
+//
+// The key is versioned (see `cache.rs`'s `Cache::bump_version` doc comment for
+// the full rationale): `put_encounter` bumps the tenant's version before a
+// concurrent `list_encounters`'s stale `set()` can land under a key any
+// future reader will still ask for. This closes a stale-set-after-invalidate
+// race that a plain "write store, then invalidate(key)" / "miss, read store,
+// then set(key)" pairing has — see the regression test
+// `list_after_concurrent_write_never_serves_a_stale_snapshot` in this module.
+fn list_cache_prefix(tenant: &str) -> String {
     format!("enc:list:{tenant}")
+}
+fn list_cache_key(tenant: &str, version: u64) -> String {
+    format!("{}:v{version}", list_cache_prefix(tenant))
 }
 const LIST_WINDOW: usize = 500;
 const LIST_TTL: Duration = Duration::from_secs(30);
@@ -53,7 +64,14 @@ pub async fn list_encounters(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<Encounter>>, ApiError> {
     let limit = params.limit.unwrap_or(50).min(LIST_WINDOW);
-    let key = list_cache_key(&ctx.tenant);
+    let prefix = list_cache_prefix(&ctx.tenant);
+    // Snapshot the version BEFORE reading the store. If a write bumps the
+    // version after this point but before our `set()` below, our `set()`
+    // targets the (now-stale) key we snapshotted — a key no future reader
+    // will request — instead of clobbering the fresh entry the writer's own
+    // invalidation created space for.
+    let version = state.cache.current_version(&prefix).await;
+    let key = list_cache_key(&ctx.tenant, version);
 
     let mut rows: Vec<Encounter> = match state.cache.get(&key).await {
         Some(cached) => serde_json::from_str(&cached).unwrap_or_default(),
@@ -98,7 +116,10 @@ pub async fn put_encounter(
     enc.updated_at = now_ms();
 
     state.store.upsert(&ctx.tenant, enc.clone()).await?;
-    state.cache.invalidate(&list_cache_key(&ctx.tenant)).await;
+    // Bump (not delete): see `list_cache_prefix`'s doc comment. Any concurrent
+    // reader who snapshotted the old version can still finish writing to the
+    // old key harmlessly — nobody will read it again.
+    state.cache.bump_version(&list_cache_prefix(&ctx.tenant)).await;
     Ok(Json(enc))
 }
 

@@ -363,4 +363,159 @@ mod tests {
     fn bind_gate_allows_non_loopback_when_opted_in() {
         assert!(enforce_bind_policy("0.0.0.0:8080".parse().unwrap(), true).is_ok());
     }
+
+    // --- Cache stale-set-after-invalidate race regression ---
+    //
+    // Reproduces the exact interleaving the bug report describes:
+    //   1. Request A (a list) misses the cache and starts reading the store.
+    //   2. Before A's `set()` lands, Request B (a write) commits to the store
+    //      and invalidates/bumps the cache.
+    //   3. A's now-stale `set()` finally lands.
+    // With plain invalidate-then-set, step 3 repopulates the SAME key B just
+    // cleared, serving stale data for a full TTL. With versioning, step 3
+    // writes to the OLD version's key, which nothing will read again.
+    //
+    // `DelayedSetCache` wraps the real `InMemoryCache` and, on demand, makes
+    // exactly one `set()` call block until a signal is sent — giving the test
+    // full control over the interleaving instead of hoping a race window gets
+    // hit by chance.
+    struct DelayedSetCache {
+        inner: cache::InMemoryCache,
+        // Taken (leaving None) by the first `set()` call after being armed;
+        // that call then awaits the receiver before actually writing through.
+        gate: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    impl DelayedSetCache {
+        fn new() -> (Arc<Self>, tokio::sync::oneshot::Sender<()>) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let this = Arc::new(Self {
+                inner: cache::InMemoryCache::new(),
+                gate: std::sync::Mutex::new(Some(rx)),
+            });
+            (this, tx)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl cache::Cache for DelayedSetCache {
+        async fn get(&self, key: &str) -> Option<String> {
+            self.inner.get(key).await
+        }
+        async fn set(&self, key: &str, value: String, ttl: std::time::Duration) {
+            let rx = self.gate.lock().unwrap().take();
+            if let Some(rx) = rx {
+                let _ = rx.await; // block this one call until the test releases it
+            }
+            self.inner.set(key, value, ttl).await;
+        }
+        async fn invalidate(&self, key: &str) {
+            self.inner.invalidate(key).await;
+        }
+        async fn bump_version(&self, prefix: &str) -> u64 {
+            self.inner.bump_version(prefix).await
+        }
+        async fn current_version(&self, prefix: &str) -> u64 {
+            self.inner.current_version(prefix).await
+        }
+    }
+
+    #[tokio::test]
+    async fn list_after_concurrent_write_never_serves_a_stale_snapshot() {
+        let (cache, release_stale_set) = DelayedSetCache::new();
+        let state = AppState {
+            store: Arc::new(store::InMemoryStore::new()),
+            cache,
+            auth: Arc::new(testkit::verifier()),
+            limiter: Arc::new(rate_limiter()),
+        };
+        let app = app(state);
+        let token = valid_token();
+
+        // Seed one encounter so the first list has something to (mis)cache.
+        let seed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/encounters/e1")
+                    .header("authorization", format!("Bearer {}", token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"status":"draft"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(seed.status(), StatusCode::OK);
+
+        // Request A: start a list. Its cache miss will read the store (status
+        // "draft") and then block on `set()` until we release it below — this
+        // is us pinning down the exact race window instead of hoping for it.
+        let app_a = app.clone();
+        let token_a = token.clone();
+        let list_task = tokio::spawn(async move {
+            app_a
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/encounters")
+                        .header("authorization", format!("Bearer {}", token_a))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        // Give request A a moment to reach its (now-blocked) set() call.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Request B: write commits fresh data ("signed") to the store and
+        // bumps/invalidates the cache — this is the concurrent write that
+        // races A's stale set().
+        let write = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/encounters/e1")
+                    .header("authorization", format!("Bearer {}", token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"status":"signed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write.status(), StatusCode::OK);
+
+        // NOW let A's delayed set() finally land — after B's write/invalidate
+        // already happened. This is the exact ordering that reproduces the bug.
+        release_stale_set.send(()).unwrap();
+        let list_a_resp = list_task.await.unwrap();
+        assert_eq!(list_a_resp.status(), StatusCode::OK);
+
+        // The bug: with plain invalidate-then-set, A's stale "draft" snapshot
+        // would now sit in the cache under the same key, and this second list
+        // request (a fresh cache lookup) would read it back instead of going
+        // to the store. With versioning, A's stale set() landed under the OLD
+        // version's key, so this fresh lookup misses and reads the store,
+        // observing B's write.
+        let list_b_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/encounters")
+                    .header("authorization", format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_b_resp.status(), StatusCode::OK);
+        let body = list_b_resp.into_body().collect().await.unwrap().to_bytes();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            rows[0]["status"], "signed",
+            "a list after a concurrent write must never observe a stale pre-write snapshot, \
+             even when a racing reader's cache write lands after the writer's invalidation"
+        );
+    }
 }

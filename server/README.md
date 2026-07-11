@@ -56,6 +56,7 @@ export TAHLK_JWKS_URL="https://your-idp.example/.well-known/jwks.json"
 # Binding a non-loopback address requires an explicit opt-in, since TLS is
 # terminated upstream (see below):
 # export TAHLK_ALLOW_INSECURE=1
+# export TAHLK_BIND_ADDR=0.0.0.0  # override the bind IP; defaults to 127.0.0.1
 cargo run            # listens on 127.0.0.1:8080 (PORT to override)
 ```
 
@@ -157,7 +158,10 @@ items are **done**; the store/cache swaps are still outstanding.
     `governor`, not the source IP);
   - a fail-closed bind gate: refuses to bind a non-loopback address unless
     `TAHLK_ALLOW_INSECURE=1` is explicitly set, so an accidental deploy without a
-    TLS-terminating upstream fails safely at startup.
+    TLS-terminating upstream fails safely at startup. The bind IP itself
+    defaults to `127.0.0.1` and is configurable via `TAHLK_BIND_ADDR` (e.g. set
+    to `0.0.0.0` in a container behind a reverse proxy, alongside
+    `TAHLK_ALLOW_INSECURE=1`).
 - **Audio (PHI)**: never transits this service body. Client uploads encrypted
   WAV directly to object storage via a short-lived presigned URL; only the
   object key is stored here.
