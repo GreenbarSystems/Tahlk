@@ -1,11 +1,10 @@
 # Welcome to the Tahlk Beta
 
-Thank you for helping test Tahlk. This guide will get you up and running in
-about 5 minutes.
+Thank you for helping test Tahlk. This guide will get you up and running.
 
 ## What you'll need first
 
-Before you install the app, please have these two things ready:
+Before you install Tahlk, please have these two things ready:
 
 1. **An Anthropic account and API key.** Tahlk uses Anthropic's Claude AI to
    turn your conversation into a clinical note. You'll need your own
@@ -14,18 +13,18 @@ Before you install the app, please have these two things ready:
 2. **A signed Business Associate Agreement (BAA) with Anthropic.** Because
    session recordings involve patient health information, this agreement
    needs to be in place before Tahlk will generate notes. If you haven't
-   started this yet, the app links you to where to request one.
+   started this yet, Tahlk links you to where to request one.
 
 ## Installing Tahlk
 
 1. Open the installer file you were sent (or the link your contact gave you)
    and run it.
 2. Windows may show a blue security pop-up the first time, since Tahlk is a
-   new app. Click **More info**, then **Run anyway**, to continue. This is
-   expected and safe.
+   new publisher. Click **More info**, then **Run anyway**, to continue.
+   This is expected and safe.
 3. Once installation finishes, open **Tahlk** from your Start menu.
 
-## Setting up your account (about 3 minutes)
+## Setting up your account
 
 The first time you open Tahlk, it will walk you through three quick steps:
 
@@ -38,7 +37,7 @@ Then click **Start using Tahlk** and you're ready to go.
 
 ## Recording your first session
 
-Inside the app, here's the flow for each patient visit:
+Here's the flow for each patient visit:
 
 1. Click **+ New Session** to start.
 2. Click **Start Recording**, and **Stop Recording** when the visit is over.
