@@ -79,6 +79,29 @@ fn log_upstream_body(context: &str, body: &str) {
 #[cfg(not(debug_assertions))]
 fn log_upstream_body(_context: &str, _body: &str) {}
 
+// L7: read a response body capped at MAX_NOTE_BYTES, truncating (rather than
+// erroring) if the upstream sends more. Mirrors the M9 cap already applied
+// to the success-path SSE accumulator — used for the non-success error-body
+// path, which previously called `resp.text()` with no size limit at all.
+// Best-effort: any transport error while draining just yields whatever was
+// read so far (or an empty string), since this is a dev-debug log line, not
+// something callers depend on for correctness.
+async fn read_bounded_body(resp: reqwest::Response) -> String {
+    use futures_util::StreamExt;
+    let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(bytes) = chunk else { break };
+        if buf.len().saturating_add(bytes.len()) > MAX_NOTE_BYTES {
+            let remaining = MAX_NOTE_BYTES.saturating_sub(buf.len());
+            buf.extend_from_slice(&bytes[..remaining.min(bytes.len())]);
+            break;
+        }
+        buf.extend_from_slice(&bytes);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 // N1 (HIPAA §164.312(c)(1) Integrity): a genuinely malformed SSE `data:`
 // frame (truncated JSON, corrupt bytes, an unexpected shape) used to be
 // dropped *silently* — no log, no metric, no audit trail. For clinical note
@@ -412,7 +435,15 @@ pub(crate) async fn generate_note(
         // request fragments (which contained our api key header on the wire)
         // or upstream stack traces — both are dangerous to funnel into
         // structured telemetry or a user-visible error toast.
-        let text = resp.text().await.unwrap_or_default();
+        //
+        // L7: read the body with the same MAX_NOTE_BYTES cap the success-path
+        // SSE stream uses, instead of `resp.text()` (which buffers the whole
+        // body with no limit). A misbehaving or malicious upstream returning
+        // a non-2xx status with a very large body could otherwise be used to
+        // grow memory unboundedly — the same OOM shape M9 already closed off
+        // for the success path. Truncate rather than fail outright: this is
+        // a dev-only debug log, not data the app depends on for correctness.
+        let text = read_bounded_body(resp).await;
         log_upstream_body(&format!("HTTP {status} body"), &text);
         let (code, err) = match status.as_u16() {
             401 | 403 => ("auth_failed", AppError::AuthFailed(format!("HTTP {status}"))),
@@ -673,6 +704,59 @@ mod tests {
         assert_eq!(&s[19..20], "Z");
         let year: i32 = s[..4].parse().unwrap();
         assert!(year >= 2026, "timestamp year suspiciously old: {}", year);
+    }
+
+    // L7: build a fixture reqwest::Response with an arbitrary byte body,
+    // without a real HTTP mock server. reqwest::Response implements
+    // From<http::Response<Vec<u8>>> for exactly this purpose.
+    fn fixture_response(status: u16, body: Vec<u8>) -> reqwest::Response {
+        let http_resp = http::Response::builder().status(status).body(body).unwrap();
+        reqwest::Response::from(http_resp)
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_passes_through_a_small_body_unchanged() {
+        let resp = fixture_response(500, b"small error body".to_vec());
+        let text = read_bounded_body(resp).await;
+        assert_eq!(text, "small error body");
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_truncates_a_body_larger_than_max_note_bytes() {
+        // One byte over the cap — if truncation is off-by-one or missing,
+        // this proves it: the raw body is deliberately NOT a round multiple
+        // of any internal chunk size, so a passing test can't be an
+        // accident of chunk-boundary alignment.
+        let oversized = vec![b'a'; MAX_NOTE_BYTES + 1];
+        let resp = fixture_response(500, oversized);
+        let text = read_bounded_body(resp).await;
+        assert_eq!(
+            text.len(),
+            MAX_NOTE_BYTES,
+            "body must be truncated to exactly MAX_NOTE_BYTES, got {} bytes",
+            text.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_handles_a_body_far_larger_than_the_cap() {
+        // A much larger body (10x the cap) — guards against an
+        // implementation that only checks the cap once per chunk read
+        // rather than accumulating correctly across many chunks/reads.
+        let oversized = vec![b'z'; MAX_NOTE_BYTES * 10];
+        let resp = fixture_response(500, oversized);
+        let text = read_bounded_body(resp).await;
+        assert_eq!(text.len(), MAX_NOTE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn read_bounded_body_at_exactly_the_cap_is_not_truncated() {
+        // Boundary case: exactly MAX_NOTE_BYTES should pass through whole,
+        // not be off-by-one truncated to MAX_NOTE_BYTES - 1.
+        let exact = vec![b'b'; MAX_NOTE_BYTES];
+        let resp = fixture_response(500, exact);
+        let text = read_bounded_body(resp).await;
+        assert_eq!(text.len(), MAX_NOTE_BYTES);
     }
 
     // M8: pin the bounded HTTP timeouts. If someone raises the request cap to

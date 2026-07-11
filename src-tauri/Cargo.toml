@@ -87,8 +87,12 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 
 # Test-only deps. `tempfile` scopes each SQLCipher round-trip test to its
 # own directory so parallel `cargo test` runs don't stomp on each other.
+# `http` builds fixture reqwest::Response values in notes.rs's
+# read_bounded_body test (reqwest::Response implements From<http::Response<Vec<u8>>>)
+# without needing a real HTTP mock server for a single-function unit test.
 [dev-dependencies]
 tempfile = "3"
+http = "1"
 
 [features]
 default = ["custom-protocol"]
