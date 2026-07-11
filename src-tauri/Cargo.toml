@@ -1,6 +1,6 @@
 [package]
 name = "tahlk"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tahlk — ambient AI scribe for behavioral health"
 authors = ["Tahlk"]
 edition = "2021"
