@@ -45,11 +45,38 @@ export async function startRecording() {
   emit('scribe:recording_started', {});
 }
 
+// If the underlying MediaRecorder never fires `onstop` after we call
+// `.stop()` — observed in the wild on some platforms when the capture
+// device disappears mid-session (e.g. a Bluetooth mic dropping) — the
+// Promise below would otherwise hang forever with no way for the caller
+// to recover: the Stop button stays disabled, the timer stays stopped,
+// and nothing ever resolves or rejects. STOP_TIMEOUT_MS bounds that wait
+// so the caller's existing catch/toast path (recordingSection.js) always
+// gets a chance to run and re-enable the UI.
+const STOP_TIMEOUT_MS = 8000;
+
 export async function stopRecording(encounterId) {
   if (!isRecording()) return null;
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      clearInterval(_timerInterval);
+      _timerInterval = null;
+      _mediaRecorder.onstop = null;
+      stopStream();
+      const err = new Error('Recording did not stop in time. Please try again.');
+      emit('scribe:audio_error', { error: err.message, encounterId });
+      reject(err);
+    }, STOP_TIMEOUT_MS);
+
     _mediaRecorder.onstop = async () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
       clearInterval(_timerInterval);
       _timerInterval = null;
 
