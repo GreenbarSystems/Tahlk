@@ -9,6 +9,11 @@ import { transcribe } from '../../scribe/transcriber.js';
 import { toast } from '../../utils/format.js';
 import { userMessage } from '../../platform/appError.js';
 import { TRANSCRIPT_KEY, setStatus, clearStatus } from './template.js';
+import {
+  checkTranscriptionQuality,
+  describeTranscriptionQualityIssues,
+  transcriptionQualityCallToAction,
+} from '../../domain/transcriptionQualityGate.js';
 
 export function wireTranscriptSection(ctx) {
   // Run transcription. Returns true on success, false on failure or when there
@@ -22,13 +27,23 @@ export function wireTranscriptSection(ctx) {
     const btn = document.getElementById('btn-transcribe');
     if (btn) btn.disabled = true;
     try {
-      const transcript = await transcribe(ctx.currentEncounter.audio_path, ctx.currentEncounter.id);
+      const { transcript, quality } = await transcribe(ctx.currentEncounter.audio_path, ctx.currentEncounter.id);
       ctx.setTranscript(transcript);
       kvSet(TRANSCRIPT_KEY(ctx.currentEncounter.id), transcript);
       const ta = document.getElementById('transcript-area');
       if (ta) ta.value = transcript;
       document.getElementById('btn-generate')?.removeAttribute('disabled');
       if (!chain) clearStatus();
+      // Advisory-only, non-blocking: a low-confidence/hallucination signal
+      // never prevents the transcript from being used or fed into note
+      // generation — it's a prompt for the provider to double-check this
+      // specific transcript before trusting it, same philosophy as every
+      // other quality gate in this codebase (finding #1's noteQualityGate
+      // right after `generateNote()`, mirrored here right after `transcribe()`).
+      const { ok, issues } = checkTranscriptionQuality(quality);
+      if (!ok) {
+        toast(describeTranscriptionQualityIssues(issues) + transcriptionQualityCallToAction(issues));
+      }
       return true;
     } catch (e) {
       clearStatus();

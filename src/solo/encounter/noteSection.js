@@ -16,6 +16,9 @@ import { toast } from '../../utils/format.js';
 import { userMessage, fromInvoke } from '../../platform/appError.js';
 import { setStatus, clearStatus } from './template.js';
 import { confirmModal } from '../confirmModal.js';
+import { getTemplate } from '../../templates/templateLibrary.js';
+import { checkSectionCoverage, describeMissingSections } from '../../domain/sectionCoverage.js';
+import { checkNoteQuality, describeQualityIssues, qualityIssuesCallToAction } from '../../domain/noteQualityGate.js';
 
 export function wireNoteSection(ctx) {
   let _pendingNote = null;
@@ -99,6 +102,39 @@ export function wireNoteSection(ctx) {
       await encountersRepo.save(ctx.currentEncounter);
       ctx.onEncounterUpdated(ctx.currentEncounter);
       clearStatus();
+
+      // Advisory only — never blocks the flow. Flags the common drift case
+      // where the LLM (or a truncated response) omits a section the
+      // template requires, e.g. a psych eval missing "Risk Assessment".
+      // Fires after clearStatus() so it doesn't get stomped by the status
+      // banner, and after the note is already saved as a draft so a missing
+      // section is never mistaken for a save failure.
+      const template = getTemplate(templateId);
+      const { missing } = checkSectionCoverage(note, template);
+
+      // Content-quality heuristics (separate from section coverage above):
+      // catches a refusal/disclaimer instead of a note, a response that
+      // looks cut off mid-stream, or a note suspiciously short relative to
+      // the transcript it came from — none of which "outcome: ok" in the
+      // llm_audit table would ever reveal, since the API call itself
+      // succeeded in all three cases.
+      const { issues } = checkNoteQuality(note, transcript);
+
+      // Combined into ONE toast call, not two sequential ones. toast() is a
+      // single-slot, last-write-wins mechanism (see utils/format.js) — two
+      // toast() calls back-to-back with no await between them mean the
+      // FIRST message is overwritten before it's ever rendered, silently
+      // dropping it. A refusal/truncated note (caught by checkNoteQuality)
+      // is also very likely to be missing every required section (caught
+      // by checkSectionCoverage), so this isn't a rare edge case — it's the
+      // exact high-stakes scenario these two checks exist for. Mirrors the
+      // sign-button handler below, which already combines its own
+      // coverage + quality warnings into one message for the same reason.
+      const advisories = [];
+      if (missing.length > 0) advisories.push(describeMissingSections(missing));
+      if (issues.length > 0) advisories.push(`${describeQualityIssues(issues)}${qualityIssuesCallToAction(issues)}`);
+      if (advisories.length > 0) toast(advisories.join(' '), 6000);
+
       return true;
     } catch (e) {
       if (noteArea) {
@@ -136,9 +172,25 @@ export function wireNoteSection(ctx) {
   document.getElementById('btn-sign')?.addEventListener('click', async () => {
     const noteContent = document.getElementById('note-area')?.value || '';
     if (!noteContent.trim()) { toast('Note is empty — cannot sign.'); return; }
+
+    // Last-chance advisory before locking: re-check coverage against the
+    // CURRENT textarea content, not the originally generated note — a
+    // provider's manual edit after generation can just as easily drop a
+    // required section as the LLM can. Folded into the existing sign
+    // confirmation message rather than a second dialog, so signing a note
+    // Tahlk flagged still takes exactly one provider decision, same as today.
+    const templateId = document.getElementById('template-select')?.value || 'soap-generic';
+    const template = getTemplate(templateId);
+    const { missing } = checkSectionCoverage(noteContent, template);
+    const { issues: qualityIssues } = checkNoteQuality(noteContent, ctx.currentTranscript());
+    const warnings = [];
+    if (missing.length > 0) warnings.push(describeMissingSections(missing));
+    if (qualityIssues.length > 0) warnings.push(describeQualityIssues(qualityIssues));
+    const warning = warnings.length > 0 ? `\n\n${warnings.join(' ')} Review before signing.` : '';
+
     const confirmed = await confirmModal({
       title: 'Sign & lock this note?',
-      message: 'Signing attests to this clinical note. The signed version will be locked and can no longer be edited.',
+      message: `Signing attests to this clinical note. The signed version will be locked and can no longer be edited.${warning}`,
       confirmLabel: 'Sign & Lock',
       cancelLabel: 'Cancel',
       confirmClass: 'btn-sign',
@@ -151,6 +203,18 @@ export function wireNoteSection(ctx) {
     const signBtn = document.getElementById('btn-sign');
     if (signBtn) { signBtn.disabled = true; signBtn.innerHTML = '<span class="btn-spinner"></span>Signing…'; }
 
+    // The DB write (signNote) is the only step that can legitimately fail
+    // and warrant a "Sign failed" toast + re-enabled button. Everything
+    // after a successful signNote() -- the audio purge, the DOM refresh --
+    // must live OUTSIDE this try/catch. Previously the DOM refresh below
+    // (readOnly toggles, node removal) ran inside the same try block as
+    // signNote(); if the panel had been disposed mid-await (e.g. the user
+    // switched tabs while purgeAudio was in flight) those unguarded
+    // document.getElementById(...).readOnly writes would throw on a null
+    // element, and that throw was caught here and reported as "Sign
+    // failed." even though the note was already durably signed --
+    // re-enabling a stale Sign button for an encounter that no longer
+    // needs signing.
     try {
       await signNote(
         ctx.currentEncounter.id,
@@ -158,35 +222,42 @@ export function wireNoteSection(ctx) {
         ctx.currentTranscript(),
         ctx.providerProfile.name || 'Provider'
       );
-      ctx.currentEncounter.status = 'signed';
-
-      // Best-effort audio purge if the provider opted into delete-on-sign.
-      // Runs AFTER the successful sign so a purge failure cannot roll back
-      // attestation; purgeAudio itself never throws.
-      if (getAudioRetention() === 'delete_on_sign' && ctx.currentEncounter.audio_path) {
-        const { removed, error } = await purgeAudio(ctx.currentEncounter.id, { reason: 'delete_on_sign' });
-        if (error) {
-          toast(`Note signed. Audio purge failed: ${error}`);
-        } else if (removed) {
-          toast('Note signed. Audio deleted from device.');
-        } else {
-          toast('Note signed. Audio was already gone.');
-        }
-        ctx.currentEncounter.audio_path = null;
-      } else {
-        toast('Note signed and attested.');
-      }
-
-      ctx.onEncounterUpdated(ctx.currentEncounter);
-      // Re-render panel as signed.
-      document.getElementById('btn-sign')?.remove();
-      document.getElementById('note-area').readOnly = true;
-      document.getElementById('transcript-area').readOnly = true;
-      document.querySelector('.recording-section')?.remove();
     } catch (e) {
       if (signBtn) { signBtn.disabled = false; signBtn.textContent = 'Sign & Attest Note'; }
       toast(userMessage(e, 'Sign failed.'));
+      return;
     }
+
+    ctx.currentEncounter.status = 'signed';
+
+    // Best-effort audio purge if the provider opted into delete-on-sign.
+    // Runs AFTER the successful sign so a purge failure cannot roll back
+    // attestation; purgeAudio itself never throws.
+    if (getAudioRetention() === 'delete_on_sign' && ctx.currentEncounter.audio_path) {
+      const { removed, error } = await purgeAudio(ctx.currentEncounter.id, { reason: 'delete_on_sign' });
+      if (error) {
+        toast(`Note signed. Audio purge failed: ${error}`);
+      } else if (removed) {
+        toast('Note signed. Audio deleted from device.');
+      } else {
+        toast('Note signed. Audio was already gone.');
+      }
+      ctx.currentEncounter.audio_path = null;
+    } else {
+      toast('Note signed and attested.');
+    }
+
+    ctx.onEncounterUpdated(ctx.currentEncounter);
+    // Re-render panel as signed. The note is already durably signed at this
+    // point regardless of whether these DOM nodes still exist, so every
+    // lookup here is optionally-chained -- a disposed/torn-down panel must
+    // never surface a "Sign failed" error for a sign that already succeeded.
+    document.getElementById('btn-sign')?.remove();
+    const noteArea = document.getElementById('note-area');
+    if (noteArea) noteArea.readOnly = true;
+    const transcriptArea = document.getElementById('transcript-area');
+    if (transcriptArea) transcriptArea.readOnly = true;
+    document.querySelector('.recording-section')?.remove();
   });
 
   // Manual audio purge — available on signed encounters that still have a .wav.

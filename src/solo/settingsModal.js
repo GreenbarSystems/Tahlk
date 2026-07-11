@@ -9,6 +9,8 @@ import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
+import { verifyAllChains } from '../domain/historyChain.js';
+import { checkLlmAuditDrift, describeDrift } from '../domain/llmAuditDrift.js';
 import { iconCheck } from './icons.js';
 
 const PROVIDER_KEY = keys.provider();
@@ -145,6 +147,30 @@ export async function renderSettings() {
         </label>
       </section>
 
+      <section class="settings-section">
+        <h3>Note History Chain Integrity</h3>
+        <p class="settings-desc">
+          Every note edit, sign-off, and export is recorded in a tamper-evident hash chain per encounter.
+          The chain is checked automatically whenever a new entry is appended, but an encounter that hasn't
+          been touched since it was signed never gets re-checked on its own. Run this to independently
+          re-verify every stored chain right now — it only reads data and cannot modify or repair anything.
+        </p>
+        <button class="btn btn-secondary" id="s-verify-chains">Verify All Chains</button>
+        <div id="s-verify-chains-result" class="settings-desc"></div>
+      </section>
+
+      <section class="settings-section">
+        <h3>AI Call Health Check</h3>
+        <p class="settings-desc">
+          Every note-generation call to Anthropic is logged on this device (timing, size, success/failure —
+          never the note content itself). Each call looking fine on its own can still hide a pattern, like a
+          silent slowdown or a rise in failures. Run this to compare your most recent calls against your
+          own recent history — it only reads the log and never changes anything.
+        </p>
+        <button class="btn btn-secondary" id="s-check-drift">Check for AI Drift</button>
+        <div id="s-check-drift-result" class="settings-desc"></div>
+      </section>
+
       <section class="settings-section settings-section--muted">
         <h3>Privacy</h3>
         <p class="settings-desc">Audio recordings are stored in your OS app data directory and never leave this device. Transcripts and notes are stored in a local SQLite database. Nothing is sent to Tahlk servers.</p>
@@ -265,6 +291,64 @@ export function wireSettings() {
         toast(`Could not update retention: ${userMessage(err, 'unknown error')}`);
       }
     });
+  });
+
+  document.getElementById('s-verify-chains')?.addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    const resultEl = document.getElementById('s-verify-chains-result');
+    btn.setAttribute('disabled', '');
+    btn.textContent = 'Verifying…';
+    if (resultEl) resultEl.textContent = '';
+    try {
+      const { ok, checked, broken } = await verifyAllChains();
+      if (checked === 0) {
+        if (resultEl) resultEl.textContent = 'No note history found yet — nothing to verify.';
+      } else if (ok) {
+        if (resultEl) resultEl.textContent = `All ${checked} encounter chain${checked === 1 ? '' : 's'} verified intact.`;
+        toast('Chain integrity check passed.');
+      } else {
+        const detail = broken
+          .map(b => `${escapeHtml(b.encounterId)} (${escapeHtml(b.reason || 'unknown')}${b.brokenAt != null ? `, entry #${Number(b.brokenAt)}` : ''})`)
+          .join('; ');
+        if (resultEl) {
+          resultEl.innerHTML = `<strong style="color:var(--danger)">${broken.length} of ${checked} chain${checked === 1 ? '' : 's'} failed verification:</strong> ${detail}`;
+        }
+        toast(`Chain integrity check found ${broken.length} problem${broken.length === 1 ? '' : 's'} — see Settings for details.`);
+      }
+    } catch (err) {
+      if (resultEl) resultEl.textContent = '';
+      toast(`Could not verify chains: ${userMessage(err, 'unknown error')}`);
+    } finally {
+      btn.removeAttribute('disabled');
+      btn.textContent = 'Verify All Chains';
+    }
+  });
+
+  document.getElementById('s-check-drift')?.addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    const resultEl = document.getElementById('s-check-drift-result');
+    btn.setAttribute('disabled', '');
+    btn.textContent = 'Checking…';
+    if (resultEl) resultEl.textContent = '';
+    try {
+      const { insufficientData, checked, findings } = await checkLlmAuditDrift();
+      if (insufficientData) {
+        if (resultEl) resultEl.textContent = `Not enough call history yet to compare (${checked} call${checked === 1 ? '' : 's'} logged so far).`;
+      } else if (findings.length === 0) {
+        if (resultEl) resultEl.textContent = `Checked your last ${checked} calls — nothing unusual found.`;
+        toast('AI call health check passed.');
+      } else {
+        const summary = describeDrift(findings);
+        if (resultEl) resultEl.innerHTML = `<strong style="color:var(--danger)">${escapeHtml(summary)}</strong>`;
+        toast('AI call health check found something worth a look — see Settings for details.', 6000);
+      }
+    } catch (err) {
+      if (resultEl) resultEl.textContent = '';
+      toast(`Could not check AI call health: ${userMessage(err, 'unknown error')}`);
+    } finally {
+      btn.removeAttribute('disabled');
+      btn.textContent = 'Check for AI Drift';
+    }
   });
 }
 

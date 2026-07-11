@@ -184,6 +184,32 @@ fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     }))
 }
 
+// Distinct encounter_ids that have at least one note_history row. Used by
+// the JS-side chain verifier (historyChain.js::verifyAllChains) to discover
+// which encounters to walk without needing a full encounter listing or any
+// join against the encounters table — note_history is deliberately the only
+// source of truth queried here, so an encounter row that was hard-deleted
+// out of `encounters` (leaving orphaned history) still gets verified rather
+// than silently skipped.
+//
+// Kept in Rust rather than derived from list_encounters()/get_encounter()
+// results because those return live encounter metadata (status, alias,
+// audio_path) the verifier has no use for and would otherwise recompute
+// nothing from — this is a plain `SELECT DISTINCT`, no chain math, matching
+// this module's "dumb append-only log" design principle from the file doc
+// comment above: verification logic stays entirely in the JS domain layer.
+#[tauri::command]
+pub(crate) fn note_history_list_encounter_ids(state: State<DbState>) -> Result<Vec<String>, AppError> {
+    let conn = state.0.get()?;
+    let mut stmt = conn.prepare("SELECT DISTINCT encounter_id FROM note_history ORDER BY encounter_id")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> Result<Vec<Value>, AppError> {
     let conn = state.0.get()?;
@@ -249,6 +275,41 @@ pub(crate) fn note_history_append(
     let entry_hash = take_str(&entry, "entryHash", 128)?;
 
     let mut conn = state.0.get()?;
+    append_history_row(
+        &mut conn, &encounter_id, &action, &actor, &timestamp, &content_hash,
+        &notes, prev_hash.as_deref(), &entry_hash,
+    )
+}
+
+// Transactional core of note_history_append, split out so it can be driven
+// directly against a plain `Connection` in unit tests (no Tauri State
+// harness needed) — same pattern as encounters::upsert_encounter_row.
+//
+// Race-safety note: the prev_hash check below does NOT by itself close the
+// "two panels racing an append" hole. Both concurrent transactions can read
+// the same last_hash before either has written (SQLite's default DEFERRED
+// transaction takes no lock until the first write), so both can pass the
+// prev_hash check identically and then both attempt to INSERT the same
+// (encounter_id, seq). The actual guarantee against a silent seq collision
+// is the `UNIQUE (encounter_id, seq)` table constraint (see init_schema
+// above): the loser's INSERT fails at the SQL layer with a constraint
+// violation, surfaced here as `AppError::Storage` via the blanket
+// `From<rusqlite::Error>` impl. The prev_hash check instead catches a
+// different, non-concurrent case: a caller whose local chain has genuinely
+// diverged from what's committed (e.g. it appended against a stale/cached
+// view of the history), which correctly maps to `InvalidInput` since that's
+// a client-side logic mismatch, not a storage failure.
+fn append_history_row(
+    conn: &mut Connection,
+    encounter_id: &str,
+    action: &str,
+    actor: &str,
+    timestamp: &str,
+    content_hash: &str,
+    notes: &str,
+    prev_hash: Option<&str>,
+    entry_hash: &str,
+) -> Result<i64, AppError> {
     let tx = conn.transaction()?;
     let next_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM note_history WHERE encounter_id = ?1",
@@ -257,11 +318,9 @@ pub(crate) fn note_history_append(
     )?;
 
     // If the caller sent a prev_hash, it must match the last row's entry_hash
-    // for this encounter. Enforcing this in the tx (not just JS) closes the
-    // "two panels racing an append" hole: the loser is rejected with a chain
-    // mismatch instead of silently producing a diverged branch that would
-    // only be caught later by verifyHistoryChain. This is a client-side
-    // logic mismatch, so it maps to `InvalidInput`, not `Storage`.
+    // for this encounter. This catches a diverged local chain (see the
+    // race-safety note on this function); the UNIQUE(encounter_id, seq)
+    // constraint below is what actually closes the concurrent-append race.
     let last_hash: Option<String> = tx
         .query_row(
             "SELECT entry_hash FROM note_history \
@@ -270,7 +329,7 @@ pub(crate) fn note_history_append(
             |r| r.get(0),
         )
         .optional()?;
-    if last_hash.as_deref() != prev_hash.as_deref() {
+    if last_hash.as_deref() != prev_hash {
         return Err(AppError::invalid(format!(
             "prev_hash chain mismatch (expected {:?}, got {:?})",
             last_hash, prev_hash
@@ -286,4 +345,160 @@ pub(crate) fn note_history_append(
     tx.commit()?;
 
     Ok(next_seq)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit-level coverage for append_history_row, driven directly against a
+    //! raw in-memory SQLite (same pattern as encounters::tests) so we don't
+    //! need a Tauri State harness.
+    //!
+    //! The key thing pinned here is which mechanism actually stops a
+    //! concurrent-append race from silently corrupting the seq ordering: NOT
+    //! the prev_hash check (both racing writers can read the same prior
+    //! state and pass it identically), but the UNIQUE(encounter_id, seq)
+    //! table constraint. See the race-safety note on append_history_row.
+
+    use super::*;
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn
+    }
+
+    fn append(
+        conn: &mut Connection,
+        encounter_id: &str,
+        prev_hash: Option<&str>,
+        entry_hash: &str,
+    ) -> Result<i64, AppError> {
+        append_history_row(
+            conn, encounter_id, "note_saved", "provider-1", "2026-07-11T10:00:00Z",
+            "content-hash", "", prev_hash, entry_hash,
+        )
+    }
+
+    #[test]
+    fn first_append_succeeds_with_no_prev_hash() {
+        let mut conn = fresh_db();
+        let seq = append(&mut conn, "enc-1", None, "hash-a").unwrap();
+        assert_eq!(seq, 1);
+    }
+
+    #[test]
+    fn sequential_appends_chain_correctly() {
+        let mut conn = fresh_db();
+        assert_eq!(append(&mut conn, "enc-1", None, "hash-a").unwrap(), 1);
+        assert_eq!(append(&mut conn, "enc-1", Some("hash-a"), "hash-b").unwrap(), 2);
+        assert_eq!(append(&mut conn, "enc-1", Some("hash-b"), "hash-c").unwrap(), 3);
+    }
+
+    #[test]
+    fn diverged_prev_hash_is_rejected_as_invalid_input_not_storage() {
+        // A caller whose local chain has genuinely diverged (stale prev_hash,
+        // no actual concurrent writer involved) must be rejected by the
+        // prev_hash check itself, mapped to InvalidInput.
+        let mut conn = fresh_db();
+        append(&mut conn, "enc-1", None, "hash-a").unwrap();
+        let err = append(&mut conn, "enc-1", Some("wrong-prev-hash"), "hash-b").unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "expected InvalidInput from the prev_hash check, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn concurrent_append_race_is_stopped_by_the_unique_constraint_not_prev_hash() {
+        // Simulates the actual race the misleading comment used to credit to
+        // prev_hash: two transactions both read the same last-committed hash
+        // before either has written, so BOTH compute an identical, valid
+        // prev_hash for the same next_seq. The loser's INSERT must still be
+        // rejected — but by the UNIQUE(encounter_id, seq) constraint at the
+        // SQL layer (AppError::Storage), not by the prev_hash check
+        // (AppError::InvalidInput), because the prev_hash the loser computed
+        // was indistinguishable from the winner's at read time.
+        let mut conn = fresh_db();
+        append(&mut conn, "enc-1", None, "hash-a").unwrap();
+
+        // Winner: takes seq 2 with a valid prev_hash and commits first.
+        append(&mut conn, "enc-1", Some("hash-a"), "hash-b-winner").unwrap();
+
+        // Loser: forge the exact interleaving by hand-inserting a row at the
+        // seq the loser would also have computed (2 is now taken, so the
+        // loser's own next_seq lookup would actually return 3 post-commit —
+        // to prove the constraint is truly what's load-bearing, directly
+        // attempt an INSERT at the already-taken seq with a prev_hash that
+        // is valid for that seq slot, bypassing the seq lookup to pin down
+        // the exact race window where both readers computed the same seq).
+        let result = conn.execute(
+            "INSERT INTO note_history              (encounter_id, seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash)              VALUES (?1,2,'note_saved','provider-2','2026-07-11T10:00:01Z','content-hash','', ?2, 'hash-b-loser')",
+            params!["enc-1", "hash-a"],
+        );
+
+        let err = result.expect_err("duplicate (encounter_id, seq) must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("unique") || msg.to_lowercase().contains("constraint"),
+            "expected a UNIQUE constraint violation, got: {}",
+            msg
+        );
+
+        // The winner's row must be the one that survived, untouched.
+        let (actor, entry_hash): (String, String) = conn
+            .query_row(
+                "SELECT actor, entry_hash FROM note_history WHERE encounter_id = 'enc-1' AND seq = 2",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(actor, "provider-1");
+        assert_eq!(entry_hash, "hash-b-winner");
+    }
+
+    #[test]
+    fn independent_encounters_do_not_share_seq_space() {
+        let mut conn = fresh_db();
+        assert_eq!(append(&mut conn, "enc-1", None, "hash-a").unwrap(), 1);
+        // A different encounter_id starts its own seq at 1, unaffected by
+        // enc-1's history.
+        assert_eq!(append(&mut conn, "enc-2", None, "hash-x").unwrap(), 1);
+    }
+
+    // Mirrors note_history_list_encounter_ids' query directly against a raw
+    // Connection (same pattern as the #[tauri::command] fns above, which
+    // can't be called without a Tauri State harness).
+    fn distinct_encounter_ids(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT encounter_id FROM note_history ORDER BY encounter_id")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn distinct_encounter_ids_is_empty_on_a_fresh_db() {
+        let conn = fresh_db();
+        assert_eq!(distinct_encounter_ids(&conn), Vec::<String>::new());
+    }
+
+    #[test]
+    fn distinct_encounter_ids_returns_each_encounter_once_sorted() {
+        let mut conn = fresh_db();
+        // enc-2 gets three appends; enc-1 and enc-3 get one each. The
+        // multi-row encounter must not produce duplicate ids in the output,
+        // and results must come back sorted (not insertion order).
+        append(&mut conn, "enc-3", None, "hash-a").unwrap();
+        append(&mut conn, "enc-1", None, "hash-b").unwrap();
+        append(&mut conn, "enc-2", None, "hash-c").unwrap();
+        append(&mut conn, "enc-2", Some("hash-c"), "hash-d").unwrap();
+        append(&mut conn, "enc-2", Some("hash-d"), "hash-e").unwrap();
+        assert_eq!(
+            distinct_encounter_ids(&conn),
+            vec!["enc-1".to_string(), "enc-2".to_string(), "enc-3".to_string()]
+        );
+    }
 }

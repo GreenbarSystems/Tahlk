@@ -104,7 +104,7 @@ beforeEach(() => {
 });
 
 test('happy path: audio_saved auto-chains transcript then note with no clicks', async () => {
-  responders['transcribe_audio'] = 'PATIENT REPORTS HEEL PAIN';
+  responders['transcribe_audio'] = { transcript: 'PATIENT REPORTS HEEL PAIN', quality: null };
   responders['generate_note'] = 'Chief Complaint: heel pain.';
 
   const ctx = makeCtx();
@@ -118,6 +118,35 @@ test('happy path: audio_saved auto-chains transcript then note with no clicks', 
   assert.equal(els.get('note-area').value, 'Chief Complaint: heel pain.');
   assert.equal(els.get('btn-sign').disabled, false, 'sign enables after generation');
   assert.equal(els.get('status-banner').style.display, 'none', 'banner clears when done');
+});
+
+// Interaction-bug regression test: findings #1 (noteQualityGate) and #5
+// (sectionCoverage) both toast() advisories from the SAME generateNow()
+// call. toast() is a single-slot, last-write-wins mechanism (see
+// utils/format.js) -- two back-to-back toast() calls with no await between
+// them silently drop the first message before it's ever rendered. A
+// refusal/truncated note is the realistic case where BOTH checks fire at
+// once (a refusal contains none of the template's required sections
+// either), so this isn't a contrived edge case.
+test('a refusal note that is also missing every section surfaces BOTH warnings in one toast, not just the last one', async () => {
+  const refusalNote = "I cannot provide medical advice or generate clinical documentation on your behalf. Please consult a licensed professional.";
+  responders['transcribe_audio'] = { transcript: 'PATIENT REPORTS HEEL PAIN', quality: null };
+  responders['generate_note'] = refusalNote;
+
+  const ctx = makeCtx();
+  const t = wireTranscriptSection(ctx);
+  const n = wireNoteSection(ctx);
+
+  const ok = await runScribeChain({ transcribeNow: t.transcribeNow, generateNow: n.generateNow });
+
+  assert.equal(ok, true, 'chain completes even though the note content is bad -- advisory, never blocking');
+  const toastText = els.get('toast-msg').textContent;
+  // Both advisories must survive in the single combined toast. Before the
+  // fix, only the SECOND toast() call's message (checkNoteQuality's) would
+  // be visible here -- checkSectionCoverage's "missing section" message
+  // would have been silently overwritten before ever being seen.
+  assert.match(toastText, /missing|section/i, 'section-coverage warning must be present');
+  assert.match(toastText, /refusal|may not be a (valid|generated) note|double-check|review/i, 'note-quality warning must be present');
 });
 
 test('transcription failure stops the chain and surfaces a plain-language error', async () => {
@@ -137,7 +166,7 @@ test('transcription failure stops the chain and surfaces a plain-language error'
 });
 
 test('manual re-transcribe and re-generate still work after the auto-chain', async () => {
-  responders['transcribe_audio'] = 'FIRST PASS';
+  responders['transcribe_audio'] = { transcript: 'FIRST PASS', quality: null };
   responders['generate_note'] = 'FIRST NOTE';
 
   const ctx = makeCtx();
@@ -147,7 +176,7 @@ test('manual re-transcribe and re-generate still work after the auto-chain', asy
   assert.equal(els.get('note-area').value, 'FIRST NOTE');
 
   // Provider edits/switches template, then clicks the manual buttons.
-  responders['transcribe_audio'] = 'SECOND PASS';
+  responders['transcribe_audio'] = { transcript: 'SECOND PASS', quality: null };
   await els.get('btn-transcribe').click();
   assert.equal(els.get('transcript-area').value, 'SECOND PASS');
 

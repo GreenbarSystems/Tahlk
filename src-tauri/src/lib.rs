@@ -139,6 +139,7 @@ pub fn run() {
             patients::delete_patient,
             note_history::note_history_list,
             note_history::note_history_append,
+            note_history::note_history_list_encounter_ids,
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,

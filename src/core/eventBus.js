@@ -7,7 +7,9 @@
 //   scribe:audio_saved         — WAV written to disk. detail: { path, encounterId }
 //   scribe:audio_error         — capture/save failed. detail: { error, encounterId }
 //   scribe:transcription_started
-//   scribe:transcription_complete — detail: { transcript, encounterId }
+//   scribe:transcription_complete — detail: { transcript, quality, encounterId }
+//     `quality` (finding #2) is the advisory TranscriptionQuality object
+//     from whisper.rs (or null if unavailable) — see transcriptionQualityGate.js.
 //   scribe:generation_started
 //   scribe:note_chunk          — streaming token. detail: { text }
 //   scribe:generation_complete — detail: { note, encounterId }
