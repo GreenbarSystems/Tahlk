@@ -54,13 +54,25 @@ class FakeMediaRecorder {
 }
 globalThis.MediaRecorder = FakeMediaRecorder;
 
-globalThis.navigator = {
-  mediaDevices: {
-    getUserMedia: async () => ({
-      getTracks: () => [{ stop() {} }],
-    }),
+// Node 22+ ships a built-in `navigator` global as a configurable but
+// getter-only accessor property (the real Navigator API surface), so a
+// plain `globalThis.navigator = {...}` assignment throws
+// "Cannot set property navigator of #<Object> which has only a getter" --
+// it doesn't silently overwrite the way it does on Node 20, where no such
+// global exists yet. Object.defineProperty always works regardless of
+// whether the property pre-exists, is writable, or is only a getter, as
+// long as it's configurable (which Node's navigator global is).
+Object.defineProperty(globalThis, 'navigator', {
+  value: {
+    mediaDevices: {
+      getUserMedia: async () => ({
+        getTracks: () => [{ stop() {} }],
+      }),
+    },
   },
-};
+  configurable: true,
+  writable: true,
+});
 
 // Blob/arrayBuffer + FileReader are exercised on the success path only; the
 // timeout path never reaches them, so minimal fakes are enough to satisfy
