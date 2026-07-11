@@ -305,34 +305,107 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
     check_status(status)?;
 
     let mut conn = state.0.get()?;
-    // Wrap the check + write in a single transaction so a legitimate
-    // concurrent sign-off between check and write cannot squeeze in and
-    // convert this call from "upsert draft" into "demote signed".
     let tx = conn.transaction()?;
     enforce_signed_immutability(&tx, &encounter)?;
-    tx.execute(
+    upsert_encounter_row(
+        &tx,
+        id,
+        provider_id,
+        encounter_date,
+        encounter["patient_alias"].as_str(),
+        status,
+        encounter["audio_path"].as_str(),
+        created_at,
+        encounter["signed_at"].as_str(),
+        encounter["signed_hash"].as_str(),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Perform the actual INSERT-or-UPDATE for an encounter row inside an
+/// already-open transaction/connection. Factored out of `upsert_encounter` so
+/// the race-closing SQL below can be driven directly from unit tests without
+/// a Tauri `State` harness.
+///
+/// Defense in depth: `enforce_signed_immutability`'s SELECT (run by the
+/// caller before this function) executes in a DEFERRED transaction, which
+/// does not take SQLite's write lock until the first write statement. On the
+/// 4-connection pool that means two concurrent upserts for the same id
+/// (double-click, or a retried call after a UI timeout) can both pass the
+/// immutability SELECT before either commits -- a classic check-then-act
+/// TOCTOU race that could silently un-sign an attested note.
+///
+/// The UPDATE's WHERE clause below closes that window at the SQL level
+/// instead of relying solely on the earlier application-level SELECT. It
+/// only allows the write through when one of two things is true, mirroring
+/// exactly what `enforce_signed_immutability` already validated:
+///   (a) the row is not currently 'signed' (the common draft-edit case, and
+///       also the legitimate draft-to-signed transition itself), or
+///   (b) the row IS 'signed' but the incoming signed_at/signed_hash/status
+///       are unchanged (the explicitly-supported patient_alias-only edit
+///       of an already-signed row).
+/// Any other case -- in particular a concurrent writer trying to write a
+/// signed row whose signed_at/signed_hash differ from what's already
+/// committed -- makes the UPDATE a no-op (0 rows changed), which the caller
+/// detects and surfaces as an explicit, retryable error instead of a silent
+/// lost update.
+fn upsert_encounter_row(
+    conn: &Connection,
+    id: &str,
+    provider_id: &str,
+    encounter_date: &str,
+    patient_alias: Option<&str>,
+    status: &str,
+    audio_path: Option<&str>,
+    created_at: &str,
+    signed_at: Option<&str>,
+    signed_hash: Option<&str>,
+) -> Result<(), AppError> {
+    let is_new_row = !conn
+        .query_row(
+            "SELECT 1 FROM encounters WHERE id = ?1",
+            params![id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let rows_changed = conn.execute(
         "INSERT INTO encounters (id, provider_id, encounter_date, patient_alias, status, \
-                                 audio_path, created_at, signed_at, signed_hash) \
+         audio_path, created_at, signed_at, signed_hash) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
          ON CONFLICT(id) DO UPDATE SET \
-             status       = excluded.status, \
-             patient_alias= excluded.patient_alias, \
-             audio_path   = excluded.audio_path, \
-             signed_at    = excluded.signed_at, \
-             signed_hash  = excluded.signed_hash",
+         status = excluded.status, \
+         patient_alias = excluded.patient_alias, \
+         audio_path = excluded.audio_path, \
+         signed_at = excluded.signed_at, \
+         signed_hash = excluded.signed_hash \
+         WHERE encounters.status != 'signed' \
+            OR (excluded.status = encounters.status \
+                AND excluded.signed_at IS encounters.signed_at \
+                AND excluded.signed_hash IS encounters.signed_hash)",
         params![
             id,
             provider_id,
             encounter_date,
-            encounter["patient_alias"].as_str(),
+            patient_alias,
             status,
-            encounter["audio_path"].as_str(),
+            audio_path,
             created_at,
-            encounter["signed_at"].as_str(),
-            encounter["signed_hash"].as_str(),
+            signed_at,
+            signed_hash,
         ],
     )?;
-    tx.commit()?;
+    if rows_changed == 0 && !is_new_row {
+        // The row existed and the UPDATE's WHERE guard suppressed the write --
+        // it raced a concurrent sign-off that landed between the caller's
+        // immutability SELECT and this UPDATE. Report it rather than
+        // silently dropping the write so the caller can reload the row and
+        // decide how to proceed.
+        return Err(AppError::invalid(
+            "encounter was signed by a concurrent request; reload and retry",
+        ));
+    }
     Ok(())
 }
 
@@ -528,6 +601,133 @@ mod tests {
             "signed_hash": "deadbeef"
         });
         assert!(enforce_signed_immutability(&conn, &incoming).is_ok());
+    }
+
+    // --- upsert_encounter_row: SQL-level TOCTOU guard -----------------------
+    //
+    // These tests drive the actual INSERT/UPDATE statement (not just the
+    // application-level `enforce_signed_immutability` SELECT) to pin the
+    // race-closing `WHERE` clause added to close the gap where two
+    // concurrent upserts on the same id could both pass the immutability
+    // SELECT before either commits.
+
+    #[test]
+    fn upsert_row_signs_a_fresh_draft() {
+        let conn = fresh_db();
+        conn.execute(
+            "INSERT INTO encounters (id, provider_id, encounter_date, status, created_at) \
+             VALUES ('enc-1','prov-1','2026-07-04','draft','2026-07-04T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // The legitimate draft -> signed transition must still succeed: this
+        // is the exact path the race guard must not block.
+        let result = upsert_encounter_row(
+            &conn,
+            "enc-1",
+            "prov-1",
+            "2026-07-04",
+            None,
+            "signed",
+            Some("/tmp/audio.wav"),
+            "2026-07-04T10:00:00Z",
+            Some("2026-07-04T10:30:00Z"),
+            Some("deadbeef"),
+        );
+        assert!(result.is_ok(), "sign-off must succeed: {:?}", result.err());
+        let status: String = conn
+            .query_row("SELECT status FROM encounters WHERE id='enc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "signed");
+    }
+
+    #[test]
+    fn upsert_row_allows_alias_only_edit_on_signed_row() {
+        let conn = fresh_db();
+        insert_signed(&conn);
+        // Same signed_at/signed_hash/status as already stored, only the
+        // alias differs -- must be allowed through the WHERE guard.
+        let result = upsert_encounter_row(
+            &conn,
+            "enc-1",
+            "prov-1",
+            "2026-07-04",
+            Some("J.D. (fixed typo)"),
+            "signed",
+            Some("/tmp/audio.wav"),
+            "2026-07-04T10:00:00Z",
+            Some("2026-07-04T10:30:00Z"),
+            Some("deadbeef"),
+        );
+        assert!(result.is_ok(), "alias-only edit must succeed: {:?}", result.err());
+        let alias: String = conn
+            .query_row("SELECT patient_alias FROM encounters WHERE id='enc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(alias, "J.D. (fixed typo)");
+    }
+
+    #[test]
+    fn upsert_row_rejects_conflicting_write_to_already_signed_row() {
+        // Simulates the TOCTOU race: the row is already 'signed' (as if a
+        // concurrent writer committed first), and this call tries to write
+        // different signed_at/signed_hash values -- as two concurrent
+        // sign-off attempts racing on the same draft would each try to do.
+        // The app-level `enforce_signed_immutability` SELECT is bypassed
+        // here on purpose to prove the SQL-level guard alone stops the
+        // demotion/overwrite, since that guard is the actual fix for the
+        // race window between the SELECT and the write on separate
+        // connections.
+        let conn = fresh_db();
+        insert_signed(&conn);
+        let result = upsert_encounter_row(
+            &conn,
+            "enc-1",
+            "prov-1",
+            "2026-07-04",
+            Some("J.D."),
+            "signed",
+            Some("/tmp/audio.wav"),
+            "2026-07-04T10:00:00Z",
+            Some("2026-07-04T99:99:99Z"), // different signed_at than stored
+            Some("00000000"),             // different signed_hash than stored
+        );
+        assert!(result.is_err(), "conflicting write to a signed row must be rejected");
+        assert!(matches!(result.unwrap_err(), AppError::InvalidInput(_)));
+        // Original sign-off metadata must remain untouched.
+        let (signed_at, signed_hash): (String, String) = conn
+            .query_row(
+                "SELECT signed_at, signed_hash FROM encounters WHERE id='enc-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(signed_at, "2026-07-04T10:30:00Z");
+        assert_eq!(signed_hash, "deadbeef");
+    }
+
+    #[test]
+    fn upsert_row_rejects_demotion_of_signed_row() {
+        // A demote-to-draft attempt on an already-signed row must be
+        // blocked by the SQL guard even without any race involved.
+        let conn = fresh_db();
+        insert_signed(&conn);
+        let result = upsert_encounter_row(
+            &conn,
+            "enc-1",
+            "prov-1",
+            "2026-07-04",
+            Some("J.D."),
+            "draft", // <-- illegal demotion
+            Some("/tmp/audio.wav"),
+            "2026-07-04T10:00:00Z",
+            None,
+            None,
+        );
+        assert!(result.is_err(), "demotion of a signed row must be rejected");
+        let status: String = conn
+            .query_row("SELECT status FROM encounters WHERE id='enc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "signed", "row must remain signed after a rejected demotion");
     }
 
     #[test]
