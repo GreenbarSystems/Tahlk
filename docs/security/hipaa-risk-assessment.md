@@ -5,7 +5,7 @@
 the `tahlk-sync` Group-tier backend — are explicitly out of scope; that
 service is frozen per [ADR 0001](../adr/0001-freeze-group-tier-and-sync.md)
 and has zero validated demand or production deployment as of this writing).
-**As of commit:** `63ffbbc`
+**As of commit:** `c9007ad`
 **Prior source material this assessment consolidates:**
 - `tahlk-security-audit.md` — the original numbered finding set (C1–C2, H1–H6,
   M1–M10, L1–L5), referenced throughout the codebase (e.g. `notes.rs:334,336`,
@@ -50,6 +50,16 @@ Flows A and E are fully mitigated (encrypted at rest) and are not treated as
 residual risk. Flows B, C, D, and F are addressed individually below because
 each has a different risk shape and a different reason it's accepted rather
 than blocked outright.
+
+The data-flow table above covers *where PHI moves*. It does not cover *who
+can reach it* or *how activity involving it is tracked* — those are separate
+Security Rule standards (Access Control, §164.312(a); Audit Controls,
+§164.312(b)) with their own required implementation specifications. Sections
+3 and 4 below document those specifications directly, since a July 2026
+internal compliance audit (`tahlk_compliance_audit.md`) found this document
+did not previously address them at all. Sections 5–7 similarly cover
+contingency planning, breach notification, and retention/disposal — three
+more areas that audit found entirely undocumented.
 
 ---
 
@@ -180,7 +190,10 @@ product owner, not independently verified by code inspection — code cannot
 confirm the state of a legal agreement):** an application for a BAA with
 Anthropic has been submitted; **it is not yet confirmed executed/countersigned**
 as of this writing. This is a live gap, not a closed item — see action items
-below.
+below. **Re-confirmed unchanged (still applied for, not executed) by the
+product owner on 2026-07-13** — do not treat the passage of time alone as
+progress; the next update to this line must reflect an actual status change,
+not merely a later re-confirmation of the same status.
 
 **What this means for your BAA obligations (action item, not a code
 concern):** Tahlk's technical gate only enforces that *some* acknowledgment
@@ -242,7 +255,259 @@ notes, or audio are ever recorded in this log.
 
 ---
 
-## 3. Encrypted-at-rest, confirmed clean (no action needed)
+## 3. Access control and person/entity authentication (§164.312(a), (d))
+
+**Status: open gaps, documented here for the first time as of `c9007ad`.**
+These are named, *required* implementation specifications under the
+Security Rule — not addressable/optional — and this document previously did
+not address them. That was a documentation gap in its own right, independent
+of whether the underlying code gap is remediated on any particular timeline.
+
+### 3.1 Person or entity authentication — §164.312(d) (required)
+
+**Current state:** Tahlk has no application-level login, PIN, passphrase, or
+biometric gate. `db_key.rs`'s `load_or_generate_dek()` fetches the SQLCipher
+database key from the OS keychain automatically at launch with no user-
+entered secret — the database opens for whoever can launch the app under the
+currently logged-in OS account. `secrets.rs` only manages the provider's own
+Anthropic API key (authenticating the *app* to Anthropic), not a person to
+the app.
+
+**Accepted control (named explicitly, not silently relied upon):** Tahlk
+designates the operating system's own session login (Windows/macOS user
+account authentication) as its person/entity authentication boundary for
+Solo tier. This is a real control when properly configured, but it is
+external to Tahlk and Tahlk cannot verify it is in place on any given
+device.
+
+**This places an explicit operational requirement on the provider/practice**
+(an Administrative Safeguard the covered entity must implement per
+§164.308(a)(5)(ii)(D), password management — addressable but expected absent
+a documented equivalent): OS-level login must be enabled on any device
+running Tahlk, with a non-trivial password/PIN, and shared or guest accounts
+must not be used to run the app.
+
+**Planned remediation (tracked, not yet built):** an in-app PIN/passphrase
+gate on launch and on resume-from-idle, independent of OS login, removing
+reliance on an external, unverifiable control. Until shipped, the OS-login
+boundary above is the accepted control and must be operationally enforced by
+the practice.
+
+### 3.2 Unique user identification — §164.312(a)(2)(i) (required)
+
+**Current state:** `src/core/capabilities.js`'s Solo-tier default is
+`currentUser: () => null`. `src/core/auditLog.js`'s `actor` field falls back
+to the hardcoded literal string `'provider'` whenever no user object exists
+— which, in Solo mode today, is always. Every audit-log entry produced by
+any installation is attributed to that same static string.
+
+**Accepted design assumption (named explicitly):** Tahlk Solo is licensed
+and intended to be used by exactly one identified clinician per
+installation. The `'provider'` audit-log actor string is intended to
+represent that single person, established via the existing provider-profile
+setup (name/NPI already captured in `kv` during onboarding) — not a
+generically anonymous placeholder. **This assumption must hold operationally:**
+Solo installations must not be shared across multiple staff members on the
+same machine/profile. If multi-staff shared-device usage is a real deployment
+pattern, this assumption is violated and a real per-user identifier becomes
+required, which converges with the 3.1 authentication gate.
+
+**Planned remediation (tracked, not yet built):** wire `currentUser()` to
+read the existing provider-profile record so the audit trail records the
+actual configured provider name rather than a static placeholder string.
+
+### 3.3 Automatic logoff — §164.312(a)(2)(iii) (required)
+
+**Current state:** No idle-timeout or inactivity-based session termination
+exists anywhere in the app (repo-wide search covers both the Rust backend
+and JS frontend; the only idle timeouts found govern database connection
+pooling and HTTP client behavior, not user sessions). Once launched, Tahlk
+remains fully accessible indefinitely regardless of idle duration.
+
+**Interim compensating control (operational, provider-managed, effective
+immediately at no engineering cost):** until an in-app timeout ships,
+practices must configure OS-level screen-lock-on-idle (standard, built into
+Windows and macOS) on any device running Tahlk, at an interval consistent
+with their workstation security policy (commonly 10–15 minutes in clinical
+settings). This is not equivalent to an in-app control — it depends on the
+same external, Tahlk-unverifiable boundary as 3.1 — but it is a real,
+immediately available mitigation and must be treated as a required setup
+step for any Tahlk deployment until superseded.
+
+**Planned remediation (tracked, not yet built):** an in-app idle timer
+(configurable, default 10–15 minutes) that locks the UI and requires
+re-entry of the 3.1 PIN/passphrase (once shipped) before further PHI is
+displayed.
+
+---
+
+## 4. Audit controls (§164.312(b), required)
+
+**Status: partially implemented, gaps documented here for the first time.**
+
+**Current state, two independent trails:**
+- `note_history.rs` — DB-backed, SHA-256 hash-chained (`prev_hash`/
+  `entry_hash`/`content_hash`), tamper-evident by construction, uncapped.
+  Covers the signed-note content lifecycle.
+- `src/core/auditLog.js` — a plain JS array in the KV store covering four
+  action types only (`note_edited`, `note_signed`, `audio_deleted`,
+  `note_exported`). It has **no hash-chain or tamper-evidence** and is
+  capped at `MAX_AUDIT_ENTRIES = 5000` with silent truncation
+  (`log.splice(0, log.length - maxEntries)`) — discarded entries are not
+  archived anywhere.
+
+**Named gap 1 — no record-access logging.** Neither trail logs when a
+provider *views* an existing encounter, transcript, or note — only mutating
+actions are recorded. "Activity...that record and examine activity in
+information systems" is generally understood to include access/read events,
+not only writes, consistent with standard EHR audit-log practice (who
+*viewed* this chart, not only who edited it).
+
+**Named gap 2 — `auditLog.js` has no integrity protection.** Any code path
+(or direct DB-level tampering) that can write to that KV key can rewrite
+history undetected, unlike the hash-chained `note_history` trail.
+
+**Named gap 3 — silent truncation.** A discarded `auditLog.js` entry past
+the 5,000 cap is permanently lost and indistinguishable, on later review,
+from tampering.
+
+**Planned remediation (tracked, not yet built):**
+1. Add a `record_viewed`/`encounter_opened` audit event on opening an
+   encounter panel, at minimum for encounters with signed notes or
+   transcripts.
+2. Extend `auditLog.js` with the same hash-chaining pattern already proven in
+   `note_history.rs`, or migrate its action set into the `note_history`
+   table so there is one tamper-evident trail instead of two.
+3. Remove silent truncation; if a cap is retained, archive discarded entries
+   to an exportable file and log the truncation event itself.
+
+---
+
+## 5. Contingency plan (§164.308(a)(7), required)
+
+**Status: no contingency plan previously existed in any form. Documented
+here for the first time.**
+
+**Data backup plan (required):** Tahlk Solo has no Tahlk-operated backend
+and no built-in backup mechanism — the entire patient record for every
+encounter (signed notes, transcripts, audit history, provider/patient
+records) lives in a single SQLCipher database file on one device. **The
+provider/practice is responsible for backing up this file** using their own
+encrypted backup solution (e.g., an encrypted external drive, encrypted
+cloud backup software the practice has separately vetted for HIPAA
+suitability). Tahlk does not currently provide an in-app export mechanism
+for a portable *encrypted* backup (the only export paths today — Flow C —
+produce unencrypted note files, not a full encrypted database backup, and are
+not a substitute for this).
+
+**Disaster recovery plan (required):** If the device is lost, stolen, or
+suffers disk failure, or if the OS keychain entry holding the database
+encryption key is corrupted or reset, the database fails closed
+(`db_key.rs`: "refusing to open database — restore keychain or reset app
+data") with **no in-app recovery path**. Recovery today depends entirely on
+whatever backup the provider independently maintained per the plan above. If
+no such backup exists, this is an unrecoverable, total loss of every patient
+record on that device.
+
+**Emergency mode operation plan (required):** If Tahlk is unavailable during
+a live patient encounter (device failure, app crash, etc.), the provider
+should fall back to their practice's standard manual/paper documentation
+process and backfill the encounter into Tahlk once available, consistent
+with normal downtime procedures for any clinical software.
+
+**Testing and revision procedures (addressable):** not yet established. The
+provider should periodically verify their own backup of the database file
+can actually be restored, not just that a backup file exists.
+
+**Applications and data criticality analysis (addressable):** the SQLCipher
+database file is the single critical asset in this application — its loss is
+equivalent to losing every patient record the practice has in Tahlk. No
+other component (whisper model, app binary, config) contains PHI or is
+irreplaceable by reinstalling.
+
+**Planned remediation (tracked, not yet built):** an in-app "export encrypted
+backup" feature producing a portable, still-encrypted copy of the database to
+a provider-chosen destination, distinct from the unencrypted note-export flow
+in Flow C — improving real-world recoverability without contradicting the
+local-first architecture.
+
+---
+
+## 6. Security incident procedures and breach notification (§164.308(a)(6); 45 CFR Part 164, Subpart D)
+
+**Status: no incident-response or breach-notification procedure previously
+existed. Documented here for the first time.**
+
+**Provider-facing incident reporting:** If a provider using Tahlk suspects a
+device compromise, loss, theft, or any other event that may have exposed
+patient data, they should report it to Greenbar Systems support as soon as
+possible so Greenbar Systems can investigate whether the exposure implicates
+anything in Tahlk's own software (as opposed to the provider's own device
+security, which is the provider's independent responsibility — see the
+Data backup plan and Disaster recovery plan in §5 above, and Flow C's
+provider-directed-export responsibility transfer in §2).
+
+**Greenbar Systems' commitment on notice of a suspected incident:**
+investigate promptly; if the investigation identifies a vulnerability in
+Tahlk itself that could have exposed PHI, notify affected providers so they
+can meet their own individual-notification obligations under §164.404 (to
+affected patients, without unreasonable delay and within 60 days of
+discovery) and, if applicable, §164.408 (to HHS). If Greenbar Systems is
+acting as a business associate in a given flow, notification to the covered
+entity follows the §164.410 timeline (without unreasonable delay, within 60
+days of discovery).
+
+**Division of responsibility:** because Tahlk Solo is local-first with no
+Tahlk-operated backend holding PHI, the covered entity (the individual
+provider or practice) is generally the party with direct notification
+obligations to their own patients under §164.404/408 for an incident
+confined to their own device. Greenbar Systems' role above is to support that
+obligation by promptly disclosing anything discovered about the software
+itself, and to independently evaluate its own notification duties as a
+business associate where that role applies (e.g., the Anthropic-relay flow in
+Flow D, or a future managed-key proxy).
+
+**Planned remediation:** formalize the above into a standalone incident-
+response runbook (intake channel, triage steps, internal escalation, and
+template provider notification) rather than leaving it as prose in this
+document only.
+
+---
+
+## 7. Retention and disposal
+
+**Status: partially implemented (audio only); no full-record retention/
+disposal policy previously documented.**
+
+**Current state:** `src/domain/retention.js` implements audio-only retention
+(`keep` vs. `delete_on_sign`), purging the raw `.wav` after signing when so
+configured. There is no capability to delete an entire encounter record —
+signed note, transcript text, and hash-chained history persist indefinitely
+with no exposed deletion path, no configurable retention period, and no
+disposal procedure.
+
+**Why this is lower severity than Sections 3–6:** indefinite retention of
+properly-secured PHI is not itself a HIPAA violation — many practices are
+required to retain records for years under state law. The gap is the
+*absence of a documented retention/disposal policy and of any tooling to
+act on one*, not the retention itself.
+
+**Accepted state (named explicitly):** retention and disposal of the
+full encounter record beyond the existing audio-purge control is the
+provider's responsibility to manage outside the app today (e.g., via device-
+level deletion or disposal procedures aligned with their state's medical-
+records retention requirements and any individual patient deletion request
+they are obligated to honor).
+
+**Planned remediation (tracked, not yet built):** a "delete this encounter
+permanently" command removing the note, transcript, hash-chain entries, and
+any residual files for a given encounter, gated behind confirmation and
+logged as a `record_deleted` audit event once Section 4's audit-log
+remediation is in place.
+
+---
+
+## 8. Encrypted-at-rest, confirmed clean (no action needed)
 
 Re-stated from the prior plaintext-PHI-at-rest sweep for completeness in this
 assessment:
@@ -255,7 +520,7 @@ assessment:
 - No crash-reporting SDK is integrated (would be an unaudited third-party
   data flow if one were added — re-assess this document if that changes).
 
-## 4. Out of scope for this assessment
+## 9. Out of scope for this assessment
 
 - `tahlk-sync` (Group-tier backend, `server/`) and `src/group/` — frozen per
   ADR 0001, no validated customer, no production deployment. The
@@ -270,7 +535,7 @@ assessment:
   document (see Flow D conditions above) before release, not folded in
   prematurely.
 
-## 5. Review cadence
+## 10. Review cadence
 
 This document should be re-reviewed:
 - Before every production release (see the companion checklist in
@@ -283,6 +548,14 @@ This document should be re-reviewed:
 - Whenever `tahlk-sync` moves toward unfreezing — this document's scope
   section explicitly excludes it today; that exclusion must be revisited,
   not silently carried forward.
+- Whenever any §3-§7 code remediation ships (in-app PIN/logoff gate, real
+  `currentUser()` identity, audit-log hash-chaining or access-event logging,
+  encrypted backup export, or record-deletion command) — update the affected
+  section's "Current state" and "Planned remediation" text to reflect what
+  actually shipped; do not leave a shipped fix described as still-planned.
+- At minimum every 6 months, or immediately on any change to the Anthropic
+  BAA status (§2 Flow D) — that status must never go stale for longer than
+  a routine review cycle, given it gates a live, ongoing PHI disclosure.
 
 **Document history:**
 - `461f9e7` — initial version. Consolidates `AUDIT-RESIDUAL-RISK.md`
@@ -294,3 +567,15 @@ This document should be re-reviewed:
   (Anthropic BAA application submitted, not yet confirmed executed) per the
   product owner. This is recorded as an open item, not resolved — re-update
   this section once the BAA is confirmed countersigned.
+- `c9007ad` (this update) — added §3 (access control / person-entity
+  authentication: no login gate, no unique user ID, no auto-logoff), §4
+  (audit control gaps: no record-access logging, no integrity protection or
+  archival on the JS-side audit log), §5 (contingency plan: no backup/
+  disaster-recovery documentation previously existed), §6 (incident-response
+  and breach-notification procedure: none previously existed), and §7
+  (retention/disposal policy beyond the existing audio-purge control). These
+  five required or partially-required Security Rule standards were entirely
+  absent from this document prior to this update, per the findings of a
+  2026-07-13 internal compliance audit (`tahlk_compliance_audit.md`).
+  Re-confirmed the Flow D BAA status unchanged (still applied for, not
+  executed) with the product owner as of this same date — see §2 Flow D.
