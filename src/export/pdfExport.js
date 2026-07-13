@@ -136,7 +136,7 @@ export async function saveToPdf(note, encounter) {
     suggestedName: exportFilenamePdf(encounter),
   });
 
-  appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format: 'pdf', method: 'file' });
+  await appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format: 'pdf', method: 'file' });
   emit('scribe:note_exported', { encounterId: encounter.id, format: 'pdf' });
 
   if (archivePdfHook) {

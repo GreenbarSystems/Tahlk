@@ -56,7 +56,7 @@ export async function copyToClipboard(text, encounterId, format) {
     } catch { /* clipboard unavailable — nothing to clear */ }
   }, CLIPBOARD_CLEAR_MS);
 
-  appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method: 'clipboard' });
+  await appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method: 'clipboard' });
   emit('scribe:note_exported', { encounterId, format });
 }
 
@@ -74,6 +74,6 @@ export function exportFilename(encounter, ext = 'txt') {
 export async function saveToFile(text, encounter, format) {
   await invoke('export_note_to_file', { content: text, suggestedName: exportFilename(encounter) });
 
-  appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format, method: 'file' });
+  await appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format, method: 'file' });
   emit('scribe:note_exported', { encounterId: encounter.id, format });
 }

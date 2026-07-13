@@ -74,3 +74,75 @@ export async function verifyHistoryChain(history) {
   }
   return { ok: true, legacySkipped };
 }
+
+// ── Audit-log chain (generic, arbitrary-shape entries) ────────────────────────────
+// auditLog.js entries don't have note_history's fixed 5-field shape — they
+// carry a variable `details` spread (encounterId, contentHash, removed,
+// reason, error, format, method, ...) that differs per action type. Hashing
+// only a fixed subset (like hashHistoryEntry does) would let those detail
+// fields be tampered with invisibly, so hashAuditEntry instead hashes the
+// entry's OWN keys (sorted, whatever they are) plus prevHash — every field
+// the entry actually carries is covered, with no fixed schema to drift out
+// of sync with appendAudit's callers.
+//
+// entryHash/prevHash themselves are excluded from the hashed payload (an
+// entry can't hash over its own output field), matching hashHistoryEntry's
+// convention of computing the hash before entryHash is attached.
+export async function hashAuditEntry(entry, prevHash) {
+  const { entryHash, prevHash: _ignoredPrevHash, ...rest } = entry || {};
+  const payload = { ...rest, prevHash: prevHash || null };
+  return sha256Hex(JSON.stringify(payload, Object.keys(payload).sort()));
+}
+
+// Same legacy-skip semantics as verifyHistoryChain: pre-hash-chaining
+// auditLog.js entries (written before this fix shipped) have no entryHash
+// at all. Those are counted as legacySkipped, not failures, as long as they
+// appear only as an unbroken prefix before the chain starts — an entryHash
+// gap AFTER the chain has started is real tampering (or a rollback to a
+// pre-upgrade binary that wrote un-hashed entries into an already-chained
+// log), so that case is still reported as broken.
+//
+// options.allowPartial (default false): unlike note_history.rs's history,
+// which is never trimmed, auditLog.js's live log CAN be truncated (oldest
+// entries evicted into note_audit_archive_v1::<id>, see core/auditLog.js).
+// After a truncation, the live log's own first entry legitimately carries
+// a non-null prevHash that points at an entry now living only in the
+// archive — verifying the live log in isolation can't resolve that link,
+// so by default this would be reported as broken even though nothing was
+// tampered with. Callers who know they're checking a possibly-truncated
+// live tail (rather than a from-genesis full chain) should pass
+// { allowPartial: true } to trust the first entry's stated prevHash as an
+// external anchor instead of requiring it to be null. Full end-to-end
+// verification (detecting whether that external anchor is itself correct)
+// requires walking archive+live together, e.g. verifyAuditChain([...archive, ...live]).
+export async function verifyAuditChain(log, options = {}) {
+  const allowPartial = options.allowPartial ?? false;
+  if (!Array.isArray(log) || !log.length) return { ok: true, legacySkipped: 0 };
+  let prevHash = null;
+  let chainStarted = false;
+  let legacySkipped = 0;
+  for (let i = 0; i < log.length; i++) {
+    const e = log[i];
+    if (!e.entryHash) {
+      if (chainStarted) {
+        return { ok: false, brokenAt: i, reason: 'missing entryHash after chain start', legacySkipped };
+      }
+      legacySkipped++;
+      continue;
+    }
+    const expected = await hashAuditEntry(e, e.prevHash ?? null);
+    if (expected !== e.entryHash) {
+      return { ok: false, brokenAt: i, reason: 'entryHash mismatch', legacySkipped };
+    }
+    if (chainStarted) {
+      if ((e.prevHash ?? null) !== prevHash) {
+        return { ok: false, brokenAt: i, reason: 'prevHash does not chain to prior entry', legacySkipped };
+      }
+    } else if ((e.prevHash ?? null) !== null && !allowPartial) {
+      return { ok: false, brokenAt: i, reason: 'first chained entry has non-null prevHash', legacySkipped };
+    }
+    chainStarted = true;
+    prevHash = e.entryHash;
+  }
+  return { ok: true, legacySkipped };
+}

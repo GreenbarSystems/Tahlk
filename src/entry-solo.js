@@ -6,6 +6,8 @@ import { installCapabilities } from './core/capabilities.js';
 import { loadHistory } from './domain/historyChain.js';
 import { verifyHistoryChain } from './utils/contentHash.js';
 import { reportIntegrityFailure } from './solo/integrityAlert.js';
+import { appendAudit } from './core/auditLog.js';
+import { shouldLogRecordView } from './domain/recordAccess.js';
 import * as telemetry from './core/telemetry.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
@@ -86,6 +88,25 @@ async function renderMainContent() {
     // Lazily pull this encounter's note/transcript/history/audit into cache
     // before the panel renders synchronously from it.
     await kvEnsure(encounterCacheKeys(_openEncounter.id));
+
+    // Record the view itself (HIPAA risk assessment §4, remediation item 1:
+    // "add a record_viewed/encounter_opened audit event on opening an
+    // encounter panel, at minimum for encounters with signed notes or
+    // transcripts"). Skipped only for a fresh 'recording' encounter — that
+    // status means the provider is actively creating it (nothing yet exists
+    // to view; the open IS the creation), not accessing an existing record.
+    // Every other status (recording_done, transcribing, draft, signed,
+    // exported) has at least a transcript or note already in it, so this is
+    // a superset of the doc's stated minimum bar, not a narrower one.
+    //
+    // Runs on every open, not just the first — HIPAA access logging tracks
+    // each access event, not distinct-record-ever-viewed.
+    if (shouldLogRecordView(_openEncounter)) {
+      await appendAudit(keys.noteAudit(_openEncounter.id), 'record_viewed', {
+        encounterId: _openEncounter.id,
+        status: _openEncounter.status,
+      });
+    }
 
     // Verify the tamper-evident chain when opening a signed note. Detects
     // post-sign alteration of the audit history (the chain was always built

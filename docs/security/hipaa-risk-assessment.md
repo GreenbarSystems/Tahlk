@@ -343,43 +343,80 @@ displayed.
 
 ## 4. Audit controls (§164.312(b), required)
 
-**Status: partially implemented, gaps documented here for the first time.**
+**Status: substantially remediated.** The three gaps first documented in
+the `c3e9383` revision of this document (no record-access logging, no
+integrity protection on the JS-side trail, silent truncation) have been
+fixed in code. One related item, real `currentUser()` identity wiring, is a
+separate open item — see the note at the end of this section.
 
-**Current state, two independent trails:**
+**Current state, two independent trails, both now tamper-evident:**
 - `note_history.rs` — DB-backed, SHA-256 hash-chained (`prev_hash`/
   `entry_hash`/`content_hash`), tamper-evident by construction, uncapped.
-  Covers the signed-note content lifecycle.
-- `src/core/auditLog.js` — a plain JS array in the KV store covering four
-  action types only (`note_edited`, `note_signed`, `audio_deleted`,
-  `note_exported`). It has **no hash-chain or tamper-evidence** and is
-  capped at `MAX_AUDIT_ENTRIES = 5000` with silent truncation
-  (`log.splice(0, log.length - maxEntries)`) — discarded entries are not
-  archived anywhere.
+  Covers the signed-note content lifecycle. Unchanged by this update.
+- `src/core/auditLog.js` — a JS array in the KV store, now hash-chained the
+  same way: every entry carries `prevHash`/`entryHash`
+  (`hashAuditEntry`/`verifyAuditChain` in `src/utils/contentHash.js`, mirroring
+  `note_history.rs`'s construction but hashing each entry's own full field
+  set rather than a fixed schema, since audit actions carry a variable
+  `details` payload). Covers six action types: `note_edited`, `note_signed`,
+  `audio_deleted`, `note_exported`, plus the two additions below.
 
-**Named gap 1 — no record-access logging.** Neither trail logs when a
-provider *views* an existing encounter, transcript, or note — only mutating
-actions are recorded. "Activity...that record and examine activity in
-information systems" is generally understood to include access/read events,
-not only writes, consistent with standard EHR audit-log practice (who
-*viewed* this chart, not only who edited it).
+**Gap 1 (record-access logging) — fixed.** Opening an encounter panel now
+appends a `record_viewed` entry (`src/entry-solo.js`, gated by
+`shouldLogRecordView` in `src/domain/recordAccess.js`), for every encounter
+status except `recording` — a fresh recording in progress has no existing
+content yet to "view" (the open IS the creation), so that status is
+excluded; every other status (`recording_done`, `transcribing`, `draft`,
+`signed`, `exported`) is logged, which is a superset of the originally
+stated minimum bar ("at least...encounters with signed notes or
+transcripts").
 
-**Named gap 2 — `auditLog.js` has no integrity protection.** Any code path
-(or direct DB-level tampering) that can write to that KV key can rewrite
-history undetected, unlike the hash-chained `note_history` trail.
+**Gap 2 (no integrity protection) — fixed.** `appendAudit` is now async and
+hash-chains each entry to the previous one exactly as described above.
+Because the chain's correctness depends on durable persistence, writes go
+through `kvSetAwait` (fails closed on a write error) rather than the
+fire-and-forget `kvSet`, matching the pattern `historyChain.js` already used
+for the sign-off chain. All six call sites were updated to `await` the now-
+async function.
 
-**Named gap 3 — silent truncation.** A discarded `auditLog.js` entry past
-the 5,000 cap is permanently lost and indistinguishable, on later review,
-from tampering.
+**Gap 3 (silent truncation) — fixed.** Entries evicted past
+`MAX_AUDIT_ENTRIES = 5000` are archived, never discarded: eviction moves the
+oldest entries into a parallel KV key (`note_audit_archive_v1::<id>`,
+derived from the live key via `archiveKeyFor`), preserving their original
+`entryHash`/`prevHash` so the archived tail still verifies as its own valid
+chain. The truncation itself is logged as an `audit_log_truncated` system
+entry (`actor: 'system'`) chained into the live log, recording exactly how
+many entries were evicted and which archive key they went to. The archive
+key is durably persisted (`kvSetAwait`) before the shortened live log, so a
+crash between the two writes cannot lose the evicted entries.
 
-**Planned remediation (tracked, not yet built):**
-1. Add a `record_viewed`/`encounter_opened` audit event on opening an
-   encounter panel, at minimum for encounters with signed notes or
-   transcripts.
-2. Extend `auditLog.js` with the same hash-chaining pattern already proven in
-   `note_history.rs`, or migrate its action set into the `note_history`
-   table so there is one tamper-evident trail instead of two.
-3. Remove silent truncation; if a cap is retained, archive discarded entries
-   to an exportable file and log the truncation event itself.
+**Live-log verification note.** Once a truncation has happened, the live
+log's own oldest surviving entry legitimately has a `prevHash` pointing at
+an entry that now lives only in the archive — checking the live log alone
+against `verifyAuditChain`'s default (from-genesis) semantics would
+therefore report a false break. `verifyAuditChain` takes an
+`{ allowPartial: true }` option for exactly this case (trust the live log's
+first entry's stated `prevHash` as an external anchor rather than requiring
+it to be null); a caller that wants the actual end-to-end guarantee should
+verify `[...archive, ...live]` as one chain instead.
+
+**Regression coverage.** `tests/js/test_auditLog.mjs` (chain construction,
+tamper detection across actor/details/action fields, legacy pre-hash-chain
+entries, truncation/archival correctness including the live log never
+exceeding the cap and every evicted entry being accounted for, fail-closed
+behavior on a durable-write failure) and `tests/js/test_recordAccess.mjs`
+(the `shouldLogRecordView` status allowlist). Both bug-injected and reverted
+against the real implementation to confirm the tests actually fail when the
+underlying protection is removed, not just when run against already-correct
+code.
+
+**Remaining open item (not part of this remediation):** `currentUser()`
+(`src/core/capabilities.js`) still defaults to `null` outside of a real
+authenticated-identity implementation, so `actor`/`actorId` on both trails
+currently stamp a generic `'provider'` label rather than a specific person
+until §3.2 (unique user identification) ships. Hash-chaining makes the
+*sequence* of events tamper-evident regardless, but attributing a given
+entry to a specific individual still depends on that separate item landing.
 
 ---
 
@@ -567,7 +604,7 @@ This document should be re-reviewed:
   (Anthropic BAA application submitted, not yet confirmed executed) per the
   product owner. This is recorded as an open item, not resolved — re-update
   this section once the BAA is confirmed countersigned.
-- `c9007ad` (this update) — added §3 (access control / person-entity
+- `c9007ad` — added §3 (access control / person-entity
   authentication: no login gate, no unique user ID, no auto-logoff), §4
   (audit control gaps: no record-access logging, no integrity protection or
   archival on the JS-side audit log), §5 (contingency plan: no backup/
@@ -579,3 +616,17 @@ This document should be re-reviewed:
   2026-07-13 internal compliance audit (`tahlk_compliance_audit.md`).
   Re-confirmed the Flow D BAA status unchanged (still applied for, not
   executed) with the product owner as of this same date — see §2 Flow D.
+- `c3e9383` — cheap documentation-only fixes from the same audit pass
+  (no code changes).
+- (this update) — §4 rewritten from "planned remediation, tracked, not yet
+  built" to describe the shipped fix: `auditLog.js` is now SHA-256
+  hash-chained (`hashAuditEntry`/`verifyAuditChain` in
+  `src/utils/contentHash.js`), truncation past `MAX_AUDIT_ENTRIES` now
+  archives evicted entries to `note_audit_archive_v1::<id>` instead of
+  discarding them, and opening an encounter now logs a `record_viewed`
+  event (`shouldLogRecordView` in `src/domain/recordAccess.js`) for every
+  status except `recording`. Covered by `tests/js/test_auditLog.mjs` and
+  `tests/js/test_recordAccess.mjs`, both verified against the real
+  implementation via bug-injection-and-revert. Flagged the still-open
+  `currentUser()` identity gap (§3.2) as a separate item this change does
+  not resolve.

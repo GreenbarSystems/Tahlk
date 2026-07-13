@@ -32,7 +32,7 @@ export async function saveDraftEdited(encounterId, noteContent, transcript) {
   await kvSetAwait(keys.noteContent(encounterId), noteContent);
   const contentHash = await computeNoteHash({ transcript, noteContent, signedBy: '', encounterId });
   await appendHistoryEntry(encounterId, { action: 'edited', actor: 'provider', contentHash });
-  appendAudit(keys.noteAudit(encounterId), 'note_edited', { encounterId });
+  await appendAudit(keys.noteAudit(encounterId), 'note_edited', { encounterId });
   emit('scribe:draft_saved', { encounterId });
 }
 
@@ -52,7 +52,7 @@ export async function signNote(encounterId, noteContent, transcript, providerNam
 
   await encountersRepo.markSigned(encounterId, nowISO(), contentHash);
 
-  appendAudit(keys.noteAudit(encounterId), 'note_signed', { encounterId, contentHash });
+  await appendAudit(keys.noteAudit(encounterId), 'note_signed', { encounterId, contentHash });
   emit('scribe:note_signed', { encounterId, hash: contentHash });
   return contentHash;
 }
@@ -73,7 +73,7 @@ export async function purgeAudio(encounterId, { reason = 'manual' } = {}) {
   } catch (e) {
     error = e?.message || String(e);
   }
-  appendAudit(keys.noteAudit(encounterId), 'audio_deleted', { encounterId, removed, reason, error });
+  await appendAudit(keys.noteAudit(encounterId), 'audio_deleted', { encounterId, removed, reason, error });
   emit('scribe:audio_deleted', { encounterId, removed, reason, error });
   return { removed, error };
 }

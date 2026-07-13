@@ -14,6 +14,12 @@ export const keys = {
   // non-Tauri fallback in domain/historyChain.js and for tests that mock KV.
   noteHistory:    id => `note_history_v1::${id}`,
   noteAudit:      id => `note_audit_v1::${id}`,
+  // Overflow store for entries evicted from noteAudit once MAX_AUDIT_ENTRIES
+  // is exceeded. Nothing is discarded on truncation any more (HIPAA risk
+  // assessment §4, remediation item 3) — evicted entries move here instead,
+  // still in their original hash-chained form, so a full history remains
+  // recoverable/exportable even though the live log stays capped.
+  noteAuditArchive: id => `note_audit_archive_v1::${id}`,
   customTemplate: id => `note_templates_v1::${id}`,
   telemetryEnabled: () => 'note_settings_v1::telemetry_enabled',
   audioRetention:   () => 'note_settings_v1::audio_retention',
