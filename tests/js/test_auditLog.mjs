@@ -1,31 +1,72 @@
 // Unit tests for the hash-chained audit log (core/auditLog.js +
 // utils/contentHash.js::hashAuditEntry/verifyAuditChain).
 //
-// Before this fix, auditLog.js appended plain unchained entries and silently
-// discarded anything past MAX_AUDIT_ENTRIES via `log.splice(...)`. This
-// suite pins down the replacement contract:
+// Persistence moved off the generic KV store onto three Tauri commands
+// (audit_list / audit_archive_list / audit_append — see
+// src-tauri/src/note_audit.rs) as the fix for audit finding H1 ("JS-side
+// audit log ... fully deletable/overwritable via generic kv_remove/
+// kv_set"). This suite pins down the same contract as before that
+// migration, now exercised through a mock that mirrors the real Rust
+// table's behavior (prev_hash chain-check, archive-on-append, JSON
+// round-trip so a locally-mutated read never corrupts "stored" data):
 //   - every appended entry chains to the previous one (prevHash/entryHash)
 //   - tampering with any field (not just a fixed subset) is detectable
 //   - going over the cap archives the evicted entries instead of discarding
 //     them, and logs a `audit_log_truncated` event in the live log
 //   - appendAudit is async and its durable write can be made to fail closed
 //
-// Same mocking approach as test_signoff.mjs: install the test-only Tauri
-// escape hatch BEFORE importing app modules so storageBackend.js resolves to
-// TauriBackend (getSync reads its own in-memory _cache; setAsync/setSync
-// write to that cache immediately and then best-effort persist via invoke).
+// Same escape-hatch approach as test_signoff.mjs: install the test-only
+// Tauri mock BEFORE importing app modules so platform/tauri.js's `isTauri`
+// resolves true and auditLog.js takes the Tauri-backed path, not the
+// non-Tauri KV fallback.
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 const calls = [];
-let kvSetShouldReject = null; // set to an Error to simulate a failed durable write
+let auditAppendShouldReject = null; // set to an Error to simulate a failed durable write
+
+// Simulated note_audit table: encounterId -> ordered array of
+// { archived, entryJson }. Entries are stored/returned as JSON strings so a
+// caller mutating a returned array never corrupts what's "persisted" —
+// matching the real table's JSON round-trip via entry_json.
+const auditDb = new Map();
+function rowsFor(encounterId) {
+  if (!auditDb.has(encounterId)) auditDb.set(encounterId, []);
+  return auditDb.get(encounterId);
+}
 
 function invokeMock(cmd, args) {
   calls.push({ cmd, args });
-  if (cmd === 'kv_set') {
-    if (kvSetShouldReject) return Promise.reject(kvSetShouldReject);
-    return Promise.resolve(null);
+  if (cmd === 'audit_list') {
+    const rows = rowsFor(args.encounterId).filter(r => !r.archived);
+    return Promise.resolve(rows.map(r => JSON.parse(r.entryJson)));
+  }
+  if (cmd === 'audit_archive_list') {
+    const rows = rowsFor(args.encounterId).filter(r => r.archived);
+    return Promise.resolve(rows.map(r => JSON.parse(r.entryJson)));
+  }
+  if (cmd === 'audit_append') {
+    if (auditAppendShouldReject) return Promise.reject(auditAppendShouldReject);
+    const rows = rowsFor(args.encounterId);
+    const lastHash = rows.length ? JSON.parse(rows[rows.length - 1].entryJson).entryHash : null;
+    const incomingPrevHash = args.entry.prevHash ?? null;
+    if (lastHash !== incomingPrevHash) {
+      return Promise.reject(Object.assign(
+        new Error(`prev_hash chain mismatch (expected ${lastHash}, got ${incomingPrevHash})`),
+        { code: 'invalid_input' },
+      ));
+    }
+    rows.push({ archived: false, entryJson: JSON.stringify(args.entry) });
+    // Archive the oldest still-live rows, oldest-first — mirrors the real
+    // `ORDER BY seq ASC LIMIT evicted_count` UPDATE, and by construction
+    // never reaches the row just pushed above.
+    let toEvict = args.evictedCount || 0;
+    for (const row of rows) {
+      if (toEvict <= 0) break;
+      if (!row.archived) { row.archived = true; toEvict--; }
+    }
+    return Promise.resolve(rows.length);
   }
   return Promise.resolve(null);
 }
@@ -39,16 +80,23 @@ globalThis.window = globalThis.window || {};
 
 const { appendAudit, MAX_AUDIT_ENTRIES } = await import('../../src/core/auditLog.js');
 const { verifyAuditChain, hashAuditEntry } = await import('../../src/utils/contentHash.js');
-const { kvGet } = await import('../../src/core/storageBackend.js');
+const { invoke } = await import('../../src/platform/tauri.js');
 const { keys } = await import('../../src/data/keys.js');
 const { resetCapabilities } = await import('../../src/core/capabilities.js');
 
 let _n = 0;
 const uid = () => `enc-audit-test-${++_n}`;
 
+// Reads back through the same commands auditLog.js itself calls, bypassing
+// its in-memory cache — these assert on what's actually "persisted" in the
+// mock table, not on auditLog.js's own view of it.
+const liveOf = id => invoke('audit_list', { encounterId: id });
+const archiveOf = id => invoke('audit_archive_list', { encounterId: id });
+
 beforeEach(() => {
   calls.length = 0;
-  kvSetShouldReject = null;
+  auditAppendShouldReject = null;
+  auditDb.clear();
   resetCapabilities();
 });
 
@@ -73,7 +121,7 @@ test('sequential appends chain: each entryHash becomes the next prevHash', async
   assert.equal(e2.prevHash, e1.entryHash);
   assert.equal(e3.prevHash, e2.entryHash);
 
-  const log = kvGet(key);
+  const log = await liveOf(id);
   assert.equal(log.length, 3);
   const verdict = await verifyAuditChain(log);
   assert.equal(verdict.ok, true);
@@ -100,11 +148,13 @@ test('tampering with a details field (not just action/actor/timestamp) is detect
   const key = keys.noteAudit(id);
   await appendAudit(key, 'audio_deleted', { encounterId: id, removed: true, reason: 'manual', error: null });
 
-  const log = kvGet(key);
+  const log = await liveOf(id);
   assert.equal((await verifyAuditChain(log)).ok, true);
 
   // Mutate a details field WITHOUT touching entryHash — simulates direct
-  // KV/DB-level tampering, not a re-append.
+  // DB-level tampering, not a re-append. Safe to mutate: liveOf() returns a
+  // freshly JSON-parsed copy each call (see invokeMock), so this can't
+  // corrupt what's "persisted" the way a shared-reference read would.
   log[0].reason = 'tampered-reason';
   const verdict = await verifyAuditChain(log);
   assert.equal(verdict.ok, false);
@@ -116,7 +166,7 @@ test('tampering with the actor field is detected', async () => {
   const id = uid();
   const key = keys.noteAudit(id);
   await appendAudit(key, 'note_signed', { encounterId: id, contentHash: 'c1' });
-  const log = kvGet(key);
+  const log = await liveOf(id);
   log[0].actor = 'Dr. Impostor';
   assert.equal((await verifyAuditChain(log)).ok, false);
 });
@@ -128,7 +178,7 @@ test('splicing out a middle entry breaks the prevHash link for the entry after i
   await appendAudit(key, 'note_signed', { encounterId: id, contentHash: 'c1' });
   await appendAudit(key, 'note_exported', { format: 'pdf', method: 'file' });
 
-  const log = kvGet(key);
+  const log = await liveOf(id);
   assert.equal((await verifyAuditChain(log)).ok, true);
 
   log.splice(1, 1); // remove the middle entry; entry[1] (was entry[2]) now has a stale prevHash
@@ -144,7 +194,7 @@ test('a reordered (swapped) pair of entries is detected', async () => {
   await appendAudit(key, 'note_edited', { encounterId: id });
   await appendAudit(key, 'note_signed', { encounterId: id, contentHash: 'c1' });
 
-  const log = kvGet(key);
+  const log = await liveOf(id);
   [log[0], log[1]] = [log[1], log[0]]; // swap order without recomputing hashes
   const verdict = await verifyAuditChain(log);
   assert.equal(verdict.ok, false);
@@ -185,15 +235,14 @@ test('a legacy entry appearing AFTER the chain has started is reported broken, n
 test('appending past MAX_AUDIT_ENTRIES archives evicted entries instead of discarding them, and the live log never exceeds the cap', async () => {
   const id = uid();
   const key = keys.noteAudit(id);
-  const archiveKey = keys.noteAuditArchive(id);
   const cap = 5; // small cap so the test doesn't need to append thousands of times
 
   for (let i = 0; i < cap + 3; i++) {
     await appendAudit(key, 'note_exported', { format: 'pdf', method: 'file', i }, cap);
   }
 
-  const live = kvGet(key);
-  const archive = kvGet(archiveKey) || [];
+  const live = await liveOf(id);
+  const archive = await archiveOf(id);
 
   // The live log (content + truncation markers together) must never exceed
   // the cap — that's the entire point of eviction existing.
@@ -221,18 +270,20 @@ test('appending past MAX_AUDIT_ENTRIES archives evicted entries instead of disca
 test('a truncation event is itself logged in the live log, chained after the triggering entry, with an accurate evictedCount', async () => {
   const id = uid();
   const key = keys.noteAudit(id);
-  const archiveKey = keys.noteAuditArchive(id);
   const cap = 3;
 
   for (let i = 0; i < cap + 1; i++) {
     await appendAudit(key, 'note_exported', { format: 'pdf', method: 'file', i }, cap);
   }
 
-  const live = kvGet(key);
-  const archive = kvGet(archiveKey) || [];
+  const live = await liveOf(id);
+  const archive = await archiveOf(id);
   const truncationEvents = live.filter(e => e.action === 'audit_log_truncated');
   assert.equal(truncationEvents.length, 1, 'exactly one truncation event for the one overflow');
-  assert.equal(truncationEvents[0].archivedTo, keys.noteAuditArchive(id));
+  // On the Tauri-backed path there is no separate archive key any more —
+  // archiving is an in-table flag, not a KV move — so archivedTo is
+  // deliberately omitted rather than left stale (see auditLog.js).
+  assert.equal(truncationEvents[0].archivedTo, undefined);
 
   // The reported evictedCount must exactly match how many entries actually
   // landed in the archive — this is the number a compliance reviewer would
@@ -260,14 +311,13 @@ test('a truncation event is itself logged in the live log, chained after the tri
 test('archived entries retain their original entryHash/prevHash and still verify as a chain', async () => {
   const id = uid();
   const key = keys.noteAudit(id);
-  const archiveKey = keys.noteAuditArchive(id);
   const cap = 2;
 
   for (let i = 0; i < cap + 4; i++) {
     await appendAudit(key, 'note_exported', { format: 'pdf', method: 'file', i }, cap);
   }
 
-  const archive = kvGet(archiveKey);
+  const archive = await archiveOf(id);
   assert.ok(archive.length > 0);
   const verdict = await verifyAuditChain(archive);
   assert.equal(verdict.ok, true, 'the archived tail must still be an internally valid chain');
@@ -276,16 +326,15 @@ test('archived entries retain their original entryHash/prevHash and still verify
 test('repeated truncations keep appending to the same archive rather than overwriting it, and the live log stays within cap throughout', async () => {
   const id = uid();
   const key = keys.noteAudit(id);
-  const archiveKey = keys.noteAuditArchive(id);
   const cap = 2;
 
   for (let i = 0; i < cap * 3; i++) {
     await appendAudit(key, 'note_exported', { format: 'pdf', method: 'file', i }, cap);
-    const live = kvGet(key);
+    const live = await liveOf(id);
     assert.ok(live.length <= cap, `live log exceeded cap mid-run at i=${i}: length ${live.length} > cap ${cap}`);
   }
 
-  const archive = kvGet(archiveKey);
+  const archive = await archiveOf(id);
   // Across cap*3=6 appends with cap=2, multiple truncation rounds must have
   // fired, all landing in one growing archive, not each truncation
   // clobbering the last.
@@ -300,9 +349,9 @@ test('repeated truncations keep appending to the same archive rather than overwr
 
 // ── Fails closed on a durable-write failure ─────────────────────────────────
 
-test('appendAudit rejects if the durable kv_set write fails, matching historyChain\u2019s fail-closed contract', async () => {
+test('appendAudit rejects if the durable audit_append write fails, matching historyChain\u2019s fail-closed contract', async () => {
   const id = uid();
-  kvSetShouldReject = Object.assign(new Error('disk full'), { code: 'storage' });
+  auditAppendShouldReject = Object.assign(new Error('disk full'), { code: 'storage' });
   await assert.rejects(() => appendAudit(keys.noteAudit(id), 'note_edited', { encounterId: id }));
 });
 

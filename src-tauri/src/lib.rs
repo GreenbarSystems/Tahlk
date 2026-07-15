@@ -8,6 +8,7 @@
 //!   - `baa`           — Anthropic BAA acknowledgment gate (audit finding C2).
 //!   - `encounters`    — encounter CRUD, sign-off, stats.
 //!   - `note_history`  — relational note-history append-log + KV→table migration.
+//!   - `note_audit`    — relational record-access/activity audit log + KV→table migration.
 //!   - `llm_audit`     — append-only log of Anthropic calls (metadata only, no PHI).
 //!   - `audio`         — session audio save/delete with path-traversal hardening.
 //!   - `audio_crypto`  — AES-256-GCM at-rest encryption for session audio + migration.
@@ -34,6 +35,7 @@ mod kv;
 mod kv_ops;
 mod llm_audit;
 mod log_safety;
+mod note_audit;
 mod note_history;
 mod notes;
 mod patients;
@@ -140,6 +142,9 @@ pub fn run() {
             note_history::note_history_list,
             note_history::note_history_append,
             note_history::note_history_list_encounter_ids,
+            note_audit::audit_list,
+            note_audit::audit_archive_list,
+            note_audit::audit_append,
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,

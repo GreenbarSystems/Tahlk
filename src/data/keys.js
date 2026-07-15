@@ -13,12 +13,11 @@ export const keys = {
   // note_history.rs). The legacy KV key format is retained ONLY for the
   // non-Tauri fallback in domain/historyChain.js and for tests that mock KV.
   noteHistory:    id => `note_history_v1::${id}`,
+  // note_audit is stored in a proper SQLite table now (see src-tauri/src/
+  // note_audit.rs), with an `archived` column replacing the separate
+  // archive key below. The legacy KV key formats are retained ONLY for the
+  // non-Tauri fallback in core/auditLog.js and for tests that mock KV.
   noteAudit:      id => `note_audit_v1::${id}`,
-  // Overflow store for entries evicted from noteAudit once MAX_AUDIT_ENTRIES
-  // is exceeded. Nothing is discarded on truncation any more (HIPAA risk
-  // assessment §4, remediation item 3) — evicted entries move here instead,
-  // still in their original hash-chained form, so a full history remains
-  // recoverable/exportable even though the live log stays capped.
   noteAuditArchive: id => `note_audit_archive_v1::${id}`,
   customTemplate: id => `note_templates_v1::${id}`,
   telemetryEnabled: () => 'note_settings_v1::telemetry_enabled',
@@ -32,10 +31,10 @@ export const keys = {
 };
 
 // Per-encounter keys pulled into cache lazily when an encounter is opened.
-// noteHistory is intentionally excluded — history now lives in its own
-// SQLite table, loaded via note_history_list, not the KV cache.
+// noteHistory and noteAudit are intentionally excluded — both now live in
+// their own SQLite tables, loaded via note_history_list / audit_list, not
+// the KV cache.
 export const encounterCacheKeys = id => [
   keys.noteContent(id),
   keys.noteTranscript(id),
-  keys.noteAudit(id),
 ];

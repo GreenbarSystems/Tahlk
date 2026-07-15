@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
-use crate::{db_key, errors::AppError, llm_audit, note_history, DbState};
+use crate::{db_key, errors::AppError, llm_audit, note_audit, note_history, DbState};
 
 /// Alias for the desktop-wide SQLite pool type. Every command that used to
 /// take a `Mutex<Connection>` guard now takes a `PooledConnection` handed out
@@ -394,6 +394,8 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
     conn.execute_batch(SCHEMA_TABLES)?;
     note_history::init_schema(&conn)?;
     note_history::migrate_from_kv(&mut conn)?;
+    note_audit::init_schema(&conn)?;
+    note_audit::migrate_from_kv(&mut conn)?;
     llm_audit::init_schema(&conn)?;
     drop(conn);
 
