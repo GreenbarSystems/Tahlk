@@ -16,6 +16,8 @@
 //!   - `log_safety`    — filename/error redaction for the (unencrypted) app log.
 //!   - `notes`         — Anthropic streaming note generation (BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
+//!   - `patients`       — patient roster CRUD.
+//!   - `patient_audit`  — append-only audit log for patient roster CRUD.
 //!
 //! `DbState` stays at the crate root so every module can name it via
 //! `crate::DbState` without cyclic imports; this file only wires setup and
@@ -38,6 +40,7 @@ mod log_safety;
 mod note_audit;
 mod note_history;
 mod notes;
+mod patient_audit;
 mod patients;
 mod perms;
 mod secrets;
@@ -139,6 +142,7 @@ pub fn run() {
             patients::get_patient,
             patients::upsert_patient,
             patients::delete_patient,
+            patient_audit::patient_audit_list,
             note_history::note_history_list,
             note_history::note_history_append,
             note_history::note_history_list_encounter_ids,
