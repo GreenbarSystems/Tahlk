@@ -68,10 +68,25 @@ impl TenantEncounters {
 
 // In-memory implementation — lets the service run with no database. Maps are
 // keyed by tenant so isolation holds here too.
+//
+// `audit` is nested (tenant -> encounter_id -> entries), not a single map
+// keyed by a composite `"{tenant}::{encounter_id}"` string (audit finding,
+// Medium: "InMemoryStore has no tenant-isolation defense-in-depth"). A
+// composite string key is a real collision hazard here, not just a
+// theoretical one: `encounter_id` is an unvalidated URL path segment
+// (api.rs's `Path<String>` extractor), so nothing stops it from containing
+// `::`. Two different (tenant, encounter_id) pairs can then hash to the
+// exact same string — e.g. tenant "acme" + encounter_id "secret::notes"
+// produces the identical key "acme::secret::notes" as tenant "acme::secret"
+// + encounter_id "notes" — which would let one tenant's audit entries land
+// in, or be read from, a bucket a different tenant's request also resolves
+// to. Nesting the maps (mirroring `encounters`'s existing, correct
+// tenant-keyed design) removes the ambiguity structurally: no string
+// encoding, no separator to collide on.
 #[derive(Default)]
 pub struct InMemoryStore {
     encounters: Mutex<HashMap<String, TenantEncounters>>,
-    audit: Mutex<HashMap<String, VecDeque<AuditEntry>>>,
+    audit: Mutex<HashMap<String, HashMap<String, VecDeque<AuditEntry>>>>,
 }
 
 impl InMemoryStore {
@@ -111,9 +126,12 @@ impl EncounterStore for InMemoryStore {
     }
 
     async fn append_audit(&self, tenant: &str, entry: AuditEntry) -> anyhow::Result<()> {
-        let key = format!("{tenant}::{}", entry.encounter_id);
         let mut guard = self.audit.lock();
-        let entries = guard.entry(key).or_default();
+        let entries = guard
+            .entry(tenant.to_string())
+            .or_default()
+            .entry(entry.encounter_id.clone())
+            .or_default();
         entries.push_back(entry);
         while entries.len() > MAX_AUDIT_ENTRIES_PER_ENCOUNTER {
             entries.pop_front();
@@ -122,11 +140,11 @@ impl EncounterStore for InMemoryStore {
     }
 
     async fn list_audit(&self, tenant: &str, encounter_id: &str) -> anyhow::Result<Vec<AuditEntry>> {
-        let key = format!("{tenant}::{encounter_id}");
         Ok(self
             .audit
             .lock()
-            .get(&key)
+            .get(tenant)
+            .and_then(|by_encounter| by_encounter.get(encounter_id))
             .map(|entries| entries.iter().cloned().collect())
             .unwrap_or_default())
     }
@@ -236,5 +254,38 @@ mod tests {
         assert_eq!(store.list_audit("tenant-a", "e1").await.unwrap().len(), 1);
         assert_eq!(store.list_audit("tenant-b", "e1").await.unwrap().len(), 1);
         assert_eq!(store.list_audit("tenant-a", "e2").await.unwrap().len(), 0);
+    }
+
+    // Regression for the composite-string-key collision a nested map
+    // structurally eliminates: tenant "acme" + encounter_id "secret::notes"
+    // and tenant "acme::secret" + encounter_id "notes" would have hashed to
+    // the identical `"acme::secret::notes"` key under the old
+    // `format!("{tenant}::{encounter_id}")` scheme, letting one tenant's
+    // audit entries be visible to (or overwritten by) a different tenant.
+    // encounter_id is an unvalidated URL path segment in api.rs, so `::`
+    // reaching this code is a real, reachable input, not a contrived one.
+    #[tokio::test]
+    async fn tenant_and_encounter_id_containing_the_old_separator_do_not_collide() {
+        let store = InMemoryStore::new();
+        store
+            .append_audit("acme", audit_entry("secret::notes", "victim-entry"))
+            .await
+            .unwrap();
+        store
+            .append_audit("acme::secret", audit_entry("notes", "attacker-entry"))
+            .await
+            .unwrap();
+
+        let victim = store.list_audit("acme", "secret::notes").await.unwrap();
+        let attacker = store.list_audit("acme::secret", "notes").await.unwrap();
+
+        assert_eq!(victim.len(), 1, "the victim's own entry must be visible");
+        assert_eq!(victim[0].action, "victim-entry");
+        assert_eq!(attacker.len(), 1, "the attacker's own entry must be visible");
+        assert_eq!(attacker[0].action, "attacker-entry");
+        // Neither must see the other's entry — this is the actual isolation
+        // property the old composite key could silently violate.
+        assert!(!victim.iter().any(|e| e.action == "attacker-entry"));
+        assert!(!attacker.iter().any(|e| e.action == "victim-entry"));
     }
 }

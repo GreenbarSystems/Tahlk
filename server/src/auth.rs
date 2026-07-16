@@ -196,23 +196,50 @@ impl JwtVerifier {
         self.refresh_jwks().await
     }
 
+    // Algorithm-confusion defense (audit finding, Medium: "JWT verification
+    // trusts client-supplied alg header instead of a server-side algorithm
+    // allowlist"). The previous version of `select_key` returned
+    // `header.alg` verbatim — whatever algorithm the TOKEN claimed — which
+    // `verify` then fed straight into `Validation::new(alg)`. That is the
+    // textbook shape of an algorithm-confusion vulnerability: an attacker
+    // who can get a server to validate a token using an algorithm THEY
+    // chose (rather than one the server expects for that key) can, in the
+    // classic case, present an HS256 token "signed" with the RSA public key
+    // bytes as the HMAC secret — the public key is public precisely because
+    // it's published in the JWKS, so nothing about it is secret to an
+    // attacker.
+    //
+    // The fix: each key path has exactly one algorithm it will EVER accept,
+    // decided by which path is active — never by what the token claims.
+    // `header.alg` is checked against that fixed expectation and rejected
+    // on any mismatch BEFORE a key is even selected, so a mismatched-alg
+    // token never reaches key lookup or signature verification at all.
+    const DEV_ALG: Algorithm = Algorithm::HS256;
+    const PROD_ALG: Algorithm = Algorithm::RS256;
+
     // Pick the decoding key + algorithm for a token. In dev-bypass mode the
     // symmetric key is always used; otherwise the token's `kid` selects the key,
     // refreshing the JWKS once on a miss so IdP rotation is handled live.
     async fn select_key(&self, header: &Header) -> Result<(DecodingKey, Algorithm), ApiError> {
         if let Some(dev) = &self.dev_hs256 {
-            return Ok((dev.clone(), Algorithm::HS256));
+            if header.alg != Self::DEV_ALG {
+                return Err(ApiError::Unauthorized);
+            }
+            return Ok((dev.clone(), Self::DEV_ALG));
+        }
+        if header.alg != Self::PROD_ALG {
+            return Err(ApiError::Unauthorized);
         }
         let kid = header.kid.clone().ok_or(ApiError::Unauthorized)?;
         if let Some(key) = self.keys.read().get(&kid).cloned() {
-            return Ok((key, header.alg));
+            return Ok((key, Self::PROD_ALG));
         }
         self.refresh_jwks_throttled().await.map_err(|_| ApiError::Unauthorized)?;
         self.keys
             .read()
             .get(&kid)
             .cloned()
-            .map(|key| (key, header.alg))
+            .map(|key| (key, Self::PROD_ALG))
             .ok_or(ApiError::Unauthorized)
     }
 
@@ -468,6 +495,8 @@ EazcBoQzeLMAdK4yNGlpoaw=
 mod tests {
     use super::testkit::*;
     use super::*;
+    use jsonwebtoken::{encode, EncodingKey};
+    use serde::Serialize;
 
     #[tokio::test]
     async fn valid_token_yields_claims_derived_context() {
@@ -532,6 +561,84 @@ mod tests {
         // kid miss triggers a JWKS refresh; jwks_url is empty here so it fails
         // and the token is rejected rather than accepted.
         assert!(matches!(v.verify(&token).await, Err(ApiError::Unauthorized)));
+    }
+
+    // --- Algorithm-confusion defense -----------------------------------------
+
+    // The classic attack: an attacker crafts a token with alg=HS256 and
+    // "signs" it using the RSA public key's own bytes as the HMAC secret —
+    // the public key is, definitionally, public (it's published in the
+    // JWKS), so nothing stops an attacker from reading it and using it as
+    // an HMAC key. If the server ever validated using whatever algorithm
+    // the TOKEN claimed (the old behavior), this would potentially let an
+    // attacker forge tokens without ever having the RSA private key. With
+    // the fix, the header's declared alg (HS256) is checked against the
+    // fixed expectation for the production/JWKS path (RS256) and rejected
+    // before any key lookup or signature check happens at all.
+    #[tokio::test]
+    async fn hs256_token_is_rejected_against_the_rs256_production_verifier() {
+        let v = verifier();
+        #[derive(Serialize)]
+        struct C { iss: String, aud: String, exp: i64, nbf: i64, tenant_id: String, provider_id: String }
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(KID.to_string());
+        let claims = C {
+            iss: ISSUER.into(), aud: AUDIENCE.into(),
+            exp: now_for_test() + 3600, nbf: now_for_test() - 60,
+            tenant_id: "tenant-a".into(), provider_id: "provider-1".into(),
+        };
+        // Use the RSA public key's own PEM bytes as the HMAC secret — the
+        // exact "public key as HMAC secret" attack shape.
+        let key = EncodingKey::from_secret(PUB_PEM.as_bytes());
+        let token = encode(&header, &claims, &key).unwrap();
+        assert!(
+            matches!(v.verify(&token).await, Err(ApiError::Unauthorized)),
+            "an HS256 token must never validate against the RS256 production verifier, \
+             regardless of what secret it was signed with"
+        );
+    }
+
+    // Mirror case: the dev-bypass (HS256) verifier must reject an RS256
+    // token even if it's a genuinely validly-signed one from the real
+    // issuer's key material — dev-bypass only ever trusts its one symmetric
+    // secret, never the token's own claimed algorithm.
+    #[tokio::test]
+    async fn rs256_token_is_rejected_against_the_hs256_dev_bypass_verifier() {
+        let mut v = verifier();
+        v.dev_hs256 = Some(DecodingKey::from_secret(b"dev-only-secret"));
+        let token = mint(&MintOpts::default()); // a normal RS256 token
+        assert!(
+            matches!(v.verify(&token).await, Err(ApiError::Unauthorized)),
+            "an RS256 token must never validate against the HS256 dev-bypass verifier"
+        );
+    }
+
+    // Belt-and-suspenders: even a token whose alg matches what the verifier
+    // expects, but is signed with a DIFFERENT HS256 secret than the
+    // configured one, must still be rejected — proves the alg check isn't
+    // papering over a missing signature check.
+    #[tokio::test]
+    async fn hs256_token_with_wrong_secret_is_rejected_by_dev_bypass_verifier() {
+        let mut v = verifier();
+        v.dev_hs256 = Some(DecodingKey::from_secret(b"the-real-secret"));
+        #[derive(Serialize)]
+        struct C { iss: String, aud: String, exp: i64, nbf: i64, tenant_id: String, provider_id: String }
+        let header = Header::new(Algorithm::HS256);
+        let claims = C {
+            iss: ISSUER.into(), aud: AUDIENCE.into(),
+            exp: now_for_test() + 3600, nbf: now_for_test() - 60,
+            tenant_id: "tenant-a".into(), provider_id: "provider-1".into(),
+        };
+        let key = EncodingKey::from_secret(b"a-different-secret-entirely");
+        let token = encode(&header, &claims, &key).unwrap();
+        assert!(matches!(v.verify(&token).await, Err(ApiError::Unauthorized)));
+    }
+
+    fn now_for_test() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
     }
 
     #[tokio::test]
