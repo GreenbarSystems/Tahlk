@@ -8,6 +8,8 @@ import { verifyHistoryChain } from './utils/contentHash.js';
 import { reportIntegrityFailure } from './solo/integrityAlert.js';
 import { appendAudit } from './core/auditLog.js';
 import { shouldLogRecordView } from './domain/recordAccess.js';
+import { onWindowCloseRequested, destroyWindow } from './platform/tauri.js';
+import { clearClipboardOnExit } from './export/exportFormatter.js';
 import * as telemetry from './core/telemetry.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
@@ -44,9 +46,23 @@ function installSoloCapabilities() {
   });
 }
 
+// Clear any clipboard PHI still pending its timed auto-clear (see
+// exportFormatter.js) before the window actually closes. preventDefault +
+// a manual destroy() is the standard Tauri pattern for finishing async
+// cleanup on quit — an un-prevented close would let the process exit before
+// the clipboard write below lands.
+async function wireClipboardClearOnExit() {
+  await onWindowCloseRequested(async event => {
+    event.preventDefault?.();
+    await clearClipboardOnExit();
+    await destroyWindow();
+  });
+}
+
 async function bootstrap() {
   await kvWarmup();
   installSoloCapabilities();
+  await wireClipboardClearOnExit();
   await telemetry.init();   // opt-in gated; subscribes to the bus, records nothing unless enabled
 
   if (!isOnboarded()) {

@@ -44,20 +44,47 @@ export function toTherapyNotes(note, encounter) {
 // Copy formatted text to the system clipboard. The note is PHI, so schedule an
 // auto-clear — but only wipe the clipboard if it still holds what we wrote, so
 // we never clobber something the user copied in the meantime.
+//
+// _pendingClipboardText tracks what we're waiting to clear so
+// clearClipboardOnExit (wired to the window close-requested event in
+// entry-solo.js) can run the same check-then-clear immediately if the app
+// quits before CLIPBOARD_CLEAR_MS elapses — a plain setTimeout never fires
+// once the process exits, so without this, PHI copied shortly before quitting
+// stayed on the OS clipboard indefinitely.
 let _clipboardClearTimer;
+let _pendingClipboardText = null;
+
+async function clearIfStillPending(text) {
+  try {
+    const current = await clipboardReadText();
+    if (current === text) await clipboardWriteText('');
+  } catch { /* clipboard unavailable — nothing to clear */ }
+}
+
 export async function copyToClipboard(text, encounterId, format) {
   await clipboardWriteText(text);
+  _pendingClipboardText = text;
 
   clearTimeout(_clipboardClearTimer);
   _clipboardClearTimer = setTimeout(async () => {
-    try {
-      const current = await clipboardReadText();
-      if (current === text) await clipboardWriteText('');
-    } catch { /* clipboard unavailable — nothing to clear */ }
+    await clearIfStillPending(text);
+    if (_pendingClipboardText === text) _pendingClipboardText = null;
   }, CLIPBOARD_CLEAR_MS);
 
   await appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method: 'clipboard' });
   emit('scribe:note_exported', { encounterId, format });
+}
+
+// Best-effort clipboard clear for app-exit time. No-op if nothing is
+// currently pending (either nothing was ever copied, or the timed
+// auto-clear already ran). Callers should await this before letting the
+// window actually close.
+export async function clearClipboardOnExit() {
+  if (_pendingClipboardText === null) return;
+  clearTimeout(_clipboardClearTimer);
+  const text = _pendingClipboardText;
+  _pendingClipboardText = null;
+  await clearIfStillPending(text);
 }
 
 // Build a non-PHI export filename. The patient alias is intentionally NOT used:
