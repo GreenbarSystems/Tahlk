@@ -21,6 +21,7 @@ import { keys } from '../../data/keys.js';
 import { getTemplate } from '../../templates/templateLibrary.js';
 import { checkSectionCoverage, describeMissingSections } from '../../domain/sectionCoverage.js';
 import { checkNoteQuality, describeQualityIssues, qualityIssuesCallToAction } from '../../domain/noteQualityGate.js';
+import { checkClaimGrounding, describeGroundingIssues, groundingIssuesCallToAction } from '../../domain/noteClaimGroundingGate.js';
 
 export function wireNoteSection(ctx) {
   let _pendingNote = null;
@@ -122,6 +123,15 @@ export function wireNoteSection(ctx) {
       // succeeded in all three cases.
       const { issues } = checkNoteQuality(note, transcript);
 
+      // Claim-grounding check (compliance audit finding, Medium: no
+      // output-side check for hallucinated/unsupported clinical claims).
+      // Flags numeric clinical values (vitals, dosages) the model wrote
+      // that don't appear to have a matching value anywhere in the
+      // transcript — a grounding check, not a fact-checker; see
+      // noteClaimGroundingGate.js's module doc for exactly what this can
+      // and can't catch, and why it's scoped that way.
+      const { issues: groundingIssues } = checkClaimGrounding(note, transcript);
+
       // Combined into ONE toast call, not two sequential ones. toast() is a
       // single-slot, last-write-wins mechanism (see utils/format.js) — two
       // toast() calls back-to-back with no await between them mean the
@@ -135,6 +145,7 @@ export function wireNoteSection(ctx) {
       const advisories = [];
       if (missing.length > 0) advisories.push(describeMissingSections(missing));
       if (issues.length > 0) advisories.push(`${describeQualityIssues(issues)}${qualityIssuesCallToAction(issues)}`);
+      if (groundingIssues.length > 0) advisories.push(`${describeGroundingIssues(groundingIssues)}${groundingIssuesCallToAction(groundingIssues)}`);
       if (advisories.length > 0) toast(advisories.join(' '), 6000);
 
       return true;
@@ -185,9 +196,11 @@ export function wireNoteSection(ctx) {
     const template = getTemplate(templateId);
     const { missing } = checkSectionCoverage(noteContent, template);
     const { issues: qualityIssues } = checkNoteQuality(noteContent, ctx.currentTranscript());
+    const { issues: groundingIssues } = checkClaimGrounding(noteContent, ctx.currentTranscript());
     const warnings = [];
     if (missing.length > 0) warnings.push(describeMissingSections(missing));
     if (qualityIssues.length > 0) warnings.push(describeQualityIssues(qualityIssues));
+    if (groundingIssues.length > 0) warnings.push(describeGroundingIssues(groundingIssues));
     const warning = warnings.length > 0 ? `\n\n${warnings.join(' ')} Review before signing.` : '';
 
     const confirmed = await confirmModal({
