@@ -47,8 +47,12 @@ exclusively on finishing the single-user **Solo** desktop product.
    multi-device requirement.
 2. An **audit-safe sync design** on paper: append-only per-device hash chains
    with server-side merge — never last-writer-wins for signed/attested state.
-3. **Security findings S1 and S2** from `tahlk-security-audit.md` are
-   remediated — real JWT verification (S1) and body-size limit + rate limiting
+3. **Security findings S1 and S2** — originally numbered against
+   `tahlk-security-audit.md`, a source document that was never committed to
+   this repository or its git history; the current authoritative record of
+   these findings is
+   [`docs/security/hipaa-risk-assessment.md`](../security/hipaa-risk-assessment.md) —
+   are remediated: real JWT verification (S1) and body-size limit + rate limiting
    + fail-closed bind gate (S2) landed in `server/`. These are today's Critical
    items **on any deploy**; unfreezing the service without them shipping is
    how tenant-isolation breaks in prod. Track in

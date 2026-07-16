@@ -114,7 +114,16 @@ Not S1/S2 themselves, but the same "before-deploy" review pass should:
 - [ ] Swap `InMemoryStore` for the `PostgresStore` (`sqlx` + `SET app.tenant_id`
       per request for row-level security). Postgres RLS is the defense-in-depth
       layer for S1 — even if the JWT verification has a bug, RLS blocks
-      cross-tenant reads at the database.
+      cross-tenant reads at the database. **Partially addressed (2026-07-16):**
+      a real cross-tenant key-collision bug was found and fixed in
+      `InMemoryStore` itself — `append_audit`/`list_audit` used a composite
+      string key (`format!("{tenant}::{encounter_id}")`) that an
+      `encounter_id` containing the same separator could collide into a
+      different tenant's key. Replaced with a properly nested
+      `HashMap<tenant, HashMap<encounter_id, entries>>`, eliminating the
+      ambiguity structurally. This closes a real bug but is not a substitute
+      for the Postgres/RLS swap above — that remains fully open, and this box
+      stays unchecked.
 - [x] Swap `InMemoryCache` for `RedisCache` (S4 from the audit — process-local
       cache is a correctness issue at >1 replica, not a security issue). The
       swap-in `RedisCache` now exists behind the `Cache` trait; select it with
