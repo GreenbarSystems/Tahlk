@@ -89,9 +89,12 @@ export async function renderSettings() {
       <section class="settings-section">
         <h3>BAA acknowledgment</h3>
         <p class="settings-desc">
-          Note generation is disabled until you confirm your organization has an executed
+          During the current test-data-only beta, note generation does <strong>not</strong> require
+          this acknowledgment (see ADR 0003) — this checkbox is optional. Before sending any real
+          patient information, your organization needs an executed
           <strong>Business Associate Agreement (BAA)</strong> with Anthropic covering the API key
-          configured below. Revoking this immediately disables note generation on this device.
+          configured below; recording it here now gives you an accurate local audit trail once that's
+          in place.
         </p>
         <p class="settings-desc">
           This is <strong>your own organization's</strong> agreement with Anthropic for the API
@@ -281,9 +284,14 @@ export function wireSettings() {
   });
 
   // BAA toggle. Setting = write ack row with a fresh timestamp; unsetting =
-  // clear the row. The Rust gate rejects note generation the instant the row
-  // is missing, so a user can revoke and immediately verify the app refuses
-  // to send further transcripts — no restart or refresh required.
+  // clear the row. Copy is deliberately silent on whether this currently
+  // blocks note generation — that's a Rust-side flag (baa::GATE_ENABLED,
+  // see ADR 0003) this module can't see, and hardcoding "enabled/disabled"
+  // language here is exactly what went stale when the beta gate was
+  // soft-disabled. When the gate IS enforced, the Rust side still rejects
+  // note generation the instant the row is missing, so a user can revoke and
+  // immediately verify the app refuses to send further transcripts — no
+  // restart or refresh required.
   document.getElementById('s-baa-ack')?.addEventListener('change', async e => {
     const checked = !!e.target.checked;
     try {
@@ -295,14 +303,14 @@ export function wireSettings() {
           acknowledgedAt: new Date().toISOString(),
           providerId: providerName,
         });
-        toast('BAA acknowledged. Note generation is enabled.');
+        toast('BAA acknowledgment recorded.');
       } else {
-        if (!confirm('Revoke your BAA acknowledgment? Note generation will stop working until you re-acknowledge.')) {
+        if (!confirm('Remove your BAA acknowledgment record?')) {
           e.target.checked = true;
           return;
         }
         await baaRepo.clear();
-        toast('BAA acknowledgment cleared. Note generation is disabled.');
+        toast('BAA acknowledgment cleared.');
       }
     } catch (err) {
       // Revert the checkbox visually since the write did not land.

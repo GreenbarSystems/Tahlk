@@ -2,7 +2,6 @@
 
 import { kvGet, kvSet } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
-import { baaRepo } from '../data/baa.js';
 import { keys } from '../data/keys.js';
 import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
@@ -80,43 +79,6 @@ export function renderOnboarding() {
             </div>
           </div>
 
-          <!-- Step 3: BAA acknowledgment. HIPAA-covered use of the Anthropic
-               API requires an executed Business Associate Agreement. Tahlk
-               refuses to send transcripts upstream until the provider affirms
-               they have one in place — the gate lives in Rust (baa.rs) so a
-               WebView compromise cannot bypass it. -->
-          <div class="onboarding-step" id="step-baa">
-            <div class="step-num">3</div>
-            <div class="step-body">
-              <h3>Anthropic BAA acknowledgment</h3>
-              <p class="step-desc">Under HIPAA, any protected health information (PHI) sent to Anthropic
-              requires an executed Business Associate Agreement (BAA) between your organization and Anthropic.
-              Tahlk will not generate notes until you confirm this is in place. You can revoke this in Settings at any time.</p>
-              <details class="onboarding-help" id="ob-baa-help">
-                <summary>What is this?</summary>
-                <div class="onboarding-help-body">
-                  <p>A <strong>Business Associate Agreement (BAA)</strong> is a contract HIPAA requires whenever a
-                  vendor like Anthropic processes patient health information on your behalf. It commits Anthropic to
-                  safeguarding that data. You must have a BAA in place with Anthropic before sending any patient
-                  information through Tahlk.</p>
-                  <p>To request one:</p>
-                  <ol>
-                    <li>Sign in at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">console.anthropic.com</a> with the same account as your API key.</li>
-                    <li>Follow Anthropic's HIPAA / BAA request process (see the link below) and execute the agreement.</li>
-                    <li>Once it's in place, tick the box below to confirm.</li>
-                  </ol>
-                  <p class="onboarding-help-note">Tahlk can't verify the BAA for you — this checkbox is your attestation
-                  that one exists. The block on note generation stays in effect until you confirm.</p>
-                </div>
-              </details>
-              <label class="baa-consent">
-                <input id="ob-baa" type="checkbox" />
-                <span>I confirm my organization has an executed BAA with Anthropic covering the API key entered above.</span>
-              </label>
-              <p class="step-hint"><a href="https://support.anthropic.com/en/articles/8555474-i-need-a-business-associate-agreement-baa-with-anthropic-for-hipaa-compliance-what-do-i-do" target="_blank" rel="noreferrer noopener">How to request a BAA from Anthropic →</a></p>
-            </div>
-          </div>
-
         </div>
 
         <div class="onboarding-footer">
@@ -136,16 +98,6 @@ export async function wireOnboarding(onComplete) {
     const apiKey = document.getElementById('ob-apikey')?.value.trim();
     if (!apiKey) { toast('Anthropic API key is required.'); return; }
 
-    // BAA affirmation is required at first-run — the underlying Rust gate
-    // will refuse to call Anthropic without an ack, so gating the button
-    // here is a UX courtesy that avoids a confusing generation failure on
-    // the very first encounter.
-    const baaChecked = !!document.getElementById('ob-baa')?.checked;
-    if (!baaChecked) {
-      toast('Please confirm the Anthropic BAA to continue.');
-      return;
-    }
-
     kvSet(PROVIDER_KEY, {
       name,
       credentials: document.getElementById('ob-creds')?.value.trim() || '',
@@ -159,19 +111,9 @@ export async function wireOnboarding(onComplete) {
       return;
     }
 
-    // Record the BAA ack AFTER the API key lands, so we never have an
-    // acknowledged-but-unusable state (ack row present, key missing).
-    // The Rust command stamps `attestation_version` server-side.
-    try {
-      await baaRepo.setAck({
-        acknowledgedAt: new Date().toISOString(),
-        providerId: name,
-      });
-    } catch (e) {
-      toast(`Could not save BAA acknowledgment: ${userMessage(e, 'unknown error')}`);
-      return;
-    }
-
+    // BAA acknowledgment is not collected here during the current beta
+    // (ADR 0003 — test data only, Rust-side gate soft-disabled). Anyone with
+    // a real BAA already in place can still record it in Settings.
     kvSet(ONBOARDED_KEY, true);
 
     onComplete();

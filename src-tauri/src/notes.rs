@@ -14,6 +14,12 @@
 //! `llm_audit` table with metadata only (no transcript, no response text)
 //! so a compliance officer can trace who sent what model when.
 //!
+//! **Currently non-blocking (ADR 0003).** `baa::GATE_ENABLED` is `false` for
+//! the test-data-only beta, so `require_ack` no longer errors on a missing
+//! ack — see that flag's doc comment and
+//! `docs/adr/0003-disable-baa-gate-for-beta.md` before assuming this gate is
+//! actively enforced.
+//!
 //! Error mapping (see `errors.rs`):
 //!   * BAA gate not acknowledged  → `AppError::BaaRequired`
 //!   * missing keychain entry     → `AppError::NoApiKey`

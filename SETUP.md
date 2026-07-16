@@ -84,8 +84,18 @@ agreement. See the BAA acknowledgment gate below.
 
 Tahlk sends session transcripts to Anthropic for note generation. Under HIPAA,
 any PHI transmitted to a third party requires an executed Business Associate
-Agreement (BAA) between the covered entity and that third party. Tahlk
-refuses to make the call until the provider has affirmed a BAA is in place.
+Agreement (BAA) between the covered entity and that third party. The
+mechanism below exists so Tahlk can refuse to make that call until the
+provider has affirmed a BAA is in place.
+
+> **Currently non-blocking (ADR 0003).** For the current test-data-only beta,
+> `baa::GATE_ENABLED = false` — the gate below is fully implemented and
+> unit-tested but does not enforce today, so onboarding no longer collects
+> the attestation and a missing ack does not stop `generate_note`. See
+> [`docs/adr/0003-disable-baa-gate-for-beta.md`](docs/adr/0003-disable-baa-gate-for-beta.md)
+> for why, and the criteria for flipping it back on (shipping the managed-key
+> proxy, or beta scope expanding to real PHI before that). Everything
+> described below is how the gate behaves once `GATE_ENABLED` is `true`.
 
 **Where the gate lives.** The check runs in Rust (`src-tauri/src/baa.rs`)
 as the first statement of `generate_note`, before the API key is read and
@@ -112,13 +122,17 @@ row that holds the acknowledgment.
   closed (treated as un-acknowledged).
 
 **Where the provider sees it.**
-- **First-run onboarding** — Step 3 is a required checkbox alongside the API
-  key. The button is inert until the box is checked.
+- **First-run onboarding** — when the gate is enforced, this is a required
+  step-3 checkbox alongside the API key, with the button inert until it's
+  checked. During the current beta this step is removed from onboarding
+  (ADR 0003); it returns when the gate is re-enabled.
 - **Settings → BAA acknowledgment** — shows current status (Acknowledged /
   Not acknowledged), the timestamp and provider name, and a toggle to
-  revoke or re-affirm. Revocation takes effect immediately — the very next
-  `generate_note` call from that device is rejected with error code
-  `baa_required`.
+  record or clear it. Always available, regardless of `GATE_ENABLED` — a
+  tester whose org already has a real BAA can record it now for an accurate
+  local audit trail. When the gate is enforced, revocation takes effect
+  immediately: the very next `generate_note` call from that device is
+  rejected with error code `baa_required`.
 
 **Error surface.** When the gate refuses, Rust returns
 `AppError::BaaRequired` which serializes to `{"code":"baa_required", ...}`.

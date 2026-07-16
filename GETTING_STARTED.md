@@ -17,6 +17,12 @@ to a signed note. You do not need any programming or IT background to follow it.
 > open on your computer, **everything below describes the app experience itself**
 > — and that part is designed for you, not for a developer.
 
+> **Beta note:** Tahlk is currently in a test-data-only beta — please do not
+> enter real patient information yet. The steps below describe the full app
+> experience, but the BAA requirement in step 3 is not yet enforced by the
+> app itself during this phase; it becomes required (with a matching setup
+> step) before real PHI use is supported.
+
 ## What you'll need before you start
 
 1. **Tahlk running on your computer.** Have your technical contact get the app
@@ -28,12 +34,13 @@ to a signed note. You do not need any programming or IT background to follow it.
    them — Tahlk never stores your key on any server. The app's first-run setup
    has a built-in "How do I get one?" walkthrough, so you can create the key
    right when it asks.
-3. **A signed Business Associate Agreement (BAA) with Anthropic.** Because visit
-   transcripts are protected health information (PHI), HIPAA requires a BAA
-   between your organization and Anthropic before you send any patient
-   information for note generation. Tahlk will not generate notes until you
-   confirm this is in place. The setup screen explains what a BAA is and links
-   to Anthropic's request process; you can start that process ahead of time.
+3. **A signed Business Associate Agreement (BAA) with Anthropic**, before you
+   ever send real patient information. Because visit transcripts are protected
+   health information (PHI), HIPAA requires a BAA between your organization
+   and Anthropic. During the current test-data-only beta the app does not yet
+   block on this, but you should still have it in place before treating Tahlk
+   as ready for real patients. If you already have one, you can record it
+   voluntarily in **Settings → BAA acknowledgment** for your own audit trail.
 
 You don't have to gather all of this before opening the app — the first-run
 setup explains each item as you reach it and links out to where you get it.
@@ -46,7 +53,7 @@ minutes. Your data stays on this device.
 
 ### What the setup asks for
 
-The welcome screen has three quick steps:
+The welcome screen has two quick steps:
 
 1. **Your provider profile** — your full name (required), your credentials
    (e.g. MD, PMHNP-BC, LCSW), and your specialty. Your name is what gets
@@ -56,14 +63,11 @@ The welcome screen has three quick steps:
    step-by-step. Your key is saved in your operating system's secure
    credential store (the same place your computer keeps other app passwords)
    and is never sent to any Tahlk server.
-3. **Anthropic BAA acknowledgment** — tick the box confirming your organization
-   has an executed BAA with Anthropic covering that key. Expand **"What is
-   this?"** if you'd like the plain-language explanation and a link to
-   Anthropic's BAA request process. This checkbox is your attestation — Tahlk
-   can't verify it for you, and note generation stays blocked until you confirm.
 
-When all three are filled in, click **Start using Tahlk**. You can change any of
-this later, and revoke or re-affirm the BAA, from **Settings**.
+When both are filled in, click **Start using Tahlk**. Setup does not currently
+ask about the Anthropic BAA (see the beta note above) — if your organization
+already has one, you can record it from **Settings → BAA acknowledgment** at
+any time for your own audit trail.
 
 ## Your first recording → note → sign
 
@@ -102,5 +106,7 @@ first session it becomes a quick, repeatable routine.
 
 - **Setting up the app for the first time** (installation, for your technical
   contact): [SETUP.md](SETUP.md).
-- **API key or BAA questions:** the in-app setup screen has expandable help for
-  each, with links to Anthropic's console and BAA request process.
+- **API key questions:** the in-app setup screen has expandable help with a
+  link to Anthropic's console.
+- **BAA questions:** see **Settings → BAA acknowledgment** for a link to
+  Anthropic's BAA request process.

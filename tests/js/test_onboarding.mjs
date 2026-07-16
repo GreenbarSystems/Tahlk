@@ -1,8 +1,10 @@
-// S-UX-7: first-run onboarding must explain, in plain clinician language, what
-// an Anthropic API key and a HIPAA BAA are and how to get them — via collapsed
-// "How do I get one?" / "What is this?" disclosures, not permanent walls of
-// text. This is inline-help only: the underlying BAA self-attestation gate
-// (checkbox `ob-baa`, what it writes, the Rust baa.rs gate) is unchanged.
+// S-UX-7 (plain-language inline help) + ADR 0003 (BAA step removed from
+// onboarding for the test-data-only beta — see
+// docs/adr/0003-disable-baa-gate-for-beta.md). Onboarding is now 2 steps:
+// provider profile, then Anthropic API key. There is no BAA checkbox or
+// step-baa block here anymore; the Rust-side gate is soft-disabled
+// (baa::GATE_ENABLED = false) and Settings still offers a voluntary,
+// non-blocking BAA acknowledgment for testers who already have one.
 //
 // The disclosures use the same native <details>/<summary> pattern introduced
 // for "View integrity details" in S-UX-3 (see template.js / test_integrityDisplay).
@@ -35,33 +37,20 @@ beforeEach(() => {
   nextResult = { ok: null };
 });
 
-// ── Toast container: regression test ──────────────────────────────────────
-// The onboarding screen must render its own #toast/#toast-msg container (the
-// same shape entry-solo.js's post-onboarding app shell uses). Without it,
-// toast()'s `if (!el || !msgEl) { console.warn(...); return; }` guard makes
-// every failure during onboarding — e.g. the OS keychain rejecting the API
-// key write — completely silent: no visible error, the "Start using Tahlk"
-// button just appears to do nothing.
-
-test('onboarding renders its own toast container', () => {
-  const html = renderOnboarding();
-  assert.match(html, /<div class="toast" id="toast"><span id="toast-msg"><\/span><\/div>/);
-});
-
 // ── API-key step: explanation + "How do I get one?" disclosure ───────────────
 
 test('API-key step explains what the key is and that Tahlk never stores it', () => {
   const html = renderOnboarding();
-  const step = html.slice(html.indexOf('id="step-apikey"'), html.indexOf('id="step-baa"'));
+  const step = html.slice(html.indexOf('id="step-apikey"'), html.indexOf('onboarding-footer'));
   assert.match(step, /Anthropic/);
   assert.match(step, /API key/i);
   // Plain-language reassurance that the key stays local / Tahlk never sees it.
-  assert.match(step, /never sees or stores your key|stored only|local/i);
+  assert.match(step, /never sees or stores your key|secure credential store/i);
 });
 
 test('API-key step has a collapsed "How do I get one?" disclosure with steps', () => {
   const html = renderOnboarding();
-  const step = html.slice(html.indexOf('id="step-apikey"'), html.indexOf('id="step-baa"'));
+  const step = html.slice(html.indexOf('id="step-apikey"'), html.indexOf('onboarding-footer'));
   // Native <details> disclosure (collapsed by default — no `open` attribute).
   assert.match(step, /<details[^>]*class="onboarding-help"[^>]*>[\s\S]*How do I get one\?/);
   const details = step.slice(step.indexOf('<details'));
@@ -71,38 +60,24 @@ test('API-key step has a collapsed "How do I get one?" disclosure with steps', (
   assert.match(details, /<ol>[\s\S]*<\/ol>/);
 });
 
-// ── BAA step: explanation + "What is this?" disclosure ───────────────────────
+// ── BAA step is gone from onboarding (ADR 0003) ───────────────────────────────
 
-test('BAA step explains what a BAA is and why HIPAA requires it', () => {
+test('onboarding no longer renders a BAA step or checkbox', () => {
   const html = renderOnboarding();
-  const step = html.slice(html.indexOf('id="step-baa"'));
-  assert.match(step, /Business Associate Agreement/);
-  assert.match(step, /HIPAA/);
-  assert.match(step, /PHI|health information/i);
+  assert.ok(!html.includes('id="step-baa"'), 'step-baa block must be removed');
+  assert.ok(!html.includes('id="ob-baa"'), 'BAA checkbox must be removed');
+  assert.ok(!/Anthropic BAA acknowledgment/.test(html), 'BAA step heading must be removed');
 });
 
-test('BAA step has a collapsed "What is this?" disclosure explaining how to get one', () => {
+test('onboarding only has two numbered steps', () => {
   const html = renderOnboarding();
-  const step = html.slice(html.indexOf('id="step-baa"'));
-  assert.match(step, /<details[^>]*class="onboarding-help"[^>]*>[\s\S]*What is this\?/);
-  const details = step.slice(step.indexOf('<details'));
-  assert.ok(!/<details[^>]*\bopen\b/.test(details), 'BAA disclosure must be collapsed by default');
-  // Consistent with SETUP.md's BAA request guidance.
-  assert.match(details, /console\.anthropic\.com/);
-});
-
-// ── The underlying self-attestation gate is UNCHANGED (additive help only) ───
-
-test('BAA checkbox #ob-baa and its consent attestation copy are unchanged', () => {
-  const html = renderOnboarding();
-  assert.match(html, /<input id="ob-baa" type="checkbox"/);
-  assert.match(html, /I confirm my organization has an executed BAA with Anthropic/);
+  const stepCount = (html.match(/class="onboarding-step"/g) || []).length;
+  assert.equal(stepCount, 2);
 });
 
 // Drive the real wireOnboarding click handler with a minimal DOM to prove the
-// gate still (a) requires a name, (b) requires an API key, and (c) requires the
-// BAA checkbox before it writes anything or completes.
-function mountDom({ name = 'Dr. Jane Smith', apikey = 'sk-ant-test', baaChecked = false } = {}) {
+// gate now only requires (a) a name and (b) an API key — no BAA checkbox.
+function mountDom({ name = 'Dr. Jane Smith', apikey = 'sk-ant-test' } = {}) {
   const handlers = {};
   const els = {
     'ob-finish': { addEventListener: (ev, fn) => { handlers[ev] = fn; } },
@@ -110,7 +85,6 @@ function mountDom({ name = 'Dr. Jane Smith', apikey = 'sk-ant-test', baaChecked 
     'ob-creds': { value: '' },
     'ob-specialty': { value: 'podiatry' },
     'ob-apikey': { value: apikey },
-    'ob-baa': { checked: baaChecked },
   };
   globalThis.document = {
     getElementById: id => (id in els ? els[id] : null),
@@ -119,36 +93,33 @@ function mountDom({ name = 'Dr. Jane Smith', apikey = 'sk-ant-test', baaChecked 
   return { fire: () => handlers.click?.() };
 }
 
-test('gate: unchecked BAA blocks completion — no ack written, onComplete not called', async () => {
+test('gate: name + API key alone completes onboarding — no BAA ack written', async () => {
   let completed = false;
-  const dom = mountDom({ baaChecked: false });
+  const dom = mountDom();
   await wireOnboarding(() => { completed = true; });
   await dom.fire();
-  assert.equal(completed, false, 'onComplete must not run when BAA is unchecked');
-  assert.ok(!calls.some(c => c.command === 'baa_ack_set'), 'no BAA ack should be written');
-});
-
-test('gate: checked BAA (with name + key) writes the same ack payload and completes', async () => {
-  let completed = false;
-  const dom = mountDom({ baaChecked: true });
-  await wireOnboarding(() => { completed = true; });
-  await dom.fire();
-  // wait a microtask beyond the awaited invokes inside the handler
   await new Promise(r => setImmediate(r));
-  assert.equal(completed, true, 'onComplete must run once name + key + BAA are all satisfied');
-  const ack = calls.find(c => c.command === 'baa_ack_set');
-  assert.ok(ack, 'baa_ack_set must be invoked');
-  // Payload shape is unchanged (camelCase keys, acknowledged:true, providerId = name).
-  assert.equal(ack.args.acknowledged, true);
-  assert.equal(ack.args.providerId, 'Dr. Jane Smith');
-  assert.equal(typeof ack.args.acknowledgedAt, 'string');
+  assert.equal(completed, true, 'onComplete must run once name + key are satisfied');
+  assert.ok(!calls.some(c => c.command === 'baa_ack_set'), 'onboarding must never write a BAA ack');
+  const setKey = calls.find(c => c.command === 'set_api_key');
+  assert.ok(setKey, 'set_api_key must be invoked');
+  assert.equal(setKey.args.key, 'sk-ant-test');
 });
 
-test('gate: missing API key blocks completion even if BAA is checked', async () => {
+test('gate: missing name blocks completion', async () => {
   let completed = false;
-  const dom = mountDom({ apikey: '', baaChecked: true });
+  const dom = mountDom({ name: '' });
+  await wireOnboarding(() => { completed = true; });
+  await dom.fire();
+  assert.equal(completed, false, 'onComplete must not run without a name');
+  assert.equal(calls.length, 0, 'nothing should be written without a name');
+});
+
+test('gate: missing API key blocks completion', async () => {
+  let completed = false;
+  const dom = mountDom({ apikey: '' });
   await wireOnboarding(() => { completed = true; });
   await dom.fire();
   assert.equal(completed, false, 'onComplete must not run without an API key');
-  assert.ok(!calls.some(c => c.command === 'baa_ack_set'), 'no ack should be written without a key');
+  assert.ok(!calls.some(c => c.command === 'set_api_key'), 'no key should be written without a value');
 });

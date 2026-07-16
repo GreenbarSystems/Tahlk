@@ -51,6 +51,19 @@ use crate::DbState;
 // flags rather than inventing a new prefix.
 pub(crate) const BAA_ACK_KEY: &str = "note_settings_v1::baa_ack";
 
+/// Runtime toggle for gate ENFORCEMENT (storage, Settings UI, and this
+/// module's tests are unaffected either way). Set to `false` for the current
+/// beta phase — see ADR 0003 (`docs/adr/0003-disable-baa-gate-for-beta.md`):
+/// testers use synthetic/test data only until Tahlk's managed Anthropic key
+/// (with an org-level BAA) ships, so per-provider BYOK attestation is pure
+/// friction with no compliance benefit right now.
+///
+/// MUST be flipped back to `true` before any real PHI reaches this build —
+/// either once the managed-key proxy lands, or sooner if beta scope changes.
+/// This is a single choke-point flag, not a deletion: re-enabling is a
+/// one-line change plus restoring the onboarding step (see the ADR).
+pub(crate) const GATE_ENABLED: bool = false;
+
 /// Attestation schema version. Bumping this forces the user through the
 /// modal again on next launch. Keep the JS `BAA_ATTESTATION_VERSION`
 /// constant in `src/data/baa.js` in sync.
@@ -107,11 +120,31 @@ pub(crate) fn read_ack(state: &State<DbState>) -> Result<Option<BaaAck>, AppErro
     Ok(Some(ack))
 }
 
+/// Pure decision logic for `require_ack`, extracted so it is unit-testable
+/// without a live `State<DbState>` (see the existing `read_ack`/`parse_ack_json`
+/// split above for the same pattern). When the gate is disabled, a real stored
+/// ack is still honored and returned — so a tester whose org already has a BAA
+/// keeps accurate attribution in the `llm_audit` table — but a missing ack no
+/// longer errors; a placeholder (unacknowledged, empty provider_id) fills in.
+fn resolve_ack(stored: Option<BaaAck>, gate_enabled: bool) -> Result<BaaAck, AppError> {
+    if gate_enabled {
+        return stored.ok_or(AppError::BaaRequired);
+    }
+    Ok(stored.unwrap_or(BaaAck {
+        acknowledged: false,
+        acknowledged_at: String::new(),
+        provider_id: String::new(),
+        attestation_version: 0,
+    }))
+}
+
 /// The single choke point every PHI-egress command must call before doing
 /// network I/O. Returns `AppError::BaaRequired` if the ack is missing or
-/// stale so the JS side can surface a specific "open BAA modal" CTA.
+/// stale AND `GATE_ENABLED` is true, so the JS side can surface a specific
+/// "open BAA modal" CTA. See `GATE_ENABLED`'s doc comment for why this is
+/// currently non-blocking.
 pub(crate) fn require_ack(state: &State<DbState>) -> Result<BaaAck, AppError> {
-    read_ack(state)?.ok_or(AppError::BaaRequired)
+    resolve_ack(read_ack(state)?, GATE_ENABLED)
 }
 
 /// #[tauri::command] wrapper — returns the current ack (or null) so the
@@ -288,6 +321,43 @@ mod tests {
         assert!(parsed.is_err(), "malformed rows must be a serde err");
         // read_ack maps that err to Ok(None), so the effective gate state
         // is un-acknowledged — the app must NOT crash.
+    }
+
+    // ── resolve_ack: gate enabled/disabled decision logic (ADR 0003) ────────
+
+    fn sample_ack(provider_id: &str) -> BaaAck {
+        BaaAck {
+            acknowledged: true,
+            acknowledged_at: "2026-07-04T14:22:11Z".into(),
+            provider_id: provider_id.into(),
+            attestation_version: ATTESTATION_VERSION,
+        }
+    }
+
+    #[test]
+    fn gate_enabled_requires_ack() {
+        assert!(matches!(resolve_ack(None, true), Err(AppError::BaaRequired)));
+    }
+
+    #[test]
+    fn gate_enabled_passes_through_existing_ack() {
+        let got = resolve_ack(Some(sample_ack("jane")), true).unwrap();
+        assert_eq!(got.provider_id, "jane");
+    }
+
+    #[test]
+    fn gate_disabled_allows_missing_ack() {
+        let got = resolve_ack(None, false).expect("disabled gate must not error on missing ack");
+        assert_eq!(got.acknowledged, false);
+        assert_eq!(got.provider_id, "");
+    }
+
+    #[test]
+    fn gate_disabled_still_preserves_a_real_acks_identity() {
+        // A tester whose org already has its own BAA can still record it via
+        // Settings; the disabled gate must not discard that attribution.
+        let got = resolve_ack(Some(sample_ack("jane")), false).unwrap();
+        assert_eq!(got.provider_id, "jane");
     }
 
     #[test]
