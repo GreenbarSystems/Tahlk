@@ -5,10 +5,15 @@
 // save()/delete() resolve the acting provider's identity here and pass it as
 // providerId — the Rust side writes it into a patient_audit row in the same
 // transaction as the mutation (audit finding H2: patient CRUD previously had
-// no audit trail at all). Sourced from the provider profile set at onboarding
-// (matches baa.rs's provider_id sourcing in settingsModal.js), not
-// capabilities.currentUser() — that hook is a Group-tier stub returning null
-// in Solo, which would collapse every entry to the same generic fallback.
+// no audit trail at all).
+//
+// Read straight from the provider profile set at onboarding, which is the same
+// source settingsModal.js uses for the BAA ack's provider_id — so both audit
+// trails name the actor identically rather than by two different rules.
+// capabilities.currentUser() ultimately derives from that same profile (Solo's
+// impl is installed in entry-solo.js), so this is not a divergence from it; it
+// just takes the one field this repo needs, with a 'provider' fallback instead
+// of currentUser()'s null-when-unset.
 
 import { invoke } from '../platform/tauri.js';
 import { kvGet } from '../core/storageBackend.js';

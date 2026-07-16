@@ -238,6 +238,83 @@ export async function renderSettings() {
   `;
 }
 
+// Reflects PIN-set vs PIN-unset across the Screen Lock section's static
+// controls, so the two states can't drift apart. Both the set-PIN and
+// remove-PIN handlers previously carried their own mirror-image ladder over
+// these same six elements, which meant every copy had to be kept in sync by
+// hand — add a control to one branch, forget the other, and the pane silently
+// lies about whether a PIN exists.
+//
+// Deliberately does NOT own the Remove-PIN button: that one is mounted and
+// unmounted (not just relabelled), and its handler has to be wired at mount
+// time, so it stays with the callers that own that lifecycle.
+function setLockPinUiState(hasPin) {
+  const pill = document.getElementById('s-lock-status-pill');
+  if (pill) {
+    pill.textContent = hasPin ? 'PIN set' : 'No PIN set';
+    pill.classList.toggle('baa-status-pill--ok', hasPin);
+    pill.classList.toggle('baa-status-pill--danger', !hasPin);
+  }
+
+  const saveBtn = document.getElementById('s-lock-save-pin');
+  if (saveBtn) saveBtn.textContent = hasPin ? 'Change PIN' : 'Set PIN';
+
+  const pinLabel = document.getElementById('s-lock-pin-label');
+  if (pinLabel) pinLabel.textContent = hasPin ? 'New PIN' : 'Set PIN';
+
+  const toggleText = document.getElementById('s-lock-toggle-text');
+  if (toggleText) {
+    toggleText.textContent = hasPin
+      ? 'Lock automatically after inactivity'
+      : 'Lock automatically after inactivity (set a PIN first)';
+  }
+
+  // The enable toggle and timeout are meaningless without a PIN to unlock
+  // with, so they follow the PIN's presence.
+  for (const id of ['s-lock-enabled', 's-lock-timeout']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (hasPin) el.removeAttribute('disabled');
+    else el.setAttribute('disabled', '');
+  }
+
+  // Losing the PIN also turns the feature off, not just greys it out — a
+  // checked-but-disabled box would misrepresent whether locking is active.
+  if (!hasPin) {
+    const enabledCheckbox = document.getElementById('s-lock-enabled');
+    if (enabledCheckbox) enabledCheckbox.checked = false;
+  }
+}
+
+// Wires a button that runs one async check and renders its outcome into a
+// result element: disable + busy label, clear the last result, run, restore on
+// the way out whether it threw or not.
+//
+// `run` receives the result element and owns everything specific to its check —
+// what to await and how to describe the outcome. Everything around it (the
+// busy/restore dance, the failure toast) was previously duplicated verbatim
+// between the two diagnostics buttons below.
+function wireAsyncActionButton({ id, resultId, busyLabel, idleLabel, failPrefix, run }) {
+  document.getElementById(id)?.addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    const resultEl = document.getElementById(resultId);
+    btn.setAttribute('disabled', '');
+    btn.textContent = busyLabel;
+    if (resultEl) resultEl.textContent = '';
+    try {
+      await run(resultEl);
+    } catch (err) {
+      if (resultEl) resultEl.textContent = '';
+      toast(`${failPrefix}: ${userMessage(err, 'unknown error')}`);
+    } finally {
+      // Always restore, even if the panel was torn down mid-run — the button
+      // must never be left stuck on its busy label.
+      btn.removeAttribute('disabled');
+      btn.textContent = idleLabel;
+    }
+  });
+}
+
 export function wireSettings() {
   document.getElementById('s-save-provider')?.addEventListener('click', () => {
     const profile = {
@@ -358,8 +435,7 @@ export function wireSettings() {
   });
 
   // Screen Lock. Setting/changing a PIN and removing it both flip several
-  // dependent bits of UI (status pill, button label, enable checkbox +
-  // timeout input disabled state) — updated in place rather than
+  // dependent bits of UI — updated in place via setLockPinUiState rather than
   // re-rendering the whole settings pane, matching the diag-clear pattern
   // above.
   document.getElementById('s-lock-save-pin')?.addEventListener('click', async () => {
@@ -380,23 +456,10 @@ export function wireSettings() {
       if (pinInput) pinInput.value = '';
       if (confirmInput) confirmInput.value = '';
       toast('Lock PIN saved.');
+      setLockPinUiState(true);
 
-      const pill = document.getElementById('s-lock-status-pill');
-      if (pill) {
-        pill.textContent = 'PIN set';
-        pill.classList.add('baa-status-pill--ok');
-        pill.classList.remove('baa-status-pill--danger');
-      }
+      // Mount the Remove-PIN action if this was a first-time set.
       const saveBtn = document.getElementById('s-lock-save-pin');
-      if (saveBtn) saveBtn.textContent = 'Change PIN';
-      const pinLabel = document.getElementById('s-lock-pin-label');
-      if (pinLabel) pinLabel.textContent = 'New PIN';
-      const enabledCheckbox = document.getElementById('s-lock-enabled');
-      if (enabledCheckbox) enabledCheckbox.removeAttribute('disabled');
-      const timeoutInput = document.getElementById('s-lock-timeout');
-      if (timeoutInput) timeoutInput.removeAttribute('disabled');
-      const toggleText = document.getElementById('s-lock-toggle-text');
-      if (toggleText) toggleText.textContent = 'Lock automatically after inactivity';
       if (!document.getElementById('s-lock-remove-pin') && saveBtn) {
         const removeBtn = document.createElement('button');
         removeBtn.className = 'btn btn-ghost btn-danger';
@@ -417,26 +480,7 @@ export function wireSettings() {
         await lockRepo.clearPin();
         setLockEnabled(false);
         toast('Lock PIN removed.');
-
-        const pill = document.getElementById('s-lock-status-pill');
-        if (pill) {
-          pill.textContent = 'No PIN set';
-          pill.classList.add('baa-status-pill--danger');
-          pill.classList.remove('baa-status-pill--ok');
-        }
-        const saveBtn = document.getElementById('s-lock-save-pin');
-        if (saveBtn) saveBtn.textContent = 'Set PIN';
-        const pinLabel = document.getElementById('s-lock-pin-label');
-        if (pinLabel) pinLabel.textContent = 'Set PIN';
-        const enabledCheckbox = document.getElementById('s-lock-enabled');
-        if (enabledCheckbox) {
-          enabledCheckbox.checked = false;
-          enabledCheckbox.setAttribute('disabled', '');
-        }
-        const timeoutInput = document.getElementById('s-lock-timeout');
-        if (timeoutInput) timeoutInput.setAttribute('disabled', '');
-        const toggleText = document.getElementById('s-lock-toggle-text');
-        if (toggleText) toggleText.textContent = 'Lock automatically after inactivity (set a PIN first)';
+        setLockPinUiState(false);
         btn.remove();
       } catch (err) {
         toast(`Could not remove PIN: ${userMessage(err, 'unknown error')}`);
@@ -458,13 +502,13 @@ export function wireSettings() {
     toast(`Lock timeout set to ${getLockTimeoutMinutes()} minute${getLockTimeoutMinutes() === 1 ? '' : 's'}.`);
   });
 
-  document.getElementById('s-verify-chains')?.addEventListener('click', async e => {
-    const btn = e.currentTarget;
-    const resultEl = document.getElementById('s-verify-chains-result');
-    btn.setAttribute('disabled', '');
-    btn.textContent = 'Verifying…';
-    if (resultEl) resultEl.textContent = '';
-    try {
+  wireAsyncActionButton({
+    id: 's-verify-chains',
+    resultId: 's-verify-chains-result',
+    busyLabel: 'Verifying…',
+    idleLabel: 'Verify All Chains',
+    failPrefix: 'Could not verify chains',
+    run: async resultEl => {
       const { ok, checked, broken } = await verifyAllChains();
       if (checked === 0) {
         if (resultEl) resultEl.textContent = 'No note history found yet — nothing to verify.';
@@ -480,22 +524,16 @@ export function wireSettings() {
         }
         toast(`Chain integrity check found ${broken.length} problem${broken.length === 1 ? '' : 's'} — see Settings for details.`);
       }
-    } catch (err) {
-      if (resultEl) resultEl.textContent = '';
-      toast(`Could not verify chains: ${userMessage(err, 'unknown error')}`);
-    } finally {
-      btn.removeAttribute('disabled');
-      btn.textContent = 'Verify All Chains';
-    }
+    },
   });
 
-  document.getElementById('s-check-drift')?.addEventListener('click', async e => {
-    const btn = e.currentTarget;
-    const resultEl = document.getElementById('s-check-drift-result');
-    btn.setAttribute('disabled', '');
-    btn.textContent = 'Checking…';
-    if (resultEl) resultEl.textContent = '';
-    try {
+  wireAsyncActionButton({
+    id: 's-check-drift',
+    resultId: 's-check-drift-result',
+    busyLabel: 'Checking…',
+    idleLabel: 'Check for AI Drift',
+    failPrefix: 'Could not check AI call health',
+    run: async resultEl => {
       const { insufficientData, checked, findings } = await checkLlmAuditDrift();
       if (insufficientData) {
         if (resultEl) resultEl.textContent = `Not enough call history yet to compare (${checked} call${checked === 1 ? '' : 's'} logged so far).`;
@@ -507,13 +545,7 @@ export function wireSettings() {
         if (resultEl) resultEl.innerHTML = `<strong style="color:var(--danger)">${escapeHtml(summary)}</strong>`;
         toast('AI call health check found something worth a look — see Settings for details.', 6000);
       }
-    } catch (err) {
-      if (resultEl) resultEl.textContent = '';
-      toast(`Could not check AI call health: ${userMessage(err, 'unknown error')}`);
-    } finally {
-      btn.removeAttribute('disabled');
-      btn.textContent = 'Check for AI Drift';
-    }
+    },
   });
 }
 
