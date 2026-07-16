@@ -16,9 +16,16 @@
 
 ## Why this file exists
 
-The full [`tahlk-security-audit.md`](../../tahlk-security-audit.md) rated ten
-findings against the Solo desktop client (C1–C2, H1–H6, M1–M10, L1–L5) — all
-merged as of PR #6. Two additional findings apply to the sync server:
+The full `tahlk-security-audit.md` rated ten findings against the Solo
+desktop client (C1–C2, H1–H6, M1–M10, L1–L5) — all merged as of PR #6.
+**That file is not present in this repository or its git history** — it was
+never committed here; the finding IDs it originally assigned survive only as
+in-code `[audit XX]` comments (grep the codebase for the exact ID) and as a
+consolidated re-verification in
+[`docs/security/hipaa-risk-assessment.md`](./hipaa-risk-assessment.md), which
+is the current authoritative source for the Solo desktop client's compliance
+status. Treat any citation of `tahlk-security-audit.md` elsewhere in this repo
+the same way. Two additional findings apply to the sync server:
 
 - **S1 — Auth middleware is a stub.** `server/src/auth.rs` only checks that the
   `Authorization` header starts with `Bearer ` and reads `x-tenant-id` /

@@ -82,6 +82,13 @@ export async function renderSettings() {
           <strong>Business Associate Agreement (BAA)</strong> with Anthropic covering the API key
           configured below. Revoking this immediately disables note generation on this device.
         </p>
+        <p class="settings-desc">
+          This is <strong>your own organization's</strong> agreement with Anthropic for the API
+          key entered in Settings below — not an agreement Greenbar Systems has with Anthropic on
+          your behalf, and not a substitute for one. Tahlk cannot verify that a real, signed BAA
+          exists; checking this box is your organization's own compliance record, and you remain
+          responsible for keeping it accurate.
+        </p>
         <div class="baa-status-row">
           <span class="baa-status-pill ${baaAcked ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}">
             ${baaAcked ? 'Acknowledged' : 'Not acknowledged'}

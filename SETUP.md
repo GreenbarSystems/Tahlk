@@ -345,7 +345,10 @@ under wear-leveled flash is not reliably erasable in software.
 ## Hardening (H1-H4, H6)
 
 Defensive input caps and prompt-injection guards from the security audit
-(`tahlk-security-audit.md`, findings H1-H4 and H6). Each is a small,
+(`tahlk-security-audit.md`, findings H1-H4 and H6 — that source document
+itself is not in this repo; see
+[`docs/security/pre-deploy-checklist.md`](docs/security/pre-deploy-checklist.md#why-this-file-exists)
+for where these finding IDs are still traceable). Each is a small,
 independently-verifiable belt around an existing command; none change the
 public JS surface, and every one has DB-free unit tests.
 
@@ -391,8 +394,9 @@ public JS surface, and every one has DB-free unit tests.
 
 ## Hardening (M1-M10)
 
-The Medium-severity findings from the same audit
-(`tahlk-security-audit.md`, findings M1-M10). Like the H-tier work above,
+The Medium-severity findings from the same audit (`tahlk-security-audit.md`,
+findings M1-M10 — see the note above on H1-H4/H6 about this source document
+not being in the repo). Like the H-tier work above,
 each is a small, independently-verifiable belt around an existing command,
 none change the public JS surface, and each ships DB-free unit tests where
 feasible. All ten fixes landed together in one batch.
