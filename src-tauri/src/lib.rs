@@ -20,6 +20,8 @@
 //!   - `patients`       — patient roster CRUD.
 //!   - `patient_audit`  — append-only audit log for patient roster CRUD.
 //!   - `time`           — server-side ISO-8601 UTC timestamps for audit rows.
+//!   - `hex`            — lowercase hex encode/decode (DEK blob, PIN hash format).
+//!   - `keychain`       — shared OS-keychain entry construction (item names stay per-module).
 //!
 //! `DbState` stays at the crate root so every module can name it via
 //! `crate::DbState` without cyclic imports; this file only wires setup and
@@ -40,6 +42,8 @@ mod kv_ops;
 mod llm_audit;
 mod lock;
 mod log_safety;
+mod hex;
+mod keychain;
 mod note_audit;
 mod note_history;
 mod time;

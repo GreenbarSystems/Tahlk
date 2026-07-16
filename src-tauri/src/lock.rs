@@ -30,9 +30,11 @@ use std::num::NonZeroU32;
 use ring::pbkdf2;
 
 use crate::errors::AppError;
+use crate::hex::{from_hex, to_hex};
 
-const KEYRING_SERVICE: &str = "com.tahlk.app";
-const KEYRING_USER: &str = "lock_pin_hash";
+/// This module's own keychain item name. Deliberately distinct from
+/// `secrets`'s and `db_key`'s — see `keychain.rs`'s module doc.
+pub(crate) const KEYRING_USER: &str = "lock_pin_hash";
 
 const PBKDF2_ITERATIONS: u32 = 210_000;
 const SALT_LEN: usize = 16;
@@ -45,31 +47,7 @@ const PIN_MIN_LEN: usize = 4;
 const PIN_MAX_LEN: usize = 64;
 
 fn keyring_entry() -> Result<keyring::Entry, AppError> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(AppError::internal_from)
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn from_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 || !s.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    for chunk in bytes.chunks(2) {
-        let hi = (chunk[0] as char).to_digit(16)?;
-        let lo = (chunk[1] as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
-    }
-    Some(out)
+    crate::keychain::entry(KEYRING_USER)
 }
 
 pub(crate) fn validate_pin(pin: &str) -> Result<(), AppError> {
@@ -168,20 +146,7 @@ pub(crate) fn lock_pin_is_set() -> Result<bool, AppError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn hex_roundtrip() {
-        let bytes = [0x00u8, 0x0f, 0xa5, 0xff];
-        let hex = to_hex(&bytes);
-        assert_eq!(hex, "000fa5ff");
-        assert_eq!(from_hex(&hex).unwrap(), bytes.to_vec());
-    }
-
-    #[test]
-    fn from_hex_rejects_odd_length_and_non_hex() {
-        assert!(from_hex("abc").is_none()); // odd length
-        assert!(from_hex("zz").is_none()); // non-hex chars
-        assert!(from_hex("").unwrap().is_empty());
-    }
+    // NOTE: hex encode/decode moved to `hex.rs`; its tests moved with it.
 
     #[test]
     fn validate_pin_enforces_length_bounds() {

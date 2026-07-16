@@ -17,8 +17,10 @@ use crate::errors::AppError;
 use crate::DbState;
 
 pub(crate) const API_KEY_KV: &str = "secret_v1::anthropic_api_key";
-const KEYRING_SERVICE: &str = "com.tahlk.app";
-const KEYRING_USER: &str = "anthropic_api_key";
+
+/// This module's own keychain item name. Deliberately distinct from
+/// `db_key`'s and `lock`'s — see `keychain.rs`'s module doc.
+pub(crate) const KEYRING_USER: &str = "anthropic_api_key";
 
 /// Hard ceiling on how many bytes we will accept when a caller tries to set an
 /// API key. Anthropic keys are ~100 chars in practice; 512 bytes is generous
@@ -96,7 +98,7 @@ pub(crate) fn is_secret_key(key: &str) -> bool {
 }
 
 fn keyring_entry() -> Result<keyring::Entry, AppError> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(AppError::internal_from)
+    crate::keychain::entry(KEYRING_USER)
 }
 
 // Read the API key, keychain-first. If absent there but present in the legacy

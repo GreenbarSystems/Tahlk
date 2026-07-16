@@ -12,25 +12,16 @@
 //! a substitute — device theft plus keychain export is the residual risk.
 
 use crate::errors::AppError;
+use crate::hex::to_hex;
 
-const KEYRING_SERVICE: &str = "com.tahlk.app";
-const KEYRING_USER: &str = "db_encryption_key";
+/// This module's own keychain item name. Deliberately distinct from
+/// `secrets`'s and `lock`'s — see `keychain.rs`'s module doc.
+pub(crate) const KEYRING_USER: &str = "db_encryption_key";
 const KEY_BYTES: usize = 32; // 256-bit AES key
 const KEY_HEX_LEN: usize = KEY_BYTES * 2;
 
 fn keyring_entry() -> Result<keyring::Entry, AppError> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(AppError::internal_from)
-}
-
-// Encode 32 raw bytes as lowercase hex without pulling a new dep.
-fn to_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
+    crate::keychain::entry(KEYRING_USER)
 }
 
 fn is_valid_hex_key(s: &str) -> bool {
@@ -73,11 +64,10 @@ pub(crate) fn load_or_generate_dek() -> Result<String, AppError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn hex_encoding_is_lowercase_and_padded() {
-        let bytes = [0x00, 0x0f, 0xa5, 0xff];
-        assert_eq!(to_hex(&bytes), "000fa5ff");
-    }
+    // NOTE: hex encoding is covered by `hex::tests::hex_roundtrip`, which
+    // asserts the same lowercase/zero-padding properties on a superset of
+    // these inputs. Testing it from here would be testing another module's
+    // function.
 
     #[test]
     fn valid_hex_key_gate() {

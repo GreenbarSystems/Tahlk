@@ -212,28 +212,19 @@ fn parse_quality_from_json(raw: &str) -> Option<TranscriptionQuality> {
 // sensible to do at drop time, and the file may legitimately be gone if
 // the sidecar never created it (bad model, empty audio). Best-effort.
 // [audit M3]
-struct ScratchFileCleanup(PathBuf);
-
-impl Drop for ScratchFileCleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-// Session audio lives on disk encrypted (`<id>.wav.enc`), but whisper.cpp only
-// reads plaintext `.wav`. transcribe_audio decrypts to a transient plaintext
-// `.wav` next to the encrypted file, points the sidecar at it, and MUST unlink
-// it afterward — otherwise decrypting for transcription would silently leave
-// plaintext PHI on disk, defeating the whole at-rest-encryption feature.
+// Also covers the transient plaintext `.wav`: session audio lives on disk
+// encrypted (`<id>.wav.enc`), but whisper.cpp only reads plaintext.
+// transcribe_audio decrypts to a transient `.wav` next to the encrypted file,
+// points the sidecar at it, and MUST unlink it afterward — otherwise decrypting
+// for transcription would silently leave plaintext PHI on disk, defeating the
+// whole at-rest-encryption feature. Same RAII shape and rationale, so one type
+// serves both. [audit: at-rest audio]
 //
-// Same RAII shape and rationale as ScratchFileCleanup: `Drop` runs on the success
-// path, every error/early-return path, and panics alike. Errors from
-// `remove_file` are swallowed intentionally — the file may already be gone
-// (decrypt failed before write, disk unmount) and there is nothing sensible to
-// do at drop time. [audit: at-rest audio]
-struct WavCleanup(PathBuf);
+// (Was two byte-identical types, ScratchFileCleanup and WavCleanup, with
+// byte-identical Drop impls.)
+struct TempFileCleanup(PathBuf);
 
-impl Drop for WavCleanup {
+impl Drop for TempFileCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
@@ -250,6 +241,11 @@ impl Drop for WavCleanup {
 //
 // Extracted from `transcribe_audio` so the shape is unit-testable and future
 // call sites (retry path, sync-side transcription) can reuse it.
+//
+// The length cap itself is `log_safety::cap_len` rather than a local copy: it
+// applies the identical char-boundary-safe 200-char truncation (that helper was
+// originally derived from this function), so keeping a second implementation
+// here meant two copies of one policy that could silently drift apart.
 fn redact_whisper_stderr(raw: &str) -> String {
     let first_line = raw
         .lines()
@@ -258,16 +254,9 @@ fn redact_whisper_stderr(raw: &str) -> String {
     // Split on `--` (space-hyphen-hyphen); take the head so that an echoed
     // "invalid option: --output-txt \"...\"" doesn't drag the argv into logs.
     let head = first_line.split(" --").next().unwrap_or(first_line).trim();
-    // Char-safe truncation: byte slicing can split a multi-byte UTF-8 code
-    // point mid-sequence. 200 chars is well under any reasonable log line.
-    const MAX_CHARS: usize = 200;
-    if head.chars().count() <= MAX_CHARS {
-        head.to_string()
-    } else {
-        let mut out: String = head.chars().take(MAX_CHARS).collect();
-        out.push_str("…");
-        out
-    }
+    // cap_len also flattens newlines, which is a no-op here — `head` is already
+    // a single line by construction above.
+    crate::log_safety::cap_len(head)
 }
 
 fn model_path(app: &AppHandle) -> Result<PathBuf, AppError> {
@@ -346,7 +335,7 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
         .map_err(AppError::storage_from)?;
     // Guard registered immediately after the write so any early return past
     // this point still unlinks the plaintext scratch file. [at-rest audio]
-    let _wav_cleanup = WavCleanup(temp_wav.clone());
+    let _wav_cleanup = TempFileCleanup(temp_wav.clone());
 
     let output_base = temp_wav_str.trim_end_matches(".wav").to_string();
 
@@ -379,9 +368,9 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
     // every return path — including `.await?`-style early exits below —
     // unlinks both files. [audit M3]
     let txt_path = format!("{}.txt", output_base);
-    let _cleanup = ScratchFileCleanup(PathBuf::from(&txt_path));
+    let _cleanup = TempFileCleanup(PathBuf::from(&txt_path));
     let json_path = format!("{}.json", output_base);
-    let _json_cleanup = ScratchFileCleanup(PathBuf::from(&json_path));
+    let _json_cleanup = TempFileCleanup(PathBuf::from(&json_path));
 
     if !output.status.success() {
         let raw = String::from_utf8_lossy(&output.stderr);
@@ -673,7 +662,7 @@ mod tests {
         std::fs::write(&path, "transcript").unwrap();
         assert!(path.exists());
         {
-            let _g = ScratchFileCleanup(path.clone());
+            let _g = TempFileCleanup(path.clone());
         } // Drop runs here.
         assert!(!path.exists(), "ScratchFileCleanup should have removed the file");
     }
@@ -684,7 +673,7 @@ mod tests {
     fn scratch_file_cleanup_ignores_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("never_existed.txt");
-        let _g = ScratchFileCleanup(path.clone()); // dropped at end of test
+        let _g = TempFileCleanup(path.clone()); // dropped at end of test
         // No panic — test passes.
     }
 
@@ -697,7 +686,7 @@ mod tests {
         std::fs::write(&path, b"decrypted pcm").unwrap();
         assert!(path.exists());
         {
-            let _g = WavCleanup(path.clone());
+            let _g = TempFileCleanup(path.clone());
         } // Drop runs here.
         assert!(!path.exists(), "WavCleanup should have removed the plaintext");
     }
@@ -708,7 +697,7 @@ mod tests {
     fn wav_cleanup_ignores_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("never_written.wav");
-        let _g = WavCleanup(path.clone());
+        let _g = TempFileCleanup(path.clone());
         // No panic — test passes.
     }
 
@@ -722,7 +711,7 @@ mod tests {
         std::fs::write(&path, b"decrypted pcm").unwrap();
         let p = path.clone();
         let result = std::panic::catch_unwind(move || {
-            let _g = WavCleanup(p);
+            let _g = TempFileCleanup(p);
             panic!("simulated error path after decrypt");
         });
         assert!(result.is_err(), "the closure should have panicked");

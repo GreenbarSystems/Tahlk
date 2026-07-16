@@ -15,17 +15,18 @@
 //!      (a giant error, an attacker-influenced path) can't blow up a log line.
 //!
 //! This mirrors `telemetry.js`'s allowlist philosophy (bounded, capped strings
-//! only) and copies `whisper::redact_whisper_stderr`'s char-boundary-safe
-//! truncation technique verbatim so multi-byte UTF-8 can never panic a cap.
+//! only). The char-boundary-safe truncation below was originally derived from
+//! `whisper::redact_whisper_stderr`; that function now calls [`cap_len`] instead
+//! of keeping its own copy, so this module is the single owner of the policy.
 
-/// Max chars any redacted value may contribute to a log line. Matches
-/// `redact_whisper_stderr`'s cap exactly — one number, one policy.
+/// Max chars any redacted value may contribute to a log line. The one cap for
+/// the whole crate — `whisper::redact_whisper_stderr` routes through
+/// [`cap_len`] rather than defining its own, so this is one number, one policy.
 const MAX_CHARS: usize = 200;
 
 /// Truncate `s` to [`MAX_CHARS`] characters, appending an ellipsis if it was
 /// cut. Char-based (not byte-based) so a multi-byte UTF-8 code point at the
-/// boundary is never split mid-sequence — copied from
-/// `whisper::redact_whisper_stderr`. Newlines are flattened to spaces so a
+/// boundary is never split mid-sequence. Newlines are flattened to spaces so a
 /// value can't inject extra log lines.
 pub(crate) fn cap_len(s: &str) -> String {
     let flattened = s.replace(['\n', '\r'], " ");
