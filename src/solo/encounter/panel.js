@@ -44,6 +44,11 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
     onEncounterUpdated,
     currentTranscript: () => transcript,
     setTranscript: (v) => { transcript = v; },
+    // Dispose + hand control back to the router — same sequence
+    // btn-close-panel uses. Exposed so a section (e.g. noteSection's
+    // delete-encounter handler) can navigate away after an action that
+    // makes the panel's own encounter no longer exist to display.
+    closePanel: async () => { await dispose(); onClose(); },
   };
 
   const note = wireNoteSection(ctx);

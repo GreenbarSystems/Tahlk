@@ -16,6 +16,8 @@ import { toast } from '../../utils/format.js';
 import { userMessage, fromInvoke } from '../../platform/appError.js';
 import { setStatus, clearStatus } from './template.js';
 import { confirmModal } from '../confirmModal.js';
+import { appendAudit } from '../../core/auditLog.js';
+import { keys } from '../../data/keys.js';
 import { getTemplate } from '../../templates/templateLibrary.js';
 import { checkSectionCoverage, describeMissingSections } from '../../domain/sectionCoverage.js';
 import { checkNoteQuality, describeQualityIssues, qualityIssuesCallToAction } from '../../domain/noteQualityGate.js';
@@ -275,6 +277,39 @@ export function wireNoteSection(ctx) {
     ctx.onEncounterUpdated(ctx.currentEncounter);
     purgeBtn?.remove();
     toast(removed ? 'Audio deleted from device.' : 'Audio was already gone.');
+  });
+
+  // Permanently delete the whole encounter (audit finding: no capability
+  // exists to delete a signed note, transcript, or entire encounter record).
+  // Available regardless of status — a signed note must be deletable too,
+  // since that's the exact case the finding names. The audit trail
+  // (note_history/note_audit/llm_audit) is deliberately preserved by the
+  // Rust command; this appends a final 'encounter_deleted' entry to that
+  // same trail so it records who deleted the record and when, even though
+  // the clinical content itself is now gone.
+  document.getElementById('btn-delete-encounter')?.addEventListener('click', async () => {
+    const id = ctx.currentEncounter.id;
+    const ok = await confirmModal({
+      title: 'Delete encounter',
+      message: 'This permanently deletes this encounter’s note, transcript, and record. This cannot be undone.',
+      confirmLabel: 'Delete',
+      confirmClass: 'btn-danger',
+    });
+    if (!ok) return;
+    const deleteBtn = document.getElementById('btn-delete-encounter');
+    if (deleteBtn) deleteBtn.disabled = true;
+    try {
+      await encountersRepo.delete(id);
+      await appendAudit(keys.noteAudit(id), 'encounter_deleted', {
+        encounterId: id,
+        status: ctx.currentEncounter.status,
+      });
+      toast('Encounter deleted.');
+      await ctx.closePanel();
+    } catch (e) {
+      toast(`Delete failed: ${userMessage(e, 'unknown error')}`);
+      if (deleteBtn) deleteBtn.disabled = false;
+    }
   });
 
   // Expose the flush + cleanup handles so panel.dispose() can drain them

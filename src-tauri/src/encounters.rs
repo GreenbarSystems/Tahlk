@@ -7,7 +7,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::db::{encounter_row_to_json, ENCOUNTER_COLS};
 use crate::errors::AppError;
@@ -188,6 +188,71 @@ pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> R
     if n == 0 {
         return Err(AppError::invalid(format!("encounter {} not found", id)));
     }
+    Ok(())
+}
+
+/// Permanently delete an encounter (audit finding: "No capability exists to
+/// delete a signed note, transcript, or entire encounter record"). Deletes
+/// the actual PHI content — the `encounters` row itself, the note text and
+/// transcript (which live in the generic `kv` table under
+/// `note_content_v1::<id>` / `note_content_v1::transcript::<id>`, see
+/// data/keys.js) — and best-effort removes any residual on-disk audio.
+///
+/// Deliberately does NOT delete `note_history`, `note_audit`, or
+/// `llm_audit` rows for this id. None of those tables store PHI content
+/// (metadata + hashes only, by their own design — see each module's doc
+/// comment), and retaining them after the encounter is gone preserves the
+/// compliance value of "this record existed, was accessed by X, and was
+/// deleted by Y on this date." This matches `note_history_list_
+/// encounter_ids`' own documented expectation that an encounter can be
+/// hard-deleted while its history rows remain (orphaned but still
+/// verifiable) — this command is simply the first thing to actually
+/// exercise that path. The JS caller appends a final `encounter_deleted`
+/// entry to note_audit after this returns, so the trail itself records
+/// the deletion.
+#[tauri::command]
+pub(crate) async fn delete_encounter(app: AppHandle, state: State<'_, DbState>, id: String) -> Result<(), AppError> {
+    {
+        let mut conn = state.0.get()?;
+        delete_encounter_row(&mut conn, &id)?;
+        // conn dropped here, before the .await below — no DB lock held
+        // across await, same discipline notes.rs's read_api_key uses.
+    }
+
+    // Best-effort, after the SQL commit: a failure here never leaves a
+    // half-deleted encounters row, only an orphaned .wav.enc file on disk,
+    // which is a strictly smaller problem than an inconsistent DB state.
+    if let Err(e) = crate::audio::delete_session_audio(app, id).await {
+        log::error!(
+            "delete_encounter: residual audio cleanup failed: {}",
+            crate::log_safety::cap_len(&e.to_string())
+        );
+    }
+
+    Ok(())
+}
+
+/// Transactional core of `delete_encounter` — takes any `&mut Connection` so
+/// tests can drive it against an in-memory fixture without a Tauri State
+/// harness (same pattern as `mark_signed`/`upsert_encounter_row`).
+fn delete_encounter_row(conn: &mut Connection, id: &str) -> Result<(), AppError> {
+    let tx = conn.transaction()?;
+    // note_content_v1::<id> / note_content_v1::transcript::<id> are the only
+    // KV rows holding this encounter's actual note text/transcript — kept in
+    // sync with data/keys.js's noteContent/noteTranscript key formats by
+    // hand, since Rust has no shared import of the JS key constants.
+    tx.execute(
+        "DELETE FROM kv WHERE key IN (?1, ?2)",
+        params![
+            format!("note_content_v1::{id}"),
+            format!("note_content_v1::transcript::{id}"),
+        ],
+    )?;
+    let n = tx.execute("DELETE FROM encounters WHERE id = ?1", params![id])?;
+    if n == 0 {
+        return Err(AppError::invalid(format!("encounter {id} not found")));
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -431,6 +496,11 @@ mod tests {
                 created_at     TEXT NOT NULL,
                 signed_at      TEXT,
                 signed_hash    TEXT
+            );
+            CREATE TABLE kv (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )
         .unwrap();
@@ -934,5 +1004,86 @@ mod tests {
         insert_row(&conn, "b", "SIGNED", "2026-07-04"); // wouldn't pass the enum, but proves the filter
         let (_, signed, _) = query_encounter_stats(&conn, "2026-07-04").unwrap();
         assert_eq!(signed, 1, "filter compares exact lowercase 'signed'");
+    }
+
+    // --- delete_encounter_row ------------------------------------------------
+
+    fn seed_kv(conn: &Connection, key: &str, value: &str) {
+        conn.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+            params![key, value],
+        )
+        .unwrap();
+    }
+
+    fn kv_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn delete_encounter_row_removes_the_row_and_its_content_kv_rows() {
+        let mut conn = fresh_db();
+        insert_row(&conn, "enc-1", "draft", "2026-07-04");
+        seed_kv(&conn, "note_content_v1::enc-1", "\"the note text\"");
+        seed_kv(&conn, "note_content_v1::transcript::enc-1", "\"the transcript\"");
+        // An unrelated row must survive.
+        seed_kv(&conn, "note_settings_v1::onboarded", "true");
+
+        delete_encounter_row(&mut conn, "enc-1").unwrap();
+
+        assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
+        assert_eq!(kv_count(&conn), 1, "only the unrelated row should remain");
+    }
+
+    // Helper mirroring get_encounter's query, since that command function
+    // needs a Tauri State harness this test module doesn't set up.
+    fn get_encounter_conn(conn: &Connection, id: &str) -> Result<Option<Value>, AppError> {
+        let sql = format!("SELECT {ENCOUNTER_COLS} FROM encounters WHERE id = ?1");
+        Ok(conn.query_row(&sql, params![id], encounter_row_to_json).optional()?)
+    }
+
+    #[test]
+    fn delete_encounter_row_reports_missing_row() {
+        let mut conn = fresh_db();
+        let err = delete_encounter_row(&mut conn, "ghost").unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(format!("{err}").contains("not found"));
+    }
+
+    #[test]
+    fn delete_encounter_row_on_missing_row_does_not_delete_unrelated_kv_content() {
+        // A failed delete (row not found) must not have side effects — the
+        // KV DELETE runs inside the same transaction, so a rollback on the
+        // encounters-row miss must also undo it.
+        let mut conn = fresh_db();
+        seed_kv(&conn, "note_content_v1::ghost", "\"orphaned content\"");
+        assert!(delete_encounter_row(&mut conn, "ghost").is_err());
+        assert_eq!(kv_count(&conn), 1, "the transaction must roll back, not partially apply");
+    }
+
+    #[test]
+    fn delete_encounter_row_deletes_a_signed_encounter_too() {
+        // The finding explicitly names "delete a SIGNED note" as the gap —
+        // must not be blocked by any signed-row immutability guard (those
+        // guard mutation, not deletion).
+        let mut conn = fresh_db();
+        insert_signed(&conn);
+        delete_encounter_row(&mut conn, "enc-1").unwrap();
+        assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_encounter_row_only_touches_the_named_encounter() {
+        let mut conn = fresh_db();
+        insert_row(&conn, "enc-1", "draft", "2026-07-04");
+        insert_row(&conn, "enc-2", "draft", "2026-07-04");
+        seed_kv(&conn, "note_content_v1::enc-1", "\"a\"");
+        seed_kv(&conn, "note_content_v1::enc-2", "\"b\"");
+
+        delete_encounter_row(&mut conn, "enc-1").unwrap();
+
+        assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
+        assert!(get_encounter_conn(&conn, "enc-2").unwrap().is_some());
+        assert_eq!(kv_count(&conn), 1, "only enc-1's content rows should be gone");
     }
 }

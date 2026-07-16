@@ -154,6 +154,7 @@ pub fn run() {
             encounters::encounter_stats,
             encounters::mark_encounter_signed,
             encounters::upsert_encounter,
+            encounters::delete_encounter,
             audio::save_session_audio,
             audio::delete_session_audio,
             encounters::clear_encounter_audio_path,

@@ -175,6 +175,10 @@ export function renderEncounterPanel(encounter) {
                   </div>
                 ` : ''}
               `}
+              <div class="danger-zone">
+                <button class="btn btn-ghost btn-danger btn-sm" id="btn-delete-encounter"
+                        title="Permanently delete this encounter, its note, and its transcript">Delete Encounter</button>
+              </div>
             </div>
           </section>
 
