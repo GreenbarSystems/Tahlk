@@ -504,10 +504,12 @@ itself, and to independently evaluate its own notification duties as a
 business associate where that role applies (e.g., the Anthropic-relay flow in
 Flow D, or a future managed-key proxy).
 
-**Planned remediation:** formalize the above into a standalone incident-
-response runbook (intake channel, triage steps, internal escalation, and
-template provider notification) rather than leaving it as prose in this
-document only.
+**Remediation shipped:** the above is now formalized as a standalone
+[incident-response runbook](./incident-response-runbook.md) — intake
+channel, triage steps, risk assessment, internal escalation, notification
+timelines and templates, and closure record-keeping. This section remains
+as a summary; the runbook is the operational document to actually follow
+when responding to a real incident.
 
 ---
 
@@ -518,29 +520,38 @@ disposal policy previously documented.**
 
 **Current state:** `src/domain/retention.js` implements audio-only retention
 (`keep` vs. `delete_on_sign`), purging the raw `.wav` after signing when so
-configured. There is no capability to delete an entire encounter record —
-signed note, transcript text, and hash-chained history persist indefinitely
-with no exposed deletion path, no configurable retention period, and no
-disposal procedure.
+configured. A `delete_encounter` command (`src-tauri/src/encounters.rs`) now
+also exists to permanently remove an entire encounter record — the
+`encounters` row plus its note text and transcript (the `note_content_v1::`
+KV rows) and any residual audio — gated behind an in-app confirmation. It
+deliberately does NOT delete `note_history`/`note_audit`/`llm_audit` rows for
+that encounter, since none of those tables hold PHI content (metadata and
+hashes only); the JS caller appends a final `encounter_deleted` entry to the
+audit trail after a successful delete, so the record of the deletion itself
+survives even though the clinical content does not. There is still no
+configurable time-based retention period and no automatic/scheduled
+disposal — deletion today is a manual, per-encounter provider action, not a
+policy the app enforces on its own.
 
-**Why this is lower severity than Sections 3–6:** indefinite retention of
-properly-secured PHI is not itself a HIPAA violation — many practices are
-required to retain records for years under state law. The gap is the
-*absence of a documented retention/disposal policy and of any tooling to
-act on one*, not the retention itself.
+**Why the remaining gap is lower severity than Sections 3–6:** indefinite
+retention of properly-secured PHI is not itself a HIPAA violation — many
+practices are required to retain records for years under state law. The
+remaining gap is the absence of a *time-based* retention policy and
+automatic disposal tooling, not the ability to delete on request, which now
+exists.
 
-**Accepted state (named explicitly):** retention and disposal of the
-full encounter record beyond the existing audio-purge control is the
-provider's responsibility to manage outside the app today (e.g., via device-
-level deletion or disposal procedures aligned with their state's medical-
-records retention requirements and any individual patient deletion request
-they are obligated to honor).
+**Accepted state (named explicitly):** time-based retention/auto-purge
+beyond the existing manual per-encounter delete and the audio keep/
+delete_on_sign toggle is the provider's responsibility to manage outside the
+app today (e.g., via periodic manual deletion aligned with their state's
+medical-records retention requirements).
 
-**Planned remediation (tracked, not yet built):** a "delete this encounter
-permanently" command removing the note, transcript, hash-chain entries, and
-any residual files for a given encounter, gated behind confirmation and
-logged as a `record_deleted` audit event once Section 4's audit-log
-remediation is in place.
+**Planned remediation (tracked, not yet built):** an optional, provider-
+configurable time-based auto-purge policy layered on top of the now-shipped
+manual delete capability — see the "No defined, configurable retention
+period" finding in the compliance audit report for the fuller design note
+on why this should stay opt-in rather than default-on, given the
+immutability/audit-integrity design elsewhere in the app.
 
 ---
 

@@ -33,12 +33,51 @@ Anthropic call.
 
 ## 2. Gating prerequisites (must ALL be true before enabling managed)
 
+This checklist was originally written before Tahlk's compliance audit report
+identified it as omitting several standard BAA-readiness elements (Medium
+finding, area 10). Revised below — corrections and additions are marked.
+
 **Legal / compliance**
-- [ ] **BAA with Anthropic** executed (Tahlk discloses PHI to Anthropic as a subcontractor BA).
-- [ ] **Zero-Data-Retention (ZDR)** enabled on the Anthropic account used by the proxy.
-- [ ] **BAA template ready to sign with each practice** (Tahlk is the practice's BA).
+- [ ] **HIPAA readiness enabled on Anthropic's Console** for the dedicated
+      organization the proxy will use (Console → Settings → Privacy →
+      accept the standard BAA as an authorized legal representative, or a
+      negotiated BAA via Anthropic sales if the standard terms don't fit).
+      **Correction:** the earlier version of this checklist listed
+      "Zero-Data-Retention (ZDR) enabled" as a *separate* item from the BAA.
+      Per Anthropic's own documentation, HIPAA readiness and ZDR are
+      **alternative** arrangements, not additive — enabling HIPAA readiness
+      is the complete requirement; there is no separate ZDR step to also
+      enable. Use a Console organization dedicated to this proxy, never one
+      also used for unrelated/non-PHI work — HIPAA readiness is permanent
+      and org-wide once enabled, and blocks any non-eligible API feature
+      with a hard `400` error.
+- [ ] **BAA template ready to sign with each practice** (Tahlk is the
+      practice's BA), containing — at minimum, per 45 CFR §164.504(e)(2)'s
+      required contract elements — the permitted/required uses of PHI, a
+      prohibition on further use/disclosure beyond the agreement or as
+      required by law, an obligation to implement appropriate safeguards,
+      an obligation to report any use/disclosure not provided for (including
+      breach notification, integrated with the
+      [incident-response runbook](docs/security/incident-response-runbook.md) —
+      that document's §6 division-of-responsibility language must be updated
+      the moment this ships, since Greenbar becomes a direct BA for this flow
+      rather than only for the desktop software), a flow-down requirement
+      that Anthropic (the subcontractor) agrees to the same restrictions,
+      support for patients' amendment/access/accounting-of-disclosure
+      rights, availability of records to HHS, and defined return-or-destroy
+      obligations at termination. **This is a real legal document — draft or
+      review by a licensed healthcare attorney before it is shown to any
+      practice; do not adapt a public template without that review.**
 - [ ] Privacy policy / disclosures updated to state that, in managed mode, a
-      (de-identified) transcript is sent to Anthropic under BAA + ZDR.
+      (de-identified) transcript is sent to Anthropic under Greenbar's
+      HIPAA-ready Console organization.
+- [ ] **Minimum-necessary re-verification for the proxy path specifically**
+      — the BYO path was independently verified to send only transcript +
+      system prompt, no identifiers (see the compliance audit report). The
+      proxy adds a new hop; confirm it doesn't introduce additional logging,
+      buffering, or metadata (account id, request headers, etc.) that
+      widens what leaves the device beyond what BYO already sends. Don't
+      assume the BYO verification automatically carries over.
 
 **Infrastructure**
 - [ ] HIPAA-grade proxy stood up: TLS in transit, encryption at rest, access controls.
@@ -46,12 +85,23 @@ Anthropic call.
 - [ ] Per-account **metering + rate limits** (the Anthropic key is now Tahlk's — cap abuse/cost).
 - [ ] Auth: app authenticates to the proxy with a Tahlk **account/session token**, never an
       Anthropic key. Anthropic key lives only server-side.
+- [ ] **Least-privilege access control on the proxy's own infrastructure and
+      logs** — name who inside Greenbar can reach proxy hosts/logs/metrics,
+      and why. The proxy is new infrastructure that transiently touches PHI
+      in flight; it needs the same "who can see this and why" discipline
+      the desktop app's own design already applies (e.g. the API-key
+      write-only boundary in `secrets.rs`).
+- [ ] **Monitoring/alerting on the proxy service itself** — uptime, error
+      rate, and anomalous-access alerting, distinct from the per-account
+      abuse/cost metering above. A silently-failing or silently-compromised
+      proxy is a detection gap the desktop app's local-only design never had
+      to solve; the proxy introduces that need.
 - [ ] SOC 2 Type II on the roadmap (per GTM plan) and at least in progress.
 
 **Optional hardening (carry over from the privacy review)**
 - [ ] De-identify the transcript before it leaves the device (defense-in-depth; not a BAA
       substitute — conversational BH transcripts leak identity regex can't catch).
-- [ ] Stamp the generation engine ("managed cloud / BAA / ZDR") into the SHA-256 audit chain.
+- [ ] Stamp the generation engine ("managed cloud / HIPAA-ready") into the SHA-256 audit chain.
 
 ---
 
@@ -64,13 +114,15 @@ base-URL + auth swap (no new request/response contract to invent):
 BYO (today):   app ──(x-api-key: user key)─────────────▶ api.anthropic.com
 Managed:       app ──(Authorization: Bearer <Tahlk token>)─▶ api.tahlk.com/anthropic ──┐
                                                                                        │ injects real key
-                                                                                       │ + ZDR, forwards
+                                                                                       │ (HIPAA-ready org),
+                                                                                       │ forwards
                                                                                        ▼
                                                                               api.anthropic.com
 ```
 
 The proxy receives the identical `/v1/messages` body, swaps the auth for the real
-(ZDR-enabled) Anthropic key, forwards, and streams the response back unchanged.
+Anthropic key (from Greenbar's dedicated HIPAA-ready Console organization), forwards,
+and streams the response back unchanged.
 
 The full request/response contract — endpoints, auth, validation caps, error model, and HIPAA
 logging rules — is specified in [`MANAGED-KEY-PROXY-CONTRACT.md`](./MANAGED-KEY-PROXY-CONTRACT.md).
