@@ -81,12 +81,9 @@ pub(crate) fn patient_audit_list(state: State<DbState>, patient_id: String) -> R
             "providerId": r.get::<_, String>(2)?,
             "action":     r.get::<_, String>(3)?,
         }))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 #[cfg(test)]

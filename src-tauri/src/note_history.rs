@@ -202,12 +202,10 @@ fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 pub(crate) fn note_history_list_encounter_ids(state: State<DbState>) -> Result<Vec<String>, AppError> {
     let conn = state.0.get()?;
     let mut stmt = conn.prepare("SELECT DISTINCT encounter_id FROM note_history ORDER BY encounter_id")?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -217,12 +215,10 @@ pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> 
         "SELECT action, actor, timestamp, content_hash, notes, prev_hash, entry_hash \
          FROM note_history WHERE encounter_id = ?1 ORDER BY seq",
     )?;
-    let rows = stmt.query_map(params![encounter_id], row_to_json)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+    let rows = stmt
+        .query_map(params![encounter_id], row_to_json)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 #[tauri::command]
