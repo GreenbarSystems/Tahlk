@@ -39,9 +39,11 @@ pub(crate) fn clamp_list_limit(limit: Option<i64>) -> i64 {
 const DEFAULT_LIST_LIMIT: i64 = 200;
 
 /// Extract a required, non-empty string field from an incoming patient
-/// payload, or return `AppError::InvalidInput` naming the field. Mirrors the
-/// boundary validation in `encounters::required_str` so a missing/blank alias
-/// fails loudly instead of persisting an empty NOT NULL column.
+/// payload, or return `AppError::InvalidInput` naming the field. Same rule as
+/// `encounters::required_str` — missing, wrong-type, empty, and whitespace-only
+/// all fail loudly instead of persisting a blank NOT NULL column. (The two
+/// genuinely agree now; until 2026-07-16 this one trimmed and that one didn't,
+/// while this comment already claimed they matched.)
 fn required_str<'a>(incoming: &'a Value, field: &'static str) -> Result<&'a str, AppError> {
     match incoming[field].as_str() {
         Some(s) if !s.trim().is_empty() => Ok(s),

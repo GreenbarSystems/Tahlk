@@ -52,7 +52,7 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 // One-shot migration of note_history_v1::<id> KV blobs into the relational
 // table. Called from db::open_database after schema creation. Idempotent:
 //
-//   • Scans kv WHERE key LIKE 'note_history_v1::%' ESCAPE '\'
+//   • Scans kv WHERE key LIKE 'note\_history\_v1::%' ESCAPE '\'
 //   • For each encounter that has ZERO existing rows in note_history,
 //     parses the blob and INSERTs rows preserving array-index order as seq.
 //   • DELETEs the KV row only after all INSERTs for that encounter succeed.
@@ -65,9 +65,15 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
     // Collect (key, value) pairs up front so we don't hold a prepared stmt
     // while we open per-encounter transactions.
     let rows: Vec<(String, String)> = {
+        // Every `_` in the prefix is escaped, including the one in
+        // "note_history" — an unescaped `_` is SQL's single-char wildcard, so
+        // the pattern would also match `noteXhistory_v1::…`. Harmless today
+        // (strip_prefix below is the real gate and rejects those), but this
+        // matches the rule kv.rs enforces and note_audit.rs's migration
+        // already follows.
         let mut stmt = conn.prepare(
             "SELECT key, value FROM kv \
-             WHERE key LIKE 'note_history\\_v1::%' ESCAPE '\\'",
+             WHERE key LIKE 'note\\_history\\_v1::%' ESCAPE '\\'",
         )?;
         let iter = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -380,6 +386,57 @@ mod tests {
         let mut conn = fresh_db();
         let seq = append(&mut conn, "enc-1", None, "hash-a").unwrap();
         assert_eq!(seq, 1);
+    }
+
+    // Only the exact `note_history_v1::` prefix may migrate. Two mechanisms
+    // could enforce that, and it's worth being precise about which actually
+    // does: the LIKE pattern is a coarse pre-filter, but `strip_prefix`
+    // (an exact literal match) is the real gate — which is why this test
+    // passes even against the older pattern that left the `_` in
+    // `note_history` unescaped and therefore over-matched `noteXhistory_v1::`
+    // at the SQL level. The LIKE has since been fully escaped for consistency
+    // with note_audit.rs and kv.rs, but this test pins the contract rather
+    // than either mechanism, so it holds regardless of which one is doing the
+    // work — and would catch a future change that dropped strip_prefix and
+    // leaned on the LIKE alone.
+    #[test]
+    fn migration_ignores_keys_that_only_match_via_an_unescaped_wildcard() {
+        let mut conn = fresh_db();
+        conn.execute_batch(
+            "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);",
+        )
+        .unwrap();
+        let entry = json!([{
+            "action": "note_saved", "actor": "provider-1",
+            "timestamp": "2026-07-11T10:00:00Z", "contentHash": "h",
+        }])
+        .to_string();
+        for key in ["note_history_v1::enc-real", "noteXhistory_v1::enc-lookalike"] {
+            conn.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+                params![key, entry],
+            )
+            .unwrap();
+        }
+
+        migrate_from_kv(&mut conn).unwrap();
+
+        let migrated: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT encounter_id FROM note_history ORDER BY encounter_id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            migrated,
+            vec!["enc-real".to_string()],
+            "only the exact note_history_v1:: prefix should migrate"
+        );
     }
 
     #[test]

@@ -313,9 +313,14 @@ pub(crate) fn query_encounter_stats(
 /// happily persisted them — not exploitable, but it hid bugs behind a
 /// misleading NOT NULL success. Failing loudly here surfaces the caller
 /// error at the boundary (audit L2).
+///
+/// Whitespace-only values are rejected for the same reason `""` is: they clear
+/// NOT NULL while carrying no information. This matters most for `provider_id`,
+/// the audit actor identity stamped on every encounter row. The value itself is
+/// returned untrimmed — this is a guard, not a normalizer.
 fn required_str<'a>(incoming: &'a Value, field: &'static str) -> Result<&'a str, AppError> {
     match incoming[field].as_str() {
-        Some(s) if !s.is_empty() => Ok(s),
+        Some(s) if !s.trim().is_empty() => Ok(s),
         _ => Err(AppError::invalid(format!(
             "encounter.{field} is required and must be a non-empty string"
         ))),
@@ -855,6 +860,35 @@ mod tests {
             required_str(&payload, "id").unwrap_err(),
             AppError::InvalidInput(_)
         ));
+    }
+
+    #[test]
+    fn required_str_rejects_whitespace_only_string() {
+        // A whitespace-only value is an empty value wearing a disguise: it
+        // satisfies NOT NULL and `!s.is_empty()` while carrying no
+        // information. That matters most for provider_id, which is the audit
+        // actor identity on every encounter row — "   " is not a person.
+        // patients::required_str already rejected these; this one did not,
+        // despite its sibling's comment claiming the two mirror each other.
+        for val in ["   ", "\t", "\n", " \t\n "] {
+            let payload = json!({ "provider_id": val });
+            assert!(
+                matches!(
+                    required_str(&payload, "provider_id").unwrap_err(),
+                    AppError::InvalidInput(_)
+                ),
+                "whitespace-only value should reject: {val:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_str_preserves_surrounding_whitespace_on_real_values() {
+        // Rejecting whitespace-ONLY must not start trimming real values --
+        // the check is a guard, not a normalizer, and callers persist exactly
+        // what they passed.
+        let payload = json!({ "id": "  enc-42  " });
+        assert_eq!(required_str(&payload, "id").unwrap(), "  enc-42  ");
     }
 
     #[test]
