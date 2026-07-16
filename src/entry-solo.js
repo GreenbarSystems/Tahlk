@@ -10,6 +10,8 @@ import { appendAudit } from './core/auditLog.js';
 import { shouldLogRecordView } from './domain/recordAccess.js';
 import { onWindowCloseRequested, destroyWindow } from './platform/tauri.js';
 import { clearClipboardOnExit } from './export/exportFormatter.js';
+import { startIdleWatcher } from './core/idleLock.js';
+import { showLockScreen } from './solo/lockScreen.js';
 import * as telemetry from './core/telemetry.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
@@ -63,6 +65,10 @@ async function bootstrap() {
   await kvWarmup();
   installSoloCapabilities();
   await wireClipboardClearOnExit();
+  // startIdleWatcher is a no-op timer-wise until the provider both enables
+  // this in Settings AND sets a PIN — safe to start unconditionally here
+  // rather than gating bootstrap on that being configured yet.
+  startIdleWatcher(() => showLockScreen(() => {}));
   await telemetry.init();   // opt-in gated; subscribes to the bus, records nothing unless enabled
 
   if (!isOnboarded()) {

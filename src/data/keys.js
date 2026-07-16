@@ -28,6 +28,11 @@ export const keys = {
   // directly since the gate lives in Rust before any network I/O.
   baaAck:           () => 'note_settings_v1::baa_ack',
   diagEvents:       () => 'note_diag_v1::events', // not in EAGER_PREFIXES — loaded on demand
+  // Idle-lock settings (enabled flag + timeout). The PIN itself is never
+  // stored here — it lives only in the OS keychain via src-tauri/src/lock.rs,
+  // same "never the kv table" discipline as the API key and the DEK.
+  lockEnabled:        () => 'note_settings_v1::lock_enabled',
+  lockTimeoutMinutes: () => 'note_settings_v1::lock_timeout_minutes',
 };
 
 // Per-encounter keys pulled into cache lazily when an encounter is opened.

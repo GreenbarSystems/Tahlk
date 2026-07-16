@@ -344,6 +344,29 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 .onboarding-title { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
 .onboarding-sub   { color: var(--gray-500); font-size: 13px; margin-bottom: 28px; }
 
+/* Idle-lock overlay — appended directly to <body>, not #app, so it sits
+   above and independent of whatever's rendered underneath (see
+   solo/lockScreen.js). z-index deliberately far above anything else in
+   this stylesheet, since it must never be accidentally covered. */
+.lock-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--navy);
+  padding: 24px;
+}
+.lock-card {
+  background: var(--white); border-radius: var(--radius-lg); box-shadow: var(--shadow-md);
+  padding: 36px 40px; max-width: 380px; width: 100%; text-align: center;
+}
+.lock-icon  { font-size: 36px; margin-bottom: 12px; }
+.lock-title { font-size: 20px; font-weight: 800; margin-bottom: 6px; }
+.lock-card .field-row { text-align: left; margin-top: 20px; }
+.lock-card input[type="password"] { text-align: center; letter-spacing: 4px; font-size: 18px; }
+.lock-card .btn { width: 100%; margin-top: 16px; }
+.lock-error {
+  color: var(--danger); font-size: 13px; margin-top: 10px; margin-bottom: 0;
+}
+
 .onboarding-steps { display: flex; flex-direction: column; gap: 24px; margin-bottom: 28px; }
 .onboarding-step  { display: flex; gap: 16px; align-items: flex-start; }
 .step-num {

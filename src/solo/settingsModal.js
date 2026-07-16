@@ -12,6 +12,14 @@ import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
 import { verifyAllChains } from '../domain/historyChain.js';
 import { checkLlmAuditDrift, describeDrift } from '../domain/llmAuditDrift.js';
 import { iconCheck } from './icons.js';
+import { lockRepo } from '../data/lockRepo.js';
+import {
+  DEFAULT_TIMEOUT_MINUTES,
+  isLockEnabled,
+  setLockEnabled,
+  getLockTimeoutMinutes,
+  setLockTimeoutMinutes,
+} from '../core/idleLock.js';
 
 const PROVIDER_KEY = keys.provider();
 
@@ -40,6 +48,9 @@ export async function renderSettings() {
   // fail-closed default and matches what the Rust gate would enforce anyway.
   const baaAck = await baaRepo.getStatus().catch(() => null);
   const baaAcked = !!(baaAck && baaAck.acknowledged);
+  const pinSet = await lockRepo.isPinSet().catch(() => false);
+  const lockOn = isLockEnabled();
+  const lockTimeout = getLockTimeoutMinutes();
 
   return `
     <div class="settings-page">
@@ -152,6 +163,44 @@ export async function renderSettings() {
           <input type="radio" name="s-audio-retention" value="delete_on_sign" ${retention === 'delete_on_sign' ? 'checked' : ''} />
           <span><strong>Delete on sign</strong> — immediately delete the .wav from disk after each sign-off. Minimizes at-rest audio.</span>
         </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Screen Lock</h3>
+        <p class="settings-desc">
+          Automatically locks the screen after a period of inactivity so a laptop left unattended
+          between patients doesn't sit open with note or transcript content visible. Requires a
+          PIN set here — not your operating system password — to resume. Suspended while a
+          recording is in progress.
+        </p>
+        <div class="baa-status-row">
+          <span class="baa-status-pill ${pinSet ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}" id="s-lock-status-pill">
+            ${pinSet ? 'PIN set' : 'No PIN set'}
+          </span>
+        </div>
+
+        <div class="field-row">
+          <label id="s-lock-pin-label">${pinSet ? 'New PIN' : 'Set PIN'}</label>
+          <input type="password" id="s-lock-pin" inputmode="numeric" autocomplete="off"
+                 placeholder="At least 4 digits" />
+        </div>
+        <div class="field-row">
+          <label>Confirm PIN</label>
+          <input type="password" id="s-lock-pin-confirm" inputmode="numeric" autocomplete="off" />
+        </div>
+        <button class="btn btn-primary" id="s-lock-save-pin">${pinSet ? 'Change PIN' : 'Set PIN'}</button>
+        ${pinSet ? '<button class="btn btn-ghost btn-danger" id="s-lock-remove-pin">Remove PIN</button>' : ''}
+
+        <label class="diag-toggle" style="margin-top:16px">
+          <input type="checkbox" id="s-lock-enabled" ${lockOn ? 'checked' : ''} ${pinSet ? '' : 'disabled'} />
+          <span id="s-lock-toggle-text">Lock automatically after inactivity${pinSet ? '' : ' (set a PIN first)'}</span>
+        </label>
+        <div class="field-row">
+          <label>Lock after (minutes)</label>
+          <input type="number" id="s-lock-timeout" min="1" max="60" value="${Number(lockTimeout)}"
+                 ${pinSet ? '' : 'disabled'} />
+        </div>
+        <p class="settings-desc">Default: ${DEFAULT_TIMEOUT_MINUTES} minutes.</p>
       </section>
 
       <section class="settings-section">
@@ -298,6 +347,107 @@ export function wireSettings() {
         toast(`Could not update retention: ${userMessage(err, 'unknown error')}`);
       }
     });
+  });
+
+  // Screen Lock. Setting/changing a PIN and removing it both flip several
+  // dependent bits of UI (status pill, button label, enable checkbox +
+  // timeout input disabled state) — updated in place rather than
+  // re-rendering the whole settings pane, matching the diag-clear pattern
+  // above.
+  document.getElementById('s-lock-save-pin')?.addEventListener('click', async () => {
+    const pinInput = document.getElementById('s-lock-pin');
+    const confirmInput = document.getElementById('s-lock-pin-confirm');
+    const pin = pinInput?.value || '';
+    const confirmPin = confirmInput?.value || '';
+    if (!pin || pin.length < 4) {
+      toast('PIN must be at least 4 digits.');
+      return;
+    }
+    if (pin !== confirmPin) {
+      toast('PINs do not match.');
+      return;
+    }
+    try {
+      await lockRepo.setPin(pin);
+      if (pinInput) pinInput.value = '';
+      if (confirmInput) confirmInput.value = '';
+      toast('Lock PIN saved.');
+
+      const pill = document.getElementById('s-lock-status-pill');
+      if (pill) {
+        pill.textContent = 'PIN set';
+        pill.classList.add('baa-status-pill--ok');
+        pill.classList.remove('baa-status-pill--danger');
+      }
+      const saveBtn = document.getElementById('s-lock-save-pin');
+      if (saveBtn) saveBtn.textContent = 'Change PIN';
+      const pinLabel = document.getElementById('s-lock-pin-label');
+      if (pinLabel) pinLabel.textContent = 'New PIN';
+      const enabledCheckbox = document.getElementById('s-lock-enabled');
+      if (enabledCheckbox) enabledCheckbox.removeAttribute('disabled');
+      const timeoutInput = document.getElementById('s-lock-timeout');
+      if (timeoutInput) timeoutInput.removeAttribute('disabled');
+      const toggleText = document.getElementById('s-lock-toggle-text');
+      if (toggleText) toggleText.textContent = 'Lock automatically after inactivity';
+      if (!document.getElementById('s-lock-remove-pin') && saveBtn) {
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'btn btn-ghost btn-danger';
+        removeBtn.id = 's-lock-remove-pin';
+        removeBtn.textContent = 'Remove PIN';
+        saveBtn.insertAdjacentElement('afterend', removeBtn);
+        wireLockRemoveButton(removeBtn);
+      }
+    } catch (err) {
+      toast(`Could not save PIN: ${userMessage(err, 'unknown error')}`);
+    }
+  });
+
+  function wireLockRemoveButton(btn) {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Remove your lock PIN? Screen lock will be turned off.')) return;
+      try {
+        await lockRepo.clearPin();
+        setLockEnabled(false);
+        toast('Lock PIN removed.');
+
+        const pill = document.getElementById('s-lock-status-pill');
+        if (pill) {
+          pill.textContent = 'No PIN set';
+          pill.classList.add('baa-status-pill--danger');
+          pill.classList.remove('baa-status-pill--ok');
+        }
+        const saveBtn = document.getElementById('s-lock-save-pin');
+        if (saveBtn) saveBtn.textContent = 'Set PIN';
+        const pinLabel = document.getElementById('s-lock-pin-label');
+        if (pinLabel) pinLabel.textContent = 'Set PIN';
+        const enabledCheckbox = document.getElementById('s-lock-enabled');
+        if (enabledCheckbox) {
+          enabledCheckbox.checked = false;
+          enabledCheckbox.setAttribute('disabled', '');
+        }
+        const timeoutInput = document.getElementById('s-lock-timeout');
+        if (timeoutInput) timeoutInput.setAttribute('disabled', '');
+        const toggleText = document.getElementById('s-lock-toggle-text');
+        if (toggleText) toggleText.textContent = 'Lock automatically after inactivity (set a PIN first)';
+        btn.remove();
+      } catch (err) {
+        toast(`Could not remove PIN: ${userMessage(err, 'unknown error')}`);
+      }
+    });
+  }
+  const existingRemoveBtn = document.getElementById('s-lock-remove-pin');
+  if (existingRemoveBtn) wireLockRemoveButton(existingRemoveBtn);
+
+  document.getElementById('s-lock-enabled')?.addEventListener('change', e => {
+    setLockEnabled(e.target.checked);
+    toast(e.target.checked ? 'Screen lock enabled.' : 'Screen lock disabled.');
+  });
+
+  document.getElementById('s-lock-timeout')?.addEventListener('change', e => {
+    const n = Number(e.target.value);
+    setLockTimeoutMinutes(n);
+    e.target.value = getLockTimeoutMinutes();
+    toast(`Lock timeout set to ${getLockTimeoutMinutes()} minute${getLockTimeoutMinutes() === 1 ? '' : 's'}.`);
   });
 
   document.getElementById('s-verify-chains')?.addEventListener('click', async e => {

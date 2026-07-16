@@ -14,6 +14,7 @@
 //!   - `audio_crypto`  — AES-256-GCM at-rest encryption for session audio + migration.
 //!   - `whisper`       — local whisper.cpp sidecar transcription.
 //!   - `log_safety`    — filename/error redaction for the (unencrypted) app log.
+//!   - `lock`           — idle-lock PIN hash storage (OS keychain, never the SQLite kv table).
 //!   - `notes`         — Anthropic streaming note generation (BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
 //!   - `patients`       — patient roster CRUD.
@@ -36,6 +37,7 @@ mod export;
 mod kv;
 mod kv_ops;
 mod llm_audit;
+mod lock;
 mod log_safety;
 mod note_audit;
 mod note_history;
@@ -163,6 +165,10 @@ pub fn run() {
             patients::upsert_patient,
             patients::delete_patient,
             patient_audit::patient_audit_list,
+            lock::lock_pin_set,
+            lock::lock_pin_verify,
+            lock::lock_pin_clear,
+            lock::lock_pin_is_set,
             note_history::note_history_list,
             note_history::note_history_append,
             note_history::note_history_list_encounter_ids,
