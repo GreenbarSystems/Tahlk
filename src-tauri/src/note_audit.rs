@@ -281,8 +281,18 @@ fn append_audit_row(
     prev_hash: Option<&str>,
     entry_hash: &str,
     entry_json: &str,
-    evicted_count: i64,
+    evicted_count_in: i64,
 ) -> Result<i64, AppError> {
+    // Defense in depth: the #[tauri::command] wrapper above already checks
+    // this, but this function is also callable directly by other Rust code
+    // (and by tests) that bypasses that wrapper, and evicted_count flows
+    // straight into a SQL UPDATE ... LIMIT below — it must be validated at
+    // the point of use, not just at the JS-facing boundary.
+    if evicted_count_in < 0 || evicted_count_in > MAX_EVICT_PER_APPEND {
+        return Err(AppError::invalid("evicted_count out of range"));
+    }
+    let evicted_count = evicted_count_in;
+
     let tx = conn.transaction()?;
     let next_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM note_audit WHERE encounter_id = ?1",
