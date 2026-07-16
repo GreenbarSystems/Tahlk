@@ -104,14 +104,14 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
         let parsed: Value = match serde_json::from_str::<Value>(&value) {
             Ok(v) => v,
             Err(_) => {
-                eprintln!("note_history migration: unparseable blob for {}, skipping", encounter_id);
+                log::error!("note_history migration: unparseable blob for {}, skipping", encounter_id);
                 continue;
             }
         };
         let entries = match parsed.as_array() {
             Some(a) => a.clone(),
             None => {
-                eprintln!("note_history migration: blob for {} is not an array, skipping", encounter_id);
+                log::error!("note_history migration: blob for {} is not an array, skipping", encounter_id);
                 continue;
             }
         };
@@ -148,9 +148,9 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![encounter_id, seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash],
             ) {
-                eprintln!(
+                log::error!(
                     "note_history migration: insert failed for {} seq {}: {}, aborting this encounter",
-                    encounter_id, seq, e
+                    encounter_id, seq, crate::log_safety::cap_len(&e.to_string())
                 );
                 ok = false;
                 break;

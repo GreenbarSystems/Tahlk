@@ -153,7 +153,7 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
             match serde_json::from_str::<Value>(&blob) {
                 Ok(Value::Array(arr)) => entries.extend(arr),
                 _ => {
-                    eprintln!(
+                    log::error!(
                         "note_audit migration: unparseable/non-array blob for {}, skipping that half",
                         encounter_id
                     );
@@ -188,9 +188,9 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
                  VALUES (?1,?2,0,?3,?4,?5)",
                 params![encounter_id, seq, prev_hash, entry_hash, entry_json],
             ) {
-                eprintln!(
+                log::error!(
                     "note_audit migration: insert failed for {} seq {}: {}, aborting this encounter",
-                    encounter_id, seq, e
+                    encounter_id, seq, crate::log_safety::cap_len(&e.to_string())
                 );
                 ok = false;
                 break;

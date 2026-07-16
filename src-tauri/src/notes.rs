@@ -117,7 +117,7 @@ async fn read_bounded_body(resp: reqwest::Response) -> String {
 // any note content into logs. Unlike `log_upstream_body`, this fires in
 // release builds too: the whole point is a persistent integrity signal.
 fn log_dropped_sse_frame(byte_len: usize, err: &serde_json::Error) {
-    eprintln!(
+    log::error!(
         "[notes] dropped malformed SSE frame: {} bytes, error_kind={:?} ({})",
         byte_len,
         err.classify(),
@@ -222,17 +222,17 @@ fn record_llm_call(state: &State<DbState>, entry: LlmCallEntry) {
     let conn = match state.0.get() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
+            log::error!(
                 "llm_audit: failed to check out pooled connection for {} call ({}): {}",
-                entry.outcome, entry.endpoint, e
+                entry.outcome, entry.endpoint, crate::log_safety::cap_len(&e.to_string())
             );
             return;
         }
     };
     if let Err(e) = llm_audit::append(&conn, &entry) {
-        eprintln!(
+        log::error!(
             "llm_audit: failed to record {} call ({}): {}",
-            entry.outcome, entry.endpoint, e
+            entry.outcome, entry.endpoint, crate::log_safety::cap_len(&e.to_string())
         );
     }
 }
@@ -340,7 +340,31 @@ pub(crate) async fn generate_note(
     // before we allocate the request body. The compliance failure is that
     // PHI reaches Anthropic without a BAA, so the check has to sit strictly
     // upstream of any state that could accidentally get flushed to the wire.
-    let ack = baa::require_ack(&state)?;
+    let ack = match baa::require_ack(&state) {
+        Ok(ack) => ack,
+        Err(e) => {
+            // A blocked attempt to generate a note without valid BAA
+            // attestation is exactly the scenario this gate exists to catch
+            // — previously it left zero record in llm_audit, reducing the
+            // gate's own evidentiary value during a compliance review.
+            // provider_id is empty by construction: require_ack only fails
+            // when there is no valid ack to read a provider_id from.
+            record_llm_call(&state, LlmCallEntry {
+                created_at: utc_now_iso(),
+                encounter_id: encounter_id.clone(),
+                provider_id: String::new(),
+                model: ANTHROPIC_MODEL.into(),
+                endpoint: ANTHROPIC_ENDPOINT.into(),
+                request_bytes: 0,
+                response_bytes: 0,
+                upstream_reqid: None,
+                outcome: "baa_required".into(),
+                error_code: Some("baa_required".into()),
+                duration_ms: None,
+            });
+            return Err(e);
+        }
+    };
 
     // Read the key from the OS keychain (locks drop inside read_api_key — no
     // lock is held across the await below).
@@ -613,7 +637,7 @@ pub(crate) async fn generate_note(
     // stray corrupt frame), but the loss is now visible in logs rather than
     // silent. Metadata only — no note content.
     if dropped_frames > 0 {
-        eprintln!(
+        log::error!(
             "[notes] stream completed with {} malformed SSE frame(s) dropped",
             dropped_frames
         );
