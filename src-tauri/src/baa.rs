@@ -169,9 +169,9 @@ pub(crate) fn baa_ack_status(state: State<DbState>) -> Result<Value, AppError> {
 }
 
 /// #[tauri::command] wrapper — writes the ack row. `provider_id` is
-/// clamped to 256 bytes so a compromised WebView can't stash arbitrary
-/// data in the audit trail. Timestamp is captured server-side too so
-/// we have a Rust-generated witness alongside the JS-provided one.
+/// clamped to `crate::MAX_PROVIDER_ID_BYTES` so a compromised WebView can't
+/// stash arbitrary data in the audit trail. Timestamp is captured server-side
+/// too so we have a Rust-generated witness alongside the JS-provided one.
 #[tauri::command]
 pub(crate) fn baa_ack_set(
     state: State<DbState>,
@@ -182,8 +182,11 @@ pub(crate) fn baa_ack_set(
     if acknowledged_at.len() > 64 {
         return Err(AppError::invalid("acknowledged_at exceeds 64 bytes"));
     }
-    if provider_id.len() > 256 {
-        return Err(AppError::invalid("provider_id exceeds 256 bytes"));
+    if provider_id.len() > crate::MAX_PROVIDER_ID_BYTES {
+        return Err(AppError::invalid(format!(
+            "provider_id exceeds {} bytes",
+            crate::MAX_PROVIDER_ID_BYTES
+        )));
     }
 
     let ack = BaaAck {

@@ -27,12 +27,16 @@ use crate::errors::AppError;
 use crate::patient_audit;
 use crate::DbState;
 
-/// Clamp a caller-supplied `LIMIT` into a sane range. Same rationale and
-/// ceiling as `encounters::clamp_list_limit` — an unbounded limit from a
-/// compromised JS layer would deserialize the whole table into memory.
+/// Clamp a caller-supplied `LIMIT` into a sane range. The ceiling and clamp
+/// live in `db::clamp_list_limit`, shared with `encounters` — this wrapper
+/// only supplies this module's default page size.
 pub(crate) fn clamp_list_limit(limit: Option<i64>) -> i64 {
-    limit.unwrap_or(200).clamp(1, 1000)
+    crate::db::clamp_list_limit(limit, DEFAULT_LIST_LIMIT)
 }
+
+/// Default page size when the caller passes no limit. Larger than
+/// `encounters`'s because the roster is browsed whole, not windowed.
+const DEFAULT_LIST_LIMIT: i64 = 200;
 
 /// Extract a required, non-empty string field from an incoming patient
 /// payload, or return `AppError::InvalidInput` naming the field. Mirrors the
@@ -78,14 +82,12 @@ pub(crate) fn get_patient_conn(conn: &Connection, id: &str) -> Result<Option<Val
     Ok(conn.query_row(&sql, params![id], patient_row_to_json).optional()?)
 }
 
-/// Ceiling on `provider_id` — matches `baa.rs::baa_ack_set`'s cap on the
-/// same free-text-identity field, so a compromised WebView can't stash
-/// arbitrary data in this audit trail either.
-const MAX_PROVIDER_ID_BYTES: usize = 256;
-
 fn check_provider_id(provider_id: &str) -> Result<(), AppError> {
-    if provider_id.len() > MAX_PROVIDER_ID_BYTES {
-        return Err(AppError::invalid("provider_id exceeds 256 bytes"));
+    if provider_id.len() > crate::MAX_PROVIDER_ID_BYTES {
+        return Err(AppError::invalid(format!(
+            "provider_id exceeds {} bytes",
+            crate::MAX_PROVIDER_ID_BYTES
+        )));
     }
     Ok(())
 }

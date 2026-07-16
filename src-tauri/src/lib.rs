@@ -63,6 +63,18 @@ mod whisper;
 /// into every callsite.
 pub(crate) struct DbState(pub(crate) db::SqlitePool);
 
+/// Ceiling on the free-text `provider_id` identity field, so a compromised
+/// WebView can't stash arbitrary data in a compliance record under the guise
+/// of an actor name.
+///
+/// At the crate root for the same reason as `DbState`: both `baa::baa_ack_set`
+/// and `patients`' audit path cap this same field, and neither module owns the
+/// concept (it's the provider's own identity, set at onboarding, used as the
+/// audit actor). They previously each hardcoded `256` — `patients`' comment
+/// claimed it "matches `baa.rs::baa_ack_set`'s cap" while nothing linked them,
+/// so either could drift silently.
+pub(crate) const MAX_PROVIDER_ID_BYTES: usize = 256;
+
 pub fn run() {
     tauri::Builder::default()
         // First plugin: stand up file logging before anything else can fail so

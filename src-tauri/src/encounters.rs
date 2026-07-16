@@ -82,18 +82,17 @@ pub(crate) fn enforce_signed_immutability(
 
 /// Clamp a caller-supplied `LIMIT` into a sane range.
 ///
-/// Without a ceiling, `list_encounters(Some(i64::MAX))` would deserialize
-/// every row into a `Vec<Value>` in memory — an easy DoS from any JS-layer
-/// foothold (or a UI bug), and a footgun as the table grows. 1000 is the same
-/// ceiling the sync server uses (`api.rs::LIST_WINDOW`), keeping desktop
-/// paging parity with the server.
-///
-/// The floor of 1 turns pathological inputs (0, negatives) into a "give me
-/// one row" query instead of a silent empty result — easier for callers to
-/// notice and fix.
+/// The ceiling and clamp live in `db::clamp_list_limit` (shared with
+/// `patients`, which previously hardcoded the same `1000` separately). This
+/// wrapper only supplies this module's default page size.
 pub(crate) fn clamp_list_limit(limit: Option<i64>) -> i64 {
-    limit.unwrap_or(50).clamp(1, 1000)
+    crate::db::clamp_list_limit(limit, DEFAULT_LIST_LIMIT)
 }
+
+/// Default page size when the caller passes no limit. Smaller than
+/// `patients`'s because the home screen shows a recent-encounters window, not
+/// a full roster.
+const DEFAULT_LIST_LIMIT: i64 = 50;
 
 #[tauri::command]
 pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, AppError> {

@@ -73,6 +73,30 @@ pub(crate) fn patient_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> 
     }))
 }
 
+/// Hard ceiling on any list query's `LIMIT`. [audit H3]
+///
+/// Without a ceiling, `list_*(Some(i64::MAX))` would deserialize every row into
+/// a `Vec<Value>` in memory — an easy DoS from any JS-layer foothold (or a UI
+/// bug), and a footgun as the tables grow. 1000 matches the sync server's
+/// `api.rs::LIST_WINDOW`, keeping desktop paging parity with the server.
+///
+/// Lives here, shared, because `encounters` and `patients` both enforce it and
+/// previously each hardcoded `1000` separately — `patients`'s comment claimed
+/// "same ceiling as encounters::clamp_list_limit" while nothing actually linked
+/// them, so either could drift silently.
+pub(crate) const LIST_LIMIT_MAX: i64 = 1000;
+
+/// Clamp a caller-supplied `LIMIT` into `[1, LIST_LIMIT_MAX]`, applying
+/// `default` when the caller passed none.
+///
+/// The floor of 1 turns pathological inputs (0, negatives) into a "give me one
+/// row" query instead of a silent empty result — easier for callers to notice
+/// and fix. `default` is the caller's own policy and stays per-module; the
+/// ceiling is the security control and does not.
+pub(crate) fn clamp_list_limit(limit: Option<i64>, default: i64) -> i64 {
+    limit.unwrap_or(default).clamp(1, LIST_LIMIT_MAX)
+}
+
 // Per-connection PRAGMAs. Applied by the pool's `KeyingCustomizer` on EVERY
 // fresh connection, right after the SQLCipher key. journal_mode/synchronous/
 // foreign_keys/cache_size/temp_store/mmap_size are connection-scoped in
