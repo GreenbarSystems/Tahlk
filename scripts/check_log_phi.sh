@@ -15,12 +15,20 @@
 # finding (Medium, "eprintln! diagnostic calls ... invisible to the
 # PHI-safety CI check"): a bare eprintln! sits entirely outside a log::-only
 # scan, so a future contributor could add one that leaks PHI and this check
-# would never see it. One call site is deliberately exempt:
-# notes.rs::log_upstream_body is intentionally bare eprintln! (never log::)
-# so a dev-only upstream-error echo can never land in the persistent,
-# unencrypted app log file even in a debug build — see that function's own
-# doc comment. Its actual line content doesn't match FORBIDDEN today; if a
-# future edit makes it match, fix the leak, don't exempt the line.
+# would never see it.
+#
+# There is NO exemption mechanism, deliberately — every matching line must
+# pass on its own content. notes.rs::log_upstream_body stays a bare eprintln!
+# (never log::) so a dev-only upstream-error echo can't land in the
+# persistent, unencrypted app log even in a debug build; it is scanned like
+# everything else and passes because its tag is "[upstream]" and its
+# interpolated values aren't PHI-named. If a future edit makes any line match,
+# reword the call or fix the leak — don't add an exemption here.
+#
+# Widening this regex to cover eprintln! immediately turned up five existing
+# false positives ("content protection", "note_history migration", a "[notes]"
+# tag), all reworded rather than exempted, per the false-positives-are-cheap
+# policy below. Expect that to happen again if FORBIDDEN grows.
 #
 # Limitations (accepted on purpose):
 #   * substring, case-insensitive — `note` matches `footnote`, `content` matches
@@ -44,11 +52,27 @@ SRC_DIR="${SCRIPT_DIR}/../src-tauri/src"
 FORBIDDEN="transcript|note|content|patient|provider_name|chief_complaint"
 
 # Collect log::/eprintln!/println! macro lines (with file:line) across all
-# .rs files, then filter for the forbidden tokens. grep exits non-zero when
-# nothing matches, which is the success case here, so guard both greps with
-# `|| true`.
+# .rs files. grep exits non-zero when nothing matches, which is the success
+# case here, so guard with `|| true`.
 log_lines="$(grep -rniE 'log::(error|warn|info|debug|trace)!|\b(e?println)!' "${SRC_DIR}" --include='*.rs' || true)"
-violations="$(printf '%s\n' "${log_lines}" | grep -iE "${FORBIDDEN}" || true)"
+
+# Match FORBIDDEN against the CODE ONLY, never the "path:lineno:" prefix grep
+# prepends. Filtering the raw grep output would test the filename too, so every
+# log line in notes.rs / note_audit.rs / note_history.rs would "violate" on the
+# word "note" in its own filename — permanently red, and no rewording of the
+# code could ever clear it. (That is exactly what happened once eprintln! sites
+# in those files were migrated to log::.) The reported line keeps its prefix so
+# the failure output stays clickable.
+violations=""
+while IFS= read -r line; do
+  [ -z "${line}" ] && continue
+  code="${line#*:}"   # drop path
+  code="${code#*:}"   # drop line number
+  if printf '%s' "${code}" | grep -qiE "${FORBIDDEN}"; then
+    violations="${violations}${line}"$'\n'
+  fi
+done <<< "${log_lines}"
+violations="$(printf '%s' "${violations}")"
 
 if [ -n "${violations}" ]; then
   echo "ERROR: a log::/eprintln!/println! call references a PHI-named token (${FORBIDDEN})." >&2

@@ -81,7 +81,12 @@ pub(crate) const MAX_NOTE_BYTES: usize = 1_048_576;
 // error strings that get logged, shipped, or shown to users.
 #[cfg(debug_assertions)]
 fn log_upstream_body(context: &str, body: &str) {
-    eprintln!("[notes] {context}: {body}");
+    // Tag is "[upstream]" rather than this module's name: the PHI-log
+    // guardrail scans this macro family and matches "note" as a bare
+    // substring, so a module-name tag tripped it. More accurate anyway —
+    // what this echoes is the upstream API's error body, never a clinical
+    // note.
+    eprintln!("[upstream] {context}: {body}");
 }
 #[cfg(not(debug_assertions))]
 fn log_upstream_body(_context: &str, _body: &str) {}

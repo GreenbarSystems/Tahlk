@@ -147,11 +147,17 @@ pub fn run() {
             // launch — this is defense-in-depth on top of the app's other
             // controls, not the only thing standing between PHI and exposure.
             if let Some(window) = app.get_webview_window("main") {
+                // Message says "screen-capture protection", not "content
+                // protection", to stay clear of check_log_phi.sh's FORBIDDEN
+                // substring list ("content"). The blunt scan can't tell this
+                // "content" from note content, and its stated policy is to
+                // reword the call rather than carve out an exemption. Reads
+                // better anyway — it names the effect, not the Tauri API.
                 if let Err(e) = window.set_content_protected(true) {
-                    log::error!("failed to enable window content protection: {}", log_safety::cap_len(&e.to_string()));
+                    log::error!("failed to enable screen-capture protection: {}", log_safety::cap_len(&e.to_string()));
                 }
             } else {
-                log::error!("main window not found; content protection not applied");
+                log::error!("main window not found; screen-capture protection not applied");
             }
 
             Ok(())

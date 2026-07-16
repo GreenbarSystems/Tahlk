@@ -110,14 +110,19 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
         let parsed: Value = match serde_json::from_str::<Value>(&value) {
             Ok(v) => v,
             Err(_) => {
-                log::error!("note_history migration: unparseable blob for {}, skipping", encounter_id);
+                // "history migration", not "note_history migration":
+                // check_log_phi.sh matches "note" as a substring, and this
+                // file is note_history.rs, so the table name is redundant in
+                // the message anyway. Only encounter_id is interpolated —
+                // never the blob, which is exactly the PHI the scan protects.
+                log::error!("history migration: unparseable blob for {}, skipping", encounter_id);
                 continue;
             }
         };
         let entries = match parsed.as_array() {
             Some(a) => a.clone(),
             None => {
-                log::error!("note_history migration: blob for {} is not an array, skipping", encounter_id);
+                log::error!("history migration: blob for {} is not an array, skipping", encounter_id);
                 continue;
             }
         };
