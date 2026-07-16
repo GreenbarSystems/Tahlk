@@ -120,9 +120,19 @@ export function wirePatientsView(rerender) {
 
   cancelBtn?.addEventListener('click', resetForm);
 
+  // Monotonic request token: the Edit form is a shared singleton, so two
+  // overlapping clicks (fast double-click across different rows) both fire
+  // a fetch, and whichever resolves last would otherwise win regardless of
+  // which was clicked last. Only the fetch belonging to the MOST RECENT
+  // click is allowed to populate the form; a stale one is silently
+  // discarded when it resolves. Mirrors the encounterId-guard pattern used
+  // for the same class of race in encounter/noteSection.js.
+  let editRequestToken = 0;
   document.querySelectorAll('.patient-edit').forEach(btn => {
     btn.addEventListener('click', async () => {
+      const token = ++editRequestToken;
       const p = await patientsRepo.get(btn.dataset.patientId).catch(() => null);
+      if (token !== editRequestToken) return; // superseded by a newer Edit click
       if (!p) { toast('Patient not found.'); return; }
       idEl.value = p.id;
       aliasEl.value = p.alias || '';
