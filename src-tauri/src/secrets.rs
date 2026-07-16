@@ -61,15 +61,32 @@ pub(crate) fn validate_api_key(key: &str) -> Result<(), AppError> {
 /// it, so add-a-key requires exactly one edit and the enumeration path is
 /// guaranteed to stay in sync.
 ///
-/// # Adding a new keychain-backed KV key
+/// Despite the name, this list now covers two categories, not just literal
+/// OS-keychain items:
+///   * `API_KEY_KV` — the legacy on-disk location for a value that now lives
+///     in the OS keychain (see module doc).
+///   * `baa::BAA_ACK_KEY` — the BAA attestation row (audit finding H3: "BAA
+///     acknowledgment row is writable via the generic kv_set command,
+///     bypassing baa_ack_set's guarantees"). This one stays in the SQLite
+///     `kv` table — it isn't keychain material — but it's the single gate
+///     standing in front of every PHI transmission to Anthropic, so it must
+///     be exactly as unreachable from the generic KV surface as a secret.
+///     `baa.rs`'s own `baa_ack_status`/`baa_ack_set`/`baa_ack_clear` commands
+///     are unaffected: they read/write via `crate::kv_ops` directly, never
+///     through `guard_key`, so this only closes the generic-command path.
+///
+/// # Adding a new key here
 /// 1. Append the exact key string here (and update the pin in
 ///    `keychain_only_keys_is_pinned` in the same commit).
-/// 2. Add a `#[tauri::command]` in `secrets.rs` that reads/writes the value via
-///    the OS keychain (never the SQLite `kv` table).
+/// 2. Make sure a dedicated `#[tauri::command]` already exists (in this file
+///    or elsewhere) that reads/writes the value WITHOUT going through
+///    `kv::kv_get`/`kv_set`/`kv_remove` — otherwise the guard would make the
+///    value permanently unreachable.
 /// 3. Extend the `kv_list_hides_keychain_only_keys` test in `kv.rs` to seed
 ///    the new key and assert it stays hidden through enumeration.
 pub(crate) const KEYCHAIN_ONLY_KEYS: &[&str] = &[
     API_KEY_KV,
+    crate::baa::BAA_ACK_KEY,
 ];
 
 /// True when `key` names a value that must live in the OS keychain and is
@@ -215,10 +232,12 @@ mod tests {
 
     // Non-secret shapes we actually use must pass. These match `kv.rs`'s
     // realistic_key_shapes_all_fit list so the two guards stay in lockstep.
+    // note_settings_v1::baa_ack is deliberately NOT in this list any more —
+    // it moved to KEYCHAIN_ONLY_KEYS (audit finding H3) and is covered by
+    // every_keychain_only_key_is_guarded instead.
     #[test]
     fn realistic_kv_keys_are_not_guarded() {
         for key in [
-            "note_settings_v1::baa_ack",
             "note_settings_v1::onboarded",
             "note_provider_v1::profile",
             "note_content_v1::enc-l9k3a-x7q2",
@@ -277,8 +296,20 @@ mod tests {
     fn keychain_only_keys_is_pinned() {
         assert_eq!(
             KEYCHAIN_ONLY_KEYS,
-            &[API_KEY_KV],
+            &[API_KEY_KV, crate::baa::BAA_ACK_KEY],
             "KEYCHAIN_ONLY_KEYS changed — review carefully and update this pin."
         );
+    }
+
+    // audit finding H3: the BAA ack row must be exactly as unreachable via
+    // the generic KV surface as the API key. every_keychain_only_key_is_guarded
+    // already covers this by iterating KEYCHAIN_ONLY_KEYS, but this test
+    // pins the specific scenario the finding described so a future refactor
+    // that accidentally drops the entry fails loudly with a finding-shaped
+    // name, not just a generic allowlist-iteration failure.
+    #[test]
+    fn baa_ack_key_cannot_be_forged_via_generic_kv_set() {
+        let err = guard_key(crate::baa::BAA_ACK_KEY).unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
     }
 }

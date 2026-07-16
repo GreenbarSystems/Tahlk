@@ -194,6 +194,7 @@ mod tests {
     #[test]
     fn kv_list_hides_keychain_only_keys() {
         use rusqlite::Connection;
+        use crate::baa::BAA_ACK_KEY;
         use crate::secrets::API_KEY_KV;
 
         let conn = Connection::open_in_memory().unwrap();
@@ -206,12 +207,14 @@ mod tests {
         )
         .unwrap();
 
-        // Two ordinary rows plus the legacy plaintext-key row that must never
-        // surface through enumeration.
+        // Two ordinary rows plus the legacy plaintext-key row and the BAA ack
+        // row (audit finding H3) — neither must ever surface through
+        // enumeration.
         for (k, v) in [
             ("note_settings_v1::onboarded", "true"),
             ("note_provider_v1::profile", "{}"),
             (API_KEY_KV, "\"sk-ant-should-not-leak\""),
+            (BAA_ACK_KEY, "{\"acknowledged\":true}"),
         ] {
             conn.execute(
                 "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
@@ -223,6 +226,7 @@ mod tests {
         let listed = kv_list_conn(&conn, "").unwrap();
         let keys: Vec<&str> = listed.iter().map(|(k, _)| k.as_str()).collect();
         assert!(!keys.contains(&API_KEY_KV), "secret key leaked into kv_list: {keys:?}");
+        assert!(!keys.contains(&BAA_ACK_KEY), "BAA ack row leaked into kv_list: {keys:?}");
         assert!(keys.contains(&"note_settings_v1::onboarded"));
         assert!(keys.contains(&"note_provider_v1::profile"));
         assert_eq!(keys.len(), 2, "expected exactly 2 non-secret rows, got {keys:?}");
