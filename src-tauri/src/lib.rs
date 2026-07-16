@@ -115,6 +115,25 @@ pub fn run() {
             }
 
             app.manage(db::new_state(pool));
+
+            // Content protection (audit finding: "no window content-protection
+            // flag — screen sharing/recording/remote-desktop tools can capture
+            // PHI on screen"). Excludes this window from what screen-share,
+            // screen-recording, and remote-support tools can capture — on
+            // Windows this sets WDA_EXCLUDEFROMCAPTURE, on macOS it sets
+            // NSWindowSharingNone. Best-effort: if the main window handle isn't
+            // available yet (shouldn't happen at this point in setup) or the
+            // platform call fails, log and continue rather than blocking
+            // launch — this is defense-in-depth on top of the app's other
+            // controls, not the only thing standing between PHI and exposure.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.set_content_protected(true) {
+                    log::error!("failed to enable window content protection: {}", log_safety::cap_len(&e.to_string()));
+                }
+            } else {
+                log::error!("main window not found; content protection not applied");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
