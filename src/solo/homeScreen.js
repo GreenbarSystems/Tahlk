@@ -1,7 +1,8 @@
 // Home screen — encounter list, quick-start, session stats.
 
 import { encountersRepo } from '../data/encountersRepo.js';
-import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel } from '../utils/format.js';
+import { userMessage } from '../platform/appError.js';
+import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel, toast } from '../utils/format.js';
 
 export async function renderHomeScreen() {
   // Counts come from indexed COUNT(*) (accurate at any scale); the list is the
@@ -77,7 +78,21 @@ export async function wireHomeScreen(onOpenEncounter) {
       signed_at: null,
       signed_hash: null,
     };
-    await encountersRepo.save(encounter);
+    // This await previously had no catch, so a save failure (disk full, DB
+    // locked, pool exhausted) surfaced as a New Session button that simply did
+    // nothing: the rejection escaped as an unhandled promise and the provider
+    // got no toast, no reason, no retry cue.
+    //
+    // The early return keeps the pre-existing ordering guarantee explicit
+    // rather than incidental — the panel must only open for a row the DB
+    // actually stored, or every later action on it (transcribe, generate,
+    // sign) would fail on a missing row, far from the real cause.
+    try {
+      await encountersRepo.save(encounter);
+    } catch (err) {
+      toast(`Could not start a new session: ${userMessage(err, 'unknown error')}`);
+      return;
+    }
     onOpenEncounter(encounter);
   });
 
