@@ -47,6 +47,7 @@ use crate::baa;
 use crate::errors::AppError;
 use crate::llm_audit::{self, LlmCallEntry};
 use crate::secrets::read_api_key;
+use crate::time::utc_now_iso;
 use crate::DbState;
 
 const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
@@ -173,44 +174,6 @@ pub(crate) fn wrap_transcript_for_prompt(transcript: &str) -> String {
 /// clinical-style instructions still take effect.
 pub(crate) fn harden_system_prompt(system_prompt: &str) -> String {
     format!("{}\n\n{}", SYSTEM_PROMPT_GUARDRAIL, system_prompt)
-}
-
-// Rust-side ISO-8601 UTC timestamp for audit rows. Kept local to this
-// module because it's the only place we need it; if a second caller
-// shows up, promote it to `errors` or a `time` util.
-fn utc_now_iso() -> String {
-    // std has no ISO-8601 formatter, but we can piece one together from
-    // SystemTime. Precision is seconds — audit rows don't need ms.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    // Days-from-epoch → (y,m,d) via the civil-from-days algorithm; hours,
-    // minutes, seconds fall out of the remainder. This is enough for the
-    // audit-log timestamp — we're not doing calendar math anywhere else.
-    let days = secs.div_euclid(86_400);
-    let time_of_day = secs.rem_euclid(86_400);
-    let hour = time_of_day / 3600;
-    let minute = (time_of_day % 3600) / 60;
-    let second = time_of_day % 60;
-
-    // Howard Hinnant "civil_from_days" (public domain).
-    let z = days + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
-    let doe = (z - era * 146_097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = (yoe as i64) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, m, d, hour, minute, second
-    )
 }
 
 // Persists an audit row for one Anthropic call. Called on both success and
@@ -717,23 +680,6 @@ mod tests {
             SYSTEM_PROMPT_GUARDRAIL.contains("<transcript>"),
             "guardrail must reference <transcript> tag: {SYSTEM_PROMPT_GUARDRAIL}"
         );
-    }
-
-    #[test]
-    fn utc_now_iso_shape() {
-        let s = utc_now_iso();
-        // Format: YYYY-MM-DDTHH:MM:SSZ (20 chars). We can't assert exact
-        // values without freezing time — shape + a floor year keeps this
-        // meaningful without turning into a change-detector test.
-        assert_eq!(s.len(), 20, "unexpected timestamp: {:?}", s);
-        assert_eq!(&s[4..5], "-");
-        assert_eq!(&s[7..8], "-");
-        assert_eq!(&s[10..11], "T");
-        assert_eq!(&s[13..14], ":");
-        assert_eq!(&s[16..17], ":");
-        assert_eq!(&s[19..20], "Z");
-        let year: i32 = s[..4].parse().unwrap();
-        assert!(year >= 2026, "timestamp year suspiciously old: {}", year);
     }
 
     // L7: build a fixture reqwest::Response with an arbitrary byte body,

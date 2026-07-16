@@ -476,7 +476,6 @@ mod tests {
 
         let wav = audio_dir.join("enc-2.wav");
         std::fs::write(&wav, b"resume body").unwrap();
-        let old_path = wav.to_string_lossy().into_owned();
         // Pretend a prior run already wrote the encrypted copy AND updated the
         // DB, then crashed before deleting the plaintext.
         let enc = audio_dir.join("enc-2.wav.enc");

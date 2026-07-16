@@ -19,6 +19,7 @@
 //!   - `export`        — data-location lookup + save-as export.
 //!   - `patients`       — patient roster CRUD.
 //!   - `patient_audit`  — append-only audit log for patient roster CRUD.
+//!   - `time`           — server-side ISO-8601 UTC timestamps for audit rows.
 //!
 //! `DbState` stays at the crate root so every module can name it via
 //! `crate::DbState` without cyclic imports; this file only wires setup and
@@ -41,6 +42,7 @@ mod lock;
 mod log_safety;
 mod note_audit;
 mod note_history;
+mod time;
 mod notes;
 mod patient_audit;
 mod patients;
