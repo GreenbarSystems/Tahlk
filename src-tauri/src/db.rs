@@ -60,7 +60,7 @@ pub(crate) fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value
 // Column order shared by list_patients and get_patient. Same rationale as
 // ENCOUNTER_COLS: keeping the SELECT list identical between the two paths lets
 // patient_row_to_json be reused without positional drift.
-pub(crate) const PATIENT_COLS: &str = "id, alias, dob, notes, created_at, updated_at";
+pub(crate) const PATIENT_COLS: &str = "id, alias, dob, notes, source_id, created_at, updated_at";
 
 pub(crate) fn patient_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -68,8 +68,9 @@ pub(crate) fn patient_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> 
         "alias":      r.get::<_, String>(1)?,
         "dob":        r.get::<_, Option<String>>(2)?,
         "notes":      r.get::<_, Option<String>>(3)?,
-        "created_at": r.get::<_, String>(4)?,
-        "updated_at": r.get::<_, String>(5)?,
+        "source_id":  r.get::<_, Option<String>>(4)?,
+        "created_at": r.get::<_, String>(5)?,
+        "updated_at": r.get::<_, String>(6)?,
     }))
 }
 
@@ -180,6 +181,7 @@ const SCHEMA_TABLES: &str = "
         alias      TEXT NOT NULL,
         dob        TEXT,
         notes      TEXT,
+        source_id  TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
@@ -416,6 +418,21 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
     // PooledConnection derefs to Connection, so DerefMut just works.
     let mut conn = pool.get()?;
     conn.execute_batch(SCHEMA_TABLES)?;
+
+    // One-shot column migration: add source_id to patients on DBs created
+    // before this column existed. SCHEMA_TABLES uses CREATE TABLE IF NOT
+    // EXISTS so it won't add the column for us on an upgrade; ALTER TABLE
+    // ADD COLUMN is the correct upgrade path and is idempotent here because
+    // we gate it on a pragma_table_info check.
+    let has_source_id = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('patients') WHERE name='source_id'",
+        [],
+        |r| r.get::<_, i64>(0),
+    ).unwrap_or(0);
+    if has_source_id == 0 {
+        conn.execute_batch("ALTER TABLE patients ADD COLUMN source_id TEXT;")?;
+    }
+
     note_history::init_schema(&conn)?;
     note_history::migrate_from_kv(&mut conn)?;
     note_audit::init_schema(&conn)?;

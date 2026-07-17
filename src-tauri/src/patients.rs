@@ -124,18 +124,20 @@ pub(crate) fn upsert_patient_conn(conn: &mut Connection, patient: &Value, provid
     )? != 0;
 
     tx.execute(
-        "INSERT INTO patients (id, alias, dob, notes, created_at, updated_at) \
-         VALUES (?1,?2,?3,?4,?5,?6) \
+        "INSERT INTO patients (id, alias, dob, notes, source_id, created_at, updated_at) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7) \
          ON CONFLICT(id) DO UPDATE SET \
              alias      = excluded.alias, \
              dob        = excluded.dob, \
              notes      = excluded.notes, \
+             source_id  = excluded.source_id, \
              updated_at = excluded.updated_at",
         params![
             id,
             alias,
             patient["dob"].as_str(),
             patient["notes"].as_str(),
+            patient["source_id"].as_str(),
             created_at,
             updated_at,
         ],
@@ -185,6 +187,7 @@ mod tests {
                 alias      TEXT NOT NULL,
                 dob        TEXT,
                 notes      TEXT,
+                source_id  TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );",
