@@ -88,6 +88,7 @@ function renderPatientRow(p) {
         <div class="patient-alias">${alias}</div>
         ${dob ? `<div class="patient-dob">DOB ${dob}</div>` : ''}
         ${notes ? `<div class="patient-notes">${notes}</div>` : ''}
+        <div class="patient-id">${id}</div>
       </div>
       <div class="patient-actions">
         <button class="btn btn-ghost btn-sm patient-edit" data-patient-id="${id}"

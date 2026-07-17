@@ -326,6 +326,11 @@ input.patient-search { width: 100%; padding-left: 34px; }
   font-size: 12.5px; color: var(--gray-700); margin-top: 6px; line-height: 1.45;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
+.patient-id {
+  font-size: 11px; color: var(--gray-400); margin-top: 4px;
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Code', monospace);
+  letter-spacing: 0.03em;
+}
 .patient-actions { display: flex; gap: 4px; flex-shrink: 0; }
 .patient-no-results { text-align: center; padding: 24px; color: var(--gray-500); font-size: 13px; }
 

@@ -80,41 +80,11 @@ const NAME_COL_PATTERN = /(first|last|full|patient|client)?\s*name/i;
 
 // ── Import executor (called from step 3 confirm) ─────────────────────────────
 
-async function runImport(rows, mapping, existingPatients) {
-  const sourceIdMap = new Map(
-    existingPatients.filter(p => p.source_id).map(p => [p.source_id, p])
-  );
-
-  let imported = 0;
-  let updated  = 0;
-  let skipped  = 0;
-
-  for (const row of rows) {
-    const alias = mapping.aliasIdx !== null
-      ? (row[mapping.aliasIdx] || '').trim() : '';
-    if (!alias) { skipped++; continue; }
-
-    const dob      = mapping.dobIdx      !== null ? (row[mapping.dobIdx]      || '').trim() || null : null;
-    const notes    = mapping.notesIdx    !== null ? (row[mapping.notesIdx]    || '').trim() || null : null;
-    const sourceId = mapping.sourceIdIdx !== null ? (row[mapping.sourceIdIdx] || '').trim() || null : null;
-
-    const existing = sourceId ? sourceIdMap.get(sourceId) : null;
-    const now = nowISO();
-
-    await patientsRepo.save({
-      id:         existing ? existing.id : genId('pt'),
-      alias,
-      dob,
-      notes,
-      source_id:  sourceId,
-      created_at: existing ? existing.created_at : now,
-      updated_at: now,
-    });
-
-    if (existing) updated++; else imported++;
+async function runImport(patients) {
+  const now = nowISO();
+  for (const p of patients) {
+    await patientsRepo.save({ ...p, updated_at: now });
   }
-
-  return { imported, updated, skipped };
 }
 
 // ── Modal flow: step 1 — file picker ─────────────────────────────────────────
@@ -309,23 +279,36 @@ async function showStep3(card, modal, rerender, headers, rows, mapping) {
 
   const existingPatients = await patientsRepo.list().catch(() => []);
   const sourceIdMap = new Map(
-    existingPatients.filter(p => p.source_id).map(p => [p.source_id, p.id])
+    existingPatients.filter(p => p.source_id).map(p => [p.source_id, p])
   );
 
   let newCount     = 0;
   let updateCount  = 0;
   let skippedCount = 0;
-  const previewData = [];
+  const patients   = [];
+  const now        = nowISO();
 
   for (const row of rows) {
     const alias    = (row[mapping.aliasIdx] || '').trim();
     if (!alias) { skippedCount++; continue; }
 
-    const dob      = mapping.dobIdx      !== null ? (row[mapping.dobIdx]      || '').trim() : '';
-    const sourceId = mapping.sourceIdIdx !== null ? (row[mapping.sourceIdIdx] || '').trim() : '';
+    const dob      = mapping.dobIdx      !== null ? (row[mapping.dobIdx]      || '').trim() || null : null;
+    const notes    = mapping.notesIdx    !== null ? (row[mapping.notesIdx]    || '').trim() || null : null;
+    const sourceId = mapping.sourceIdIdx !== null ? (row[mapping.sourceIdIdx] || '').trim() || null : null;
 
-    if (sourceId && sourceIdMap.has(sourceId)) updateCount++; else newCount++;
-    if (previewData.length < 10) previewData.push({ alias, dob, sourceId });
+    const existing = sourceId ? sourceIdMap.get(sourceId) : null;
+    const tahlkId  = existing ? existing.id : genId('pt');
+
+    if (existing) updateCount++; else newCount++;
+    patients.push({
+      id:         tahlkId,
+      alias,
+      dob,
+      notes,
+      source_id:  sourceId,
+      created_at: existing ? existing.created_at : now,
+      updated_at: now,
+    });
   }
 
   card.textContent = '';
@@ -347,7 +330,7 @@ async function showStep3(card, modal, rerender, headers, rows, mapping) {
 
   const thead = document.createElement('thead');
   const headRow = document.createElement('tr');
-  for (const col of ['Alias', 'Date of Birth', 'EHR ID']) {
+  for (const col of ['Alias', 'Date of Birth', 'EHR ID', 'Tahlk ID']) {
     const th = document.createElement('th');
     th.textContent = col;
     headRow.appendChild(th);
@@ -356,20 +339,21 @@ async function showStep3(card, modal, rerender, headers, rows, mapping) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  for (const r of previewData) {
+  for (const r of patients.slice(0, 10)) {
     const tr = document.createElement('tr');
-    for (const v of [r.alias, r.dob, r.sourceId]) {
+    for (const v of [r.alias, r.dob || '', r.source_id || '', r.id]) {
       const td = document.createElement('td');
       td.textContent = v;
       tr.appendChild(td);
     }
     tbody.appendChild(tr);
   }
-  const remainder = rows.length - skippedCount - previewData.length;
+  const previewCount = Math.min(patients.length, 10);
+  const remainder    = patients.length - previewCount;
   if (remainder > 0) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 3;
+    td.colSpan = 4;
     td.className = 'import-preview-more';
     td.textContent = `…and ${remainder} more`;
     tr.appendChild(td);
@@ -389,12 +373,12 @@ async function showStep3(card, modal, rerender, headers, rows, mapping) {
       importBtn.textContent = 'Importing…';
       errMsg.hidden = true;
       try {
-        const { imported, updated, skipped } = await runImport(rows, mapping, existingPatients);
+        await runImport(patients);
         modal.close();
         const msg = [
-          imported ? `${imported} added`  : '',
-          updated  ? `${updated} updated` : '',
-          skipped  ? `${skipped} skipped` : '',
+          newCount     ? `${newCount} added`       : '',
+          updateCount  ? `${updateCount} updated`  : '',
+          skippedCount ? `${skippedCount} skipped` : '',
         ].filter(Boolean).join(', ');
         toast(`Import complete: ${msg}.`);
         rerender();
