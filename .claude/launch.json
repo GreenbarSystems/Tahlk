@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tahlk-solo",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:solo"],
+      "port": 5173
+    }
+  ]
+}
