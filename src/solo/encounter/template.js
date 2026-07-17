@@ -91,6 +91,12 @@ export function renderEncounterPanel(encounter) {
               <span class="record-timer" id="record-timer"></span>
               ${encounter.audio_path ? `<span class="audio-saved">${iconCheck()} Audio saved</span>` : ''}
             </div>
+            <div class="device-picker-wrap">
+              <label for="audio-device-select" class="device-picker-label">Microphone</label>
+              <select id="audio-device-select" class="audio-device-select">
+                <option value="">Default microphone</option>
+              </select>
+            </div>
           </section>
 
           <section class="section transcript-section">

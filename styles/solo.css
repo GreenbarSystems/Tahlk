@@ -581,3 +581,53 @@ input.patient-search { width: 100%; padding-left: 34px; }
 
 /* a11y */
 a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-radius: 2px; }
+
+/* ── Patient picker modal ────────────────────────────────────────────── */
+.patient-picker-card {
+  max-width: 520px; width: 100%;
+  padding: 0; overflow: hidden; display: flex; flex-direction: column;
+  max-height: 80vh;
+}
+.patient-picker-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 24px 0;
+}
+.patient-picker-title { font-size: 17px; font-weight: 700; color: var(--gray-900); margin: 0; }
+.patient-picker-search-wrap { padding: 14px 24px 10px; }
+.patient-picker-search {
+  width: 100%; padding: 8px 12px; font-size: 14px;
+  border: 1px solid var(--gray-300); border-radius: var(--radius);
+  background: var(--white); color: var(--gray-900);
+}
+.patient-picker-search:focus { outline: 2px solid var(--green); outline-offset: 1px; }
+.patient-picker-list {
+  list-style: none; margin: 0; padding: 0 0 8px;
+  overflow-y: auto; flex: 1; min-height: 120px;
+}
+.patient-picker-item {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 11px 24px; cursor: pointer;
+  border-bottom: 1px solid var(--gray-200); transition: background .1s;
+}
+.patient-picker-item:last-child { border-bottom: none; }
+.patient-picker-item:hover,
+.patient-picker-item:focus { background: var(--gray-100); outline: none; }
+.picker-alias { font-weight: 600; font-size: 14px; color: var(--gray-900); }
+.picker-dob   { font-size: 12px; color: var(--gray-500); }
+.patient-picker-empty { padding: 20px 24px; font-size: 13px; color: var(--gray-500); }
+
+/* ── Recording device picker ─────────────────────────────────────────── */
+.device-picker-wrap {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px;
+}
+.device-picker-label {
+  font-size: 12px; font-weight: 500; color: var(--gray-500);
+  white-space: nowrap; flex-shrink: 0;
+}
+.audio-device-select {
+  font-size: 12px; padding: 4px 8px;
+  border: 1px solid var(--gray-300); border-radius: var(--radius);
+  background: var(--white); color: var(--gray-700);
+  max-width: 260px; min-width: 0; flex: 1;
+}

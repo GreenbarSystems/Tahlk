@@ -10,6 +10,19 @@ let _chunks = [];
 let _startTime = null;
 let _timerInterval = null;
 let _stream = null;
+let _deviceId = null;
+
+export function setDeviceId(id) { _deviceId = id || null; }
+export function getDeviceId()   { return _deviceId; }
+
+export async function listAudioDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter(d => d.kind === 'audioinput');
+  } catch {
+    return [];
+  }
+}
 
 export function isRecording() {
   return _mediaRecorder?.state === 'recording';
@@ -24,7 +37,10 @@ export async function startRecording() {
   if (isRecording()) return;
 
   try {
-    _stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    _stream = await navigator.mediaDevices.getUserMedia({
+      audio: _deviceId ? { deviceId: { exact: _deviceId } } : true,
+      video: false,
+    });
   } catch (e) {
     const msg = e.name === 'NotAllowedError'
       ? 'Microphone access denied. Allow microphone access in system settings.'

@@ -8,6 +8,227 @@
 </head>
 <body>
   <div id="app"></div>
+
+  <!--
+    Browser preview stub — active only when the Tauri runtime is absent.
+    Sets window.__TAHLK_TEST_TAURI__ synchronously (before the ESM module
+    loads) so that platform/tauri.js picks it up at import time and
+    storageBackend.js selects the right backend.
+    This block is harmless in a packaged Tauri build: window.__TAURI_INTERNALS__
+    is present there and the entire if-block is skipped.
+  -->
+  <script>
+  if (typeof window.__TAURI_INTERNALS__ === 'undefined' && typeof window.__TAURI__ === 'undefined') {
+    // ── KV helpers (proxy to localStorage so KV state survives reloads) ──
+    var _kv = {
+      get: function(key) {
+        var raw = localStorage.getItem(key);
+        try { return raw == null ? null : JSON.parse(raw); } catch { return null; }
+      },
+      set: function(key, value) {
+        localStorage.setItem(key, JSON.stringify(value));
+      },
+      remove: function(key) { localStorage.removeItem(key); },
+      list: function(prefix) {
+        var result = [];
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && (!prefix || k === prefix || k.startsWith(prefix + '::'))) {
+            try { result.push([k, JSON.parse(localStorage.getItem(k))]); } catch {}
+          }
+        }
+        return result;
+      },
+    };
+
+    // ── Demo patients (persistent via their own localStorage key) ─────────
+    var PATIENTS_KEY = '__tahlk_preview_patients__';
+    var _patientList = JSON.parse(localStorage.getItem(PATIENTS_KEY) || '[]');
+    if (_patientList.length === 0) {
+      _patientList = [
+        { id: 'pat-demo-1', alias: 'Avery Chen', dob: '1985-03-15', notes: 'Demo patient', provider_id: 'solo', created_at: '2026-01-10T10:00:00Z' },
+        { id: 'pat-demo-2', alias: 'Jordan Kim',  dob: '1972-11-22', notes: '', provider_id: 'solo', created_at: '2026-01-11T09:00:00Z' },
+      ];
+      localStorage.setItem(PATIENTS_KEY, JSON.stringify(_patientList));
+    }
+    function _savePatientsToStorage() {
+      localStorage.setItem(PATIENTS_KEY, JSON.stringify(_patientList));
+    }
+
+    // ── Encounters (in-memory per page load — resets on reload) ──────────
+    var _encounters = {};
+
+    // ── Pre-populate onboarding so the app skips straight to Sessions ─────
+    if (!localStorage.getItem('note_settings_v1::onboarded')) {
+      localStorage.setItem('note_settings_v1::onboarded', JSON.stringify(true));
+    }
+    if (!localStorage.getItem('note_provider_v1')) {
+      localStorage.setItem('note_provider_v1', JSON.stringify({
+        name: 'Demo Provider',
+        credentials: 'MD',
+        specialty: 'adult-psychiatry',
+      }));
+    }
+
+    // ── Canned scribe responses ───────────────────────────────────────────
+    var DEMO_TRANSCRIPT = [
+      'Provider: Good morning. How have you been since our last session?',
+      'Patient: Things have been a bit difficult. I\'ve been having trouble sleeping again.',
+      'Provider: I see. Tell me more about the sleep issues. When did they start?',
+      'Patient: About two weeks ago. I\'ve been waking up around 3am and can\'t get back to sleep.',
+      'Provider: And how is that affecting your daytime functioning?',
+      'Patient: I\'m tired all the time and having trouble concentrating at work.',
+      'Provider: Have you tried any of the sleep hygiene strategies we discussed?',
+      'Patient: Yes, avoiding screens before bed helps a little.',
+    ].join('\n');
+
+    var DEMO_NOTE = [
+      'MENTAL STATUS EXAM',
+      'Appearance: Well-groomed, appropriately dressed',
+      'Behavior: Cooperative, engaged',
+      'Mood: Dysphoric (self-reported difficulty sleeping)',
+      'Affect: Congruent with mood',
+      'Thought process: Linear, goal-directed',
+      'Thought content: No SI/HI, no psychosis',
+      'Cognition: Oriented x3, attention mildly impaired (fatigue)',
+      'Insight/Judgment: Good',
+      '',
+      'SUBJECTIVE',
+      'Patient reports recurrent insomnia for approximately 2 weeks with sleep-maintenance difficulty characterized by 3am awakening and inability to return to sleep. Reports associated daytime fatigue and concentration difficulty impacting occupational functioning. Partial response to sleep hygiene measures implemented since last session (screen avoidance before bed).',
+      '',
+      'ASSESSMENT',
+      'Presentation consistent with recurrent insomnia episode in context of ongoing treatment.',
+      '',
+      'PLAN',
+      '1. Continue current medication regimen',
+      '2. Reinforce sleep hygiene; add stimulus control techniques',
+      '3. Consider CBT-I referral if symptoms persist beyond 4 weeks',
+      '4. Follow up in 2 weeks',
+      '5. Patient to contact office if safety concerns arise',
+    ].join('\n');
+
+    // ── Stub invoke handler ───────────────────────────────────────────────
+    window.__TAHLK_TEST_TAURI__ = {
+      core: {
+        invoke: function(command, args) {
+          return Promise.resolve().then(function() {
+            switch (command) {
+
+              // KV
+              case 'kv_get':    return _kv.get(args.key);
+              case 'kv_set':    return _kv.set(args.key, args.value);
+              case 'kv_remove': return _kv.remove(args.key);
+              case 'kv_list':   return _kv.list(args.prefix);
+
+              // Encounters
+              case 'upsert_encounter': {
+                _encounters[args.encounter.id] = args.encounter;
+                return null;
+              }
+              case 'get_encounter': return _encounters[args.id] || null;
+              case 'list_encounters': {
+                var limit = args.limit || 50;
+                return Object.values(_encounters)
+                  .sort(function(a, b) { return b.created_at.localeCompare(a.created_at); })
+                  .slice(0, limit);
+              }
+              case 'encounter_stats': {
+                var today = args.today;
+                var all = Object.values(_encounters);
+                return {
+                  total: all.length,
+                  signed: all.filter(function(e) { return e.status === 'signed'; }).length,
+                  today: all.filter(function(e) { return e.encounter_date === today; }).length,
+                };
+              }
+              case 'delete_encounter': {
+                delete _encounters[args.id];
+                return null;
+              }
+              case 'mark_encounter_signed': {
+                var enc = _encounters[args.id];
+                if (enc) {
+                  enc.status = 'signed';
+                  enc.signed_at = args.signedAt;
+                  enc.signed_hash = args.signedHash;
+                }
+                return null;
+              }
+              case 'delete_session_audio':
+              case 'clear_encounter_audio_path': return null;
+
+              // Patients
+              case 'list_patients': {
+                var lim = args.limit || 200;
+                return _patientList.slice().sort(function(a, b) {
+                  return a.alias.localeCompare(b.alias);
+                }).slice(0, lim);
+              }
+              case 'get_patient': {
+                return _patientList.find(function(p) { return p.id === args.id; }) || null;
+              }
+              case 'upsert_patient': {
+                var idx = _patientList.findIndex(function(p) { return p.id === args.patient.id; });
+                if (idx >= 0) _patientList[idx] = args.patient;
+                else _patientList.push(args.patient);
+                _savePatientsToStorage();
+                return null;
+              }
+              case 'delete_patient': {
+                _patientList = _patientList.filter(function(p) { return p.id !== args.id; });
+                _savePatientsToStorage();
+                return null;
+              }
+
+              // Scribe
+              case 'save_session_audio': {
+                var e2 = _encounters[args.encounterId];
+                if (e2) e2.audio_path = 'preview://audio/' + args.encounterId;
+                return 'preview://audio/' + args.encounterId;
+              }
+              case 'transcribe_audio': return DEMO_TRANSCRIPT;
+              case 'generate_note':    return DEMO_NOTE;
+
+              // Lock
+              case 'lock_pin_is_set': return false;
+              case 'lock_pin_set':
+              case 'lock_pin_verify':
+              case 'lock_pin_clear':  return null;
+
+              // BAA
+              case 'baa_ack_status': return null;
+              case 'baa_ack_set':
+              case 'baa_ack_clear':  return null;
+
+              // Audit / history
+              case 'audit_list':         return [];
+              case 'audit_archive_list': return [];
+              case 'audit_append':       return null;
+              case 'patient_audit_list': return [];
+              case 'list_note_history':  return [];
+              case 'note_history_restore': return null;
+
+              // Export
+              case 'export_note_to_file':
+              case 'export_note_pdf_to_file': return null;
+
+              // Audio purge
+              case 'purge_audio': return null;
+
+              default:
+                console.warn('[preview-stub] unhandled:', command, args);
+                return null;
+            }
+          });
+        },
+      },
+      event: {
+        listen: function() { return Promise.resolve(function() {}); },
+      },
+    };
+  }
+  </script>
+
   <script type="module" src="/src/entry-solo.js"></script>
 </body>
 </html>

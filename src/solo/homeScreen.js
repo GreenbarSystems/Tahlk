@@ -3,6 +3,7 @@
 import { encountersRepo } from '../data/encountersRepo.js';
 import { userMessage } from '../platform/appError.js';
 import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel, toast } from '../utils/format.js';
+import { pickPatient } from './patientPickerModal.js';
 
 export async function renderHomeScreen() {
   // Counts come from indexed COUNT(*) (accurate at any scale); the list is the
@@ -67,11 +68,12 @@ function renderEncounterRow(e) {
 
 export async function wireHomeScreen(onOpenEncounter) {
   document.getElementById('btn-new-session')?.addEventListener('click', async () => {
+    const patientAlias = await pickPatient();
     const encounter = {
       id: genId('enc'),
       provider_id: 'solo',
       encounter_date: todayISO(),
-      patient_alias: null,
+      patient_alias: patientAlias,
       status: 'recording',
       audio_path: null,
       created_at: nowISO(),
