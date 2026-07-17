@@ -7,7 +7,7 @@
   "scripts": {
     "dev:solo": "vite --mode solo",
     "build:solo": "vite build --mode solo",
-    "test:build": "node --test tests/build/test_solo_excludes_group.mjs tests/build/test_template_interpolation_escaped.mjs tests/build/test_template_interpolation_escaped_unit.mjs tests/build/test_export_blocking_dialog_off_async_thread.mjs",
+    "test:build": "node --test tests/build/test_solo_excludes_group.mjs tests/build/test_template_interpolation_escaped.mjs tests/build/test_template_interpolation_escaped_unit.mjs tests/build/test_export_blocking_dialog_off_async_thread.mjs tests/build/test_log_phi_guardrail.mjs",
     "test:js": "node --test tests/js/*.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
