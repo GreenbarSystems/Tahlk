@@ -150,15 +150,6 @@ export async function renderSettings() {
       </section>
 
       <section class="settings-section">
-        <h3>Speech recognition</h3>
-        <p class="settings-desc">Turns your recordings into text right on this device — your audio never leaves your computer to be transcribed.</p>
-        <div class="model-status-row">
-          <span class="model-status-icon">${iconCheck()}</span>
-          <span>Included with Tahlk — ready to use</span>
-        </div>
-      </section>
-
-      <section class="settings-section">
         <h3>Audio recordings</h3>
         <p class="settings-desc">
           Choose what happens to the audio recording after you sign a note. Your note, transcript, and
@@ -184,6 +175,15 @@ export async function renderSettings() {
 
       <details class="settings-advanced">
         <summary>Advanced &amp; troubleshooting</summary>
+
+        <section class="settings-section">
+          <h3>Speech recognition</h3>
+          <p class="settings-desc">Turns your recordings into text right on this device — your audio never leaves your computer to be transcribed.</p>
+          <div class="model-status-row">
+            <span class="model-status-icon">${iconCheck()}</span>
+            <span>Included with Tahlk — ready to use</span>
+          </div>
+        </section>
 
         <section class="settings-section">
           <h3>Anthropic API key</h3>

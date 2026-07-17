@@ -405,6 +405,25 @@ input.patient-search { width: 100%; padding-left: 34px; }
 .settings-advanced[open] > summary::before { transform: rotate(90deg); }
 .settings-advanced > summary:hover { color: var(--gray-700); }
 
+/* Status pill + confirm toggle, shared by the Agreements (BAA & EULA) and
+   Screen lock sections. Previously unstyled — the pill was plain inline text
+   and the checkbox/label sat on browser defaults. */
+.baa-status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.baa-status-pill {
+  display: inline-block; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .4px;
+  border-radius: 3px; padding: 2px 8px;
+}
+.baa-status-pill--ok     { background: var(--teal-lite); color: var(--teal); }
+.baa-status-pill--danger { background: var(--danger-lite); color: var(--danger); }
+
+.baa-toggle {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin: 12px 0 4px; cursor: pointer; line-height: 1.45;
+}
+.baa-toggle input { width: 16px; height: 16px; margin-top: 1px; flex-shrink: 0; }
+.baa-toggle span { color: var(--gray-700); font-size: 13px; }
+
 /* ── Templates ────────────────────────────────────────────────────────── */
 .templates-page {}
 .templates-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
