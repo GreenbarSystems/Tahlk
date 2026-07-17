@@ -387,6 +387,24 @@ input.patient-search { width: 100%; padding-left: 34px; }
 .model-status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; }
 .model-status-icon { font-size: 16px; color: var(--green); }
 
+/* Advanced & troubleshooting — a native collapsible group so the rarely-used
+   support tools (usage reporting, note-record check, AI performance check)
+   don't clutter the everyday settings screen. Collapsed by default. */
+.settings-advanced { margin-top: 8px; }
+.settings-advanced > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; color: var(--gray-500);
+  padding: 10px 4px; margin-bottom: 4px;
+}
+.settings-advanced > summary::-webkit-details-marker { display: none; }
+.settings-advanced > summary::before {
+  content: "▸"; font-size: 11px; color: var(--gray-400);
+  transition: transform .15s;
+}
+.settings-advanced[open] > summary::before { transform: rotate(90deg); }
+.settings-advanced > summary:hover { color: var(--gray-700); }
+
 /* ── Templates ────────────────────────────────────────────────────────── */
 .templates-page {}
 .templates-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }

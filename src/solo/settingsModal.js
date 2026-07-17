@@ -57,7 +57,8 @@ export async function renderSettings() {
       <h2 class="settings-title">Settings</h2>
 
       <section class="settings-section">
-        <h3>Provider Profile</h3>
+        <h3>Your profile</h3>
+        <p class="settings-desc">Your name appears as the signer on every note.</p>
         <div class="field-row">
           <label>Full name</label>
           <input type="text" id="s-name" value="${escapeHtml(provider.name || '')}" placeholder="Dr. Jane Smith" />
@@ -74,38 +75,37 @@ export async function renderSettings() {
             ).join('')}
           </select>
         </div>
-        <button class="btn btn-primary" id="s-save-provider">Save Profile</button>
+        <button class="btn btn-primary" id="s-save-provider">Save profile</button>
       </section>
 
       <section class="settings-section">
-        <h3>Transcription Model (Whisper)</h3>
-        <p class="settings-desc">Local speech recognition — runs on this device. No audio sent to any server.</p>
-        <div class="model-status-row">
-          <span class="model-status-icon">${iconCheck()}</span>
-          <span>Whisper base.en — included with Tahlk</span>
-        </div>
-      </section>
-
-      <section class="settings-section">
-        <h3>BAA acknowledgment</h3>
+        <h3>AI note generation</h3>
         <p class="settings-desc">
-          During the current test-data-only beta, note generation does <strong>not</strong> require
-          this acknowledgment (see ADR 0003) — this checkbox is optional. Before sending any real
-          patient information, your organization needs an executed
-          <strong>Business Associate Agreement (BAA)</strong> with Anthropic covering the API key
-          configured below; recording it here now gives you an accurate local audit trail once that's
-          in place.
+          Tahlk uses Anthropic's Claude to turn your visit transcripts into clinical notes. Paste your
+          Anthropic API key below — it's stored securely on this device and never sent to Tahlk.
+          <br>Status: ${hasKey ? '<strong>Key added</strong>' : '<strong style="color:var(--danger)">No key yet</strong>'}
         </p>
+        <div class="field-row">
+          <label>Anthropic API key</label>
+          <input type="password" id="s-apikey" value="${hasKey ? '••••••••••••' : ''}"
+                 placeholder="sk-ant-…" autocomplete="off" />
+        </div>
+        <button class="btn btn-primary" id="s-save-apikey">Save key</button>
+        ${hasKey ? '<button class="btn btn-ghost btn-danger" id="s-clear-apikey">Remove key</button>' : ''}
+        <p class="step-hint"><a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">Get a key at console.anthropic.com →</a></p>
+      </section>
+
+      <section class="settings-section">
+        <h3>Business Associate Agreement</h3>
         <p class="settings-desc">
-          This is <strong>your own organization's</strong> agreement with Anthropic for the API
-          key entered in Settings below — not an agreement Greenbar Systems has with Anthropic on
-          your behalf, and not a substitute for one. Tahlk cannot verify that a real, signed BAA
-          exists; checking this box is your organization's own compliance record, and you remain
-          responsible for keeping it accurate.
+          Before you use Tahlk with real patient information, U.S. healthcare privacy rules (HIPAA) require
+          your organization to have a signed <strong>Business Associate Agreement (BAA)</strong> with
+          Anthropic. Tahlk can't check this for you — tick the box once your agreement is in place to keep
+          your own record of it. During the current beta (test data only), this is optional.
         </p>
         <div class="baa-status-row">
           <span class="baa-status-pill ${baaAcked ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}">
-            ${baaAcked ? 'Acknowledged' : 'Not acknowledged'}
+            ${baaAcked ? 'Confirmed' : 'Not confirmed'}
           </span>
           ${baaAcked && baaAck.acknowledged_at
             ? `<span class="settings-desc">on ${escapeHtml(baaAck.acknowledged_at)}${baaAck.provider_id ? ` by ${escapeHtml(baaAck.provider_id)}` : ''}</span>`
@@ -113,68 +113,26 @@ export async function renderSettings() {
         </div>
         <label class="baa-toggle">
           <input type="checkbox" id="s-baa-ack" ${baaAcked ? 'checked' : ''} />
-          <span>I confirm my organization has an executed BAA with Anthropic covering the API key below.</span>
+          <span>My organization has a signed BAA with Anthropic.</span>
         </label>
         <p class="step-hint"><a href="https://support.anthropic.com/en/articles/8555474-i-need-a-business-associate-agreement-baa-with-anthropic-for-hipaa-compliance-what-do-i-do" target="_blank" rel="noreferrer noopener">How to request a BAA from Anthropic →</a></p>
       </section>
 
       <section class="settings-section">
-        <h3>Note Generation (Anthropic API)</h3>
-        <p class="settings-desc">
-          Your API key is stored in your operating system's secure credential store (Keychain / Credential Manager) — not in Tahlk's database — and is used to call Anthropic's Claude model to generate clinical notes from transcripts.
-          <br>Status: ${hasKey ? '<strong>Key configured</strong>' : '<strong style="color:var(--danger)">No key set</strong>'}
-        </p>
-        <div class="field-row">
-          <label>Anthropic API key</label>
-          <input type="password" id="s-apikey" value="${hasKey ? '••••••••••••' : ''}"
-                 placeholder="sk-ant-…" autocomplete="off" />
+        <h3>Speech recognition</h3>
+        <p class="settings-desc">Turns your recordings into text right on this device — your audio never leaves your computer to be transcribed.</p>
+        <div class="model-status-row">
+          <span class="model-status-icon">${iconCheck()}</span>
+          <span>Included with Tahlk — ready to use</span>
         </div>
-        <button class="btn btn-primary" id="s-save-apikey">Save Key</button>
-        ${hasKey ? '<button class="btn btn-ghost btn-danger" id="s-clear-apikey">Remove Key</button>' : ''}
       </section>
 
       <section class="settings-section">
-        <h3>Diagnostics</h3>
+        <h3>Screen lock</h3>
         <p class="settings-desc">
-          Off by default. When on, Tahlk records app diagnostics <strong>on this device only</strong>
-          — counts, durations, and error types. <strong>No patient data, transcripts, notes, or audio</strong>
-          are ever recorded, and nothing is sent anywhere automatically. You can export the log to share with support.
-        </p>
-        <label class="diag-toggle">
-          <input type="checkbox" id="s-diag-enabled" ${diagOn ? 'checked' : ''} />
-          <span>Record diagnostics on this device</span>
-        </label>
-        <div class="diag-actions">
-          <span class="settings-desc" id="s-diag-count">${diagCount} event${diagCount === 1 ? '' : 's'} stored</span>
-          <button class="btn btn-secondary btn-sm" id="s-diag-export" ${diagCount === 0 ? 'disabled' : ''} title="${DIAG_EXPORT_DISCLOSURE}">Export Log</button>
-          <button class="btn btn-ghost btn-sm" id="s-diag-clear" ${diagCount === 0 ? 'disabled' : ''}>Clear Log</button>
-        </div>
-        <p class="settings-desc export-disclosure">${DIAG_EXPORT_DISCLOSURE}</p>
-      </section>
-
-      <section class="settings-section">
-        <h3>Audio Retention</h3>
-        <p class="settings-desc">
-          Choose what happens to session recordings after you sign a note. The signed note, transcript,
-          and audit trail are kept in both modes — only the raw .wav file is affected.
-        </p>
-        <label class="retention-option">
-          <input type="radio" name="s-audio-retention" value="keep" ${retention === 'keep' ? 'checked' : ''} />
-          <span><strong>Keep recordings</strong> — audio stays on this device so you can re-transcribe later. (Default.)</span>
-        </label>
-        <label class="retention-option">
-          <input type="radio" name="s-audio-retention" value="delete_on_sign" ${retention === 'delete_on_sign' ? 'checked' : ''} />
-          <span><strong>Delete on sign</strong> — immediately delete the .wav from disk after each sign-off. Minimizes at-rest audio.</span>
-        </label>
-      </section>
-
-      <section class="settings-section">
-        <h3>Screen Lock</h3>
-        <p class="settings-desc">
-          Automatically locks the screen after a period of inactivity so a laptop left unattended
-          between patients doesn't sit open with note or transcript content visible. Requires a
-          PIN set here — not your operating system password — to resume. Suspended while a
-          recording is in progress.
+          Automatically locks the screen after a period of inactivity, so a laptop left unattended
+          between patients doesn't sit open with a note or transcript on screen. Set a PIN here — separate
+          from your computer's password — to unlock it. Pauses while you're recording.
         </p>
         <div class="baa-status-row">
           <span class="baa-status-pill ${pinSet ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}" id="s-lock-status-pill">
@@ -207,33 +165,75 @@ export async function renderSettings() {
       </section>
 
       <section class="settings-section">
-        <h3>Note History Chain Integrity</h3>
+        <h3>Audio recordings</h3>
         <p class="settings-desc">
-          Every note edit, sign-off, and export is recorded in a tamper-evident hash chain per encounter.
-          The chain is checked automatically whenever a new entry is appended, but an encounter that hasn't
-          been touched since it was signed never gets re-checked on its own. Run this to independently
-          re-verify every stored chain right now — it only reads data and cannot modify or repair anything.
+          Choose what happens to the audio recording after you sign a note. Your note, transcript, and
+          history are always kept either way.
         </p>
-        <button class="btn btn-secondary" id="s-verify-chains">Verify All Chains</button>
-        <div id="s-verify-chains-result" class="settings-desc"></div>
-      </section>
-
-      <section class="settings-section">
-        <h3>AI Call Health Check</h3>
-        <p class="settings-desc">
-          Every note-generation call to Anthropic is logged on this device (timing, size, success/failure —
-          never the note content itself). Each call looking fine on its own can still hide a pattern, like a
-          silent slowdown or a rise in failures. Run this to compare your most recent calls against your
-          own recent history — it only reads the log and never changes anything.
-        </p>
-        <button class="btn btn-secondary" id="s-check-drift">Check for AI Drift</button>
-        <div id="s-check-drift-result" class="settings-desc"></div>
+        <label class="retention-option">
+          <input type="radio" name="s-audio-retention" value="keep" ${retention === 'keep' ? 'checked' : ''} />
+          <span><strong>Keep recordings</strong> — audio stays on this device so you can re-transcribe later. (Default.)</span>
+        </label>
+        <label class="retention-option">
+          <input type="radio" name="s-audio-retention" value="delete_on_sign" ${retention === 'delete_on_sign' ? 'checked' : ''} />
+          <span><strong>Delete after signing</strong> — remove the audio recording as soon as you sign each note.</span>
+        </label>
       </section>
 
       <section class="settings-section settings-section--muted">
-        <h3>Privacy</h3>
-        <p class="settings-desc">Audio recordings are stored in your OS app data directory and never leave this device. Transcripts and notes are stored in a local SQLite database. Nothing is sent to Tahlk servers.</p>
+        <h3>Where your data is stored</h3>
+        <p class="settings-desc">
+          Your recordings, transcripts, and notes all stay on this device — nothing is sent to Tahlk, ever.
+          The one thing that leaves your computer is a visit transcript sent to Anthropic when you generate
+          a note, under your own agreement with them.
+        </p>
       </section>
+
+      <details class="settings-advanced">
+        <summary>Advanced &amp; troubleshooting</summary>
+
+        <section class="settings-section">
+          <h3>Usage &amp; error reporting</h3>
+          <p class="settings-desc">
+            Off by default. When on, Tahlk keeps basic app activity and error information
+            <strong>on this device only</strong> to help diagnose problems.
+            <strong>No patient data, transcripts, notes, or audio</strong> is ever included, and nothing is
+            sent anywhere automatically. You can export it to share with support.
+          </p>
+          <label class="diag-toggle">
+            <input type="checkbox" id="s-diag-enabled" ${diagOn ? 'checked' : ''} />
+            <span>Keep usage &amp; error reporting on this device</span>
+          </label>
+          <div class="diag-actions">
+            <span class="settings-desc" id="s-diag-count">${diagCount} event${diagCount === 1 ? '' : 's'} stored</span>
+            <button class="btn btn-secondary btn-sm" id="s-diag-export" ${diagCount === 0 ? 'disabled' : ''} title="${DIAG_EXPORT_DISCLOSURE}">Export</button>
+            <button class="btn btn-ghost btn-sm" id="s-diag-clear" ${diagCount === 0 ? 'disabled' : ''}>Clear</button>
+          </div>
+          <p class="settings-desc export-disclosure">${DIAG_EXPORT_DISCLOSURE}</p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Note history</h3>
+          <p class="settings-desc">
+            Tahlk keeps a secure, tamper-evident record of every change to a note. Run a check to confirm
+            none of your saved notes have been altered. It only reads your data — it can't change or repair
+            anything.
+          </p>
+          <button class="btn btn-secondary" id="s-verify-chains">Check note records</button>
+          <div id="s-verify-chains-result" class="settings-desc"></div>
+        </section>
+
+        <section class="settings-section">
+          <h3>AI performance</h3>
+          <p class="settings-desc">
+            Tahlk keeps an eye on how the AI is performing. Run a check to compare your recent notes for
+            changes like slower responses or more failures, so you can catch a problem early. It only reads
+            your own recent activity.
+          </p>
+          <button class="btn btn-secondary" id="s-check-drift">Check AI performance</button>
+          <div id="s-check-drift-result" class="settings-desc"></div>
+        </section>
+      </details>
     </div>
   `;
 }
@@ -380,14 +380,14 @@ export function wireSettings() {
           acknowledgedAt: new Date().toISOString(),
           providerId: providerName,
         });
-        toast('BAA acknowledgment recorded.');
+        toast('BAA confirmed.');
       } else {
-        if (!confirm('Remove your BAA acknowledgment record?')) {
+        if (!confirm('Remove your BAA confirmation?')) {
           e.target.checked = true;
           return;
         }
         await baaRepo.clear();
-        toast('BAA acknowledgment cleared.');
+        toast('BAA confirmation removed.');
       }
     } catch (err) {
       // Revert the checkbox visually since the write did not land.
@@ -398,26 +398,26 @@ export function wireSettings() {
 
   document.getElementById('s-diag-enabled')?.addEventListener('change', e => {
     telemetry.setEnabled(e.target.checked);
-    toast(e.target.checked ? 'Diagnostics on (this device only).' : 'Diagnostics off.');
+    toast(e.target.checked ? 'Usage reporting on (this device only).' : 'Usage reporting off.');
   });
 
   document.getElementById('s-diag-export')?.addEventListener('click', async () => {
     try {
       await telemetry.exportLog();
-      toast('Diagnostics log exported.');
+      toast('Exported.');
     } catch (err) {
       toast(`Export failed: ${userMessage(err, 'unknown error')}`);
     }
   });
 
   document.getElementById('s-diag-clear')?.addEventListener('click', () => {
-    if (!confirm('Clear the on-device diagnostics log?')) return;
+    if (!confirm('Clear the usage & error reporting stored on this device?')) return;
     telemetry.clear();
     const count = document.getElementById('s-diag-count');
     if (count) count.textContent = '0 events stored';
     document.getElementById('s-diag-export')?.setAttribute('disabled', '');
     document.getElementById('s-diag-clear')?.setAttribute('disabled', '');
-    toast('Diagnostics log cleared.');
+    toast('Cleared.');
   });
 
   document.querySelectorAll('input[name="s-audio-retention"]').forEach(el => {
@@ -505,24 +505,24 @@ export function wireSettings() {
   wireAsyncActionButton({
     id: 's-verify-chains',
     resultId: 's-verify-chains-result',
-    busyLabel: 'Verifying…',
-    idleLabel: 'Verify All Chains',
-    failPrefix: 'Could not verify chains',
+    busyLabel: 'Checking…',
+    idleLabel: 'Check note records',
+    failPrefix: 'Could not check note records',
     run: async resultEl => {
       const { ok, checked, broken } = await verifyAllChains();
       if (checked === 0) {
-        if (resultEl) resultEl.textContent = 'No note history found yet — nothing to verify.';
+        if (resultEl) resultEl.textContent = 'No saved notes yet — nothing to check.';
       } else if (ok) {
-        if (resultEl) resultEl.textContent = `All ${checked} encounter chain${checked === 1 ? '' : 's'} verified intact.`;
-        toast('Chain integrity check passed.');
+        if (resultEl) resultEl.textContent = `All ${checked} note record${checked === 1 ? '' : 's'} checked — no changes found.`;
+        toast('Note records check passed.');
       } else {
         const detail = broken
           .map(b => `${escapeHtml(b.encounterId)} (${escapeHtml(b.reason || 'unknown')}${b.brokenAt != null ? `, entry #${Number(b.brokenAt)}` : ''})`)
           .join('; ');
         if (resultEl) {
-          resultEl.innerHTML = `<strong style="color:var(--danger)">${broken.length} of ${checked} chain${checked === 1 ? '' : 's'} failed verification:</strong> ${detail}`;
+          resultEl.innerHTML = `<strong style="color:var(--danger)">${broken.length} of ${checked} note record${checked === 1 ? '' : 's'} show a change:</strong> ${detail}`;
         }
-        toast(`Chain integrity check found ${broken.length} problem${broken.length === 1 ? '' : 's'} — see Settings for details.`);
+        toast(`Note records check found ${broken.length} issue${broken.length === 1 ? '' : 's'} — see Settings.`);
       }
     },
   });
@@ -531,19 +531,19 @@ export function wireSettings() {
     id: 's-check-drift',
     resultId: 's-check-drift-result',
     busyLabel: 'Checking…',
-    idleLabel: 'Check for AI Drift',
-    failPrefix: 'Could not check AI call health',
+    idleLabel: 'Check AI performance',
+    failPrefix: 'Could not check AI performance',
     run: async resultEl => {
       const { insufficientData, checked, findings } = await checkLlmAuditDrift();
       if (insufficientData) {
-        if (resultEl) resultEl.textContent = `Not enough call history yet to compare (${checked} call${checked === 1 ? '' : 's'} logged so far).`;
+        if (resultEl) resultEl.textContent = `Not enough recent activity to compare yet (${checked} note${checked === 1 ? '' : 's'} so far).`;
       } else if (findings.length === 0) {
-        if (resultEl) resultEl.textContent = `Checked your last ${checked} calls — nothing unusual found.`;
-        toast('AI call health check passed.');
+        if (resultEl) resultEl.textContent = `Checked your last ${checked} notes — nothing unusual.`;
+        toast('AI performance check passed.');
       } else {
         const summary = describeDrift(findings);
         if (resultEl) resultEl.innerHTML = `<strong style="color:var(--danger)">${escapeHtml(summary)}</strong>`;
-        toast('AI call health check found something worth a look — see Settings for details.', 6000);
+        toast('AI performance check flagged something — see Settings.', 6000);
       }
     },
   });
