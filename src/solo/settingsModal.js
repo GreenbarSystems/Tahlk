@@ -79,55 +79,6 @@ export async function renderSettings() {
       </section>
 
       <section class="settings-section">
-        <h3>AI note generation</h3>
-        <p class="settings-desc">
-          Tahlk uses Anthropic's Claude to turn your visit transcripts into clinical notes. Paste your
-          Anthropic API key below — it's stored securely on this device and never sent to Tahlk.
-          <br>Status: ${hasKey ? '<strong>Key added</strong>' : '<strong style="color:var(--danger)">No key yet</strong>'}
-        </p>
-        <div class="field-row">
-          <label>Anthropic API key</label>
-          <input type="password" id="s-apikey" value="${hasKey ? '••••••••••••' : ''}"
-                 placeholder="sk-ant-…" autocomplete="off" />
-        </div>
-        <button class="btn btn-primary" id="s-save-apikey">Save key</button>
-        ${hasKey ? '<button class="btn btn-ghost btn-danger" id="s-clear-apikey">Remove key</button>' : ''}
-        <p class="step-hint"><a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">Get a key at console.anthropic.com →</a></p>
-      </section>
-
-      <section class="settings-section">
-        <h3>Business Associate Agreement</h3>
-        <p class="settings-desc">
-          Before you use Tahlk with real patient information, U.S. healthcare privacy rules (HIPAA) require
-          your organization to have a signed <strong>Business Associate Agreement (BAA)</strong> with
-          Anthropic. Tahlk can't check this for you — tick the box once your agreement is in place to keep
-          your own record of it. During the current beta (test data only), this is optional.
-        </p>
-        <div class="baa-status-row">
-          <span class="baa-status-pill ${baaAcked ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}">
-            ${baaAcked ? 'Confirmed' : 'Not confirmed'}
-          </span>
-          ${baaAcked && baaAck.acknowledged_at
-            ? `<span class="settings-desc">on ${escapeHtml(baaAck.acknowledged_at)}${baaAck.provider_id ? ` by ${escapeHtml(baaAck.provider_id)}` : ''}</span>`
-            : ''}
-        </div>
-        <label class="baa-toggle">
-          <input type="checkbox" id="s-baa-ack" ${baaAcked ? 'checked' : ''} />
-          <span>My organization has a signed BAA with Anthropic.</span>
-        </label>
-        <p class="step-hint"><a href="https://support.anthropic.com/en/articles/8555474-i-need-a-business-associate-agreement-baa-with-anthropic-for-hipaa-compliance-what-do-i-do" target="_blank" rel="noreferrer noopener">How to request a BAA from Anthropic →</a></p>
-      </section>
-
-      <section class="settings-section">
-        <h3>Speech recognition</h3>
-        <p class="settings-desc">Turns your recordings into text right on this device — your audio never leaves your computer to be transcribed.</p>
-        <div class="model-status-row">
-          <span class="model-status-icon">${iconCheck()}</span>
-          <span>Included with Tahlk — ready to use</span>
-        </div>
-      </section>
-
-      <section class="settings-section">
         <h3>Screen lock</h3>
         <p class="settings-desc">
           Automatically locks the screen after a period of inactivity, so a laptop left unattended
@@ -165,6 +116,49 @@ export async function renderSettings() {
       </section>
 
       <section class="settings-section">
+        <h3>AI note generation</h3>
+        <p class="settings-desc">
+          When you finish recording a visit, Tahlk turns the transcript into a structured clinical note in
+          the template you choose — a SOAP note, a psychiatric evaluation, a medication-management
+          follow-up, and more. You review and edit every note, then sign it yourself; nothing is finalized
+          automatically. This is powered by Anthropic's Claude; the key that connects to it is set up under
+          <strong>Advanced &amp; troubleshooting</strong> below.
+        </p>
+      </section>
+
+      <section class="settings-section">
+        <h3>Agreements (BAA &amp; EULA)</h3>
+        <p class="settings-desc">
+          Using Tahlk with real patient information is covered by two agreements between your organization
+          and <strong>Greenbar Systems</strong>, the maker of Tahlk: a <strong>Business Associate Agreement
+          (BAA)</strong> setting out how protected health information is handled under HIPAA, and an
+          <strong>End User License Agreement (EULA)</strong> covering your use of the app. Confirm below
+          once both are in place. During the current beta (test data only), this is optional.
+        </p>
+        <div class="baa-status-row">
+          <span class="baa-status-pill ${baaAcked ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}">
+            ${baaAcked ? 'Confirmed' : 'Not confirmed'}
+          </span>
+          ${baaAcked && baaAck.acknowledged_at
+            ? `<span class="settings-desc">on ${escapeHtml(baaAck.acknowledged_at)}${baaAck.provider_id ? ` by ${escapeHtml(baaAck.provider_id)}` : ''}</span>`
+            : ''}
+        </div>
+        <label class="baa-toggle">
+          <input type="checkbox" id="s-baa-ack" ${baaAcked ? 'checked' : ''} />
+          <span>My organization has accepted Greenbar Systems' BAA and EULA.</span>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Speech recognition</h3>
+        <p class="settings-desc">Turns your recordings into text right on this device — your audio never leaves your computer to be transcribed.</p>
+        <div class="model-status-row">
+          <span class="model-status-icon">${iconCheck()}</span>
+          <span>Included with Tahlk — ready to use</span>
+        </div>
+      </section>
+
+      <section class="settings-section">
         <h3>Audio recordings</h3>
         <p class="settings-desc">
           Choose what happens to the audio recording after you sign a note. Your note, transcript, and
@@ -184,13 +178,29 @@ export async function renderSettings() {
         <h3>Where your data is stored</h3>
         <p class="settings-desc">
           Your recordings, transcripts, and notes all stay on this device — nothing is sent to Tahlk, ever.
-          The one thing that leaves your computer is a visit transcript sent to Anthropic when you generate
-          a note, under your own agreement with them.
+          The one thing that leaves your computer is a visit transcript sent to Anthropic to generate a note.
         </p>
       </section>
 
       <details class="settings-advanced">
         <summary>Advanced &amp; troubleshooting</summary>
+
+        <section class="settings-section">
+          <h3>Anthropic API key</h3>
+          <p class="settings-desc">
+            The key that connects Tahlk to Anthropic's Claude for note generation. Paste it here — it's
+            stored securely on this device and never sent to Tahlk.
+            <br>Status: ${hasKey ? '<strong>Key added</strong>' : '<strong style="color:var(--danger)">No key yet</strong>'}
+          </p>
+          <div class="field-row">
+            <label>Anthropic API key</label>
+            <input type="password" id="s-apikey" value="${hasKey ? '••••••••••••' : ''}"
+                   placeholder="sk-ant-…" autocomplete="off" />
+          </div>
+          <button class="btn btn-primary" id="s-save-apikey">Save key</button>
+          ${hasKey ? '<button class="btn btn-ghost btn-danger" id="s-clear-apikey">Remove key</button>' : ''}
+          <p class="step-hint"><a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">Get a key at console.anthropic.com →</a></p>
+        </section>
 
         <section class="settings-section">
           <h3>Usage &amp; error reporting</h3>
@@ -380,19 +390,19 @@ export function wireSettings() {
           acknowledgedAt: new Date().toISOString(),
           providerId: providerName,
         });
-        toast('BAA confirmed.');
+        toast('Agreements confirmed.');
       } else {
-        if (!confirm('Remove your BAA confirmation?')) {
+        if (!confirm('Remove your confirmation of the BAA and EULA?')) {
           e.target.checked = true;
           return;
         }
         await baaRepo.clear();
-        toast('BAA confirmation removed.');
+        toast('Confirmation removed.');
       }
     } catch (err) {
       // Revert the checkbox visually since the write did not land.
       e.target.checked = !checked;
-      toast(`Could not update BAA: ${userMessage(err, 'unknown error')}`);
+      toast(`Could not update: ${userMessage(err, 'unknown error')}`);
     }
   });
 
