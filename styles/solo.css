@@ -255,22 +255,32 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 /* ── Patients roster ──────────────────────────────────────────────────── */
 .patients-page { max-width: 760px; }
 .patients-header {
-  display: flex; align-items: baseline; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between;
   gap: 12px; margin-bottom: 18px; flex-wrap: wrap;
 }
+.patients-header-left { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .patients-header .settings-title { margin-bottom: 0; }
 .patients-count {
   font-size: 12px; font-weight: 600; color: var(--gray-500);
   text-transform: uppercase; letter-spacing: .4px;
 }
 
-/* Add/edit form as a card, matching the settings-section pattern. A left
-   accent bar appears in edit mode so it's obvious the form is now editing an
-   existing patient rather than adding a new one. */
+/* Add/edit form as a card, matching the settings-section pattern. Collapsed by
+   default (hidden attribute) and revealed by the "+ Add patient" toggle or a
+   row's Edit button. A left accent bar appears in edit mode so it's obvious
+   the form is now editing an existing patient rather than adding a new one. */
 .patient-form {
   background: var(--white); border-radius: var(--radius-lg); box-shadow: var(--shadow);
   padding: 18px 20px; margin-bottom: 20px;
   border-left: 3px solid transparent; transition: border-color .15s;
+  animation: patient-form-in .18s ease;
+}
+@keyframes patient-form-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .patient-form { animation: none; }
 }
 .patient-form--editing { border-left-color: var(--green); }
 .patient-form-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
