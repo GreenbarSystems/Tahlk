@@ -7,6 +7,7 @@ import { patientsRepo } from '../data/patientsRepo.js';
 import { genId, nowISO, displayDateShort, escapeHtml, toast } from '../utils/format.js';
 import { confirmModal } from './confirmModal.js';
 import { iconSearch } from './icons.js';
+import { openImportModal } from './patientsImport.js';
 
 export async function renderPatientsView() {
   const patients = await patientsRepo.list().catch(() => []);
@@ -21,6 +22,8 @@ export async function renderPatientsView() {
         </div>
         <button type="button" class="btn btn-primary" id="patient-add-toggle"
                 aria-expanded="false" aria-controls="patient-form">+ Add patient</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="patient-import-btn"
+                title="Import patients from an EHR CSV export">Import from EHR…</button>
       </div>
 
       <form class="patient-form" id="patient-form" autocomplete="off" hidden>
@@ -163,6 +166,8 @@ export function wirePatientsView(rerender) {
 
   addToggle?.addEventListener('click', openAdd);
   cancelBtn?.addEventListener('click', closeForm);
+  document.getElementById('patient-import-btn')?.addEventListener('click',
+    () => openImportModal(rerender));
 
   form?.addEventListener('submit', async e => {
     e.preventDefault();

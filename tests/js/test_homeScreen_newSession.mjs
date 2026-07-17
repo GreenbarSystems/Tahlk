@@ -40,6 +40,8 @@ class FakeEl {
   removeAttribute(a) { delete this._attrs[a]; }
   click() { return this._on.click && this._on.click(); }
   querySelectorAll() { return []; }
+  appendChild() {}
+  remove() {}
 }
 
 function resetDom() {

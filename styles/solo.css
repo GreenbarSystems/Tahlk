@@ -631,3 +631,77 @@ a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-r
   background: var(--white); color: var(--gray-700);
   max-width: 260px; min-width: 0; flex: 1;
 }
+
+/* ── EHR patient import modal ────────────────────────────────────────── */
+.import-modal-card {
+  max-width: 560px; width: 100%; padding: 28px 28px 20px;
+}
+.import-modal-title {
+  font-size: 18px; font-weight: 700; color: var(--gray-900);
+  margin: 0 0 8px;
+}
+.import-modal-desc {
+  font-size: 14px; color: var(--gray-500); margin: 0 0 16px;
+}
+.ehr-import-dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border: 2px dashed var(--gray-300); border-radius: var(--radius);
+  padding: 28px 20px; cursor: pointer; text-align: center;
+  transition: border-color .15s, background .15s;
+  margin-bottom: 12px;
+}
+.ehr-import-dropzone:hover,
+.ehr-import-dropzone[data-drag-over] {
+  border-color: var(--green); background: var(--green-lite);
+}
+.ehr-import-dropzone-label {
+  font-size: 14px; color: var(--gray-500); pointer-events: none;
+}
+.ehr-import-file-input { display: none; }
+.import-warning {
+  background: #fef3c7; border: 1px solid #f59e0b; border-radius: var(--radius);
+  padding: 10px 14px; font-size: 13px; color: #78350f;
+  margin-bottom: 14px;
+}
+.col-mapper-grid {
+  display: grid; grid-template-columns: 1fr;
+  gap: 10px; margin-bottom: 16px;
+}
+.col-mapper-label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 13px; font-weight: 500; color: var(--gray-700);
+}
+.col-mapper-field-name { display: flex; align-items: baseline; gap: 2px; }
+.col-mapper-select {
+  padding: 6px 10px; font-size: 13px;
+  border: 1px solid var(--gray-300); border-radius: var(--radius);
+  background: var(--white); color: var(--gray-900);
+}
+.col-mapper-select:focus { outline: 2px solid var(--green); outline-offset: 1px; }
+.import-summary {
+  font-size: 13px; color: var(--gray-500); margin: 0 0 12px;
+}
+.import-preview-wrap { overflow-x: auto; margin-bottom: 14px; }
+.import-preview-table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+.import-preview-table th {
+  text-align: left; font-weight: 600; color: var(--gray-700);
+  padding: 6px 10px; border-bottom: 2px solid var(--gray-200);
+  background: var(--gray-100);
+}
+.import-preview-table td {
+  padding: 6px 10px; border-bottom: 1px solid var(--gray-200);
+  color: var(--gray-900); max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.import-preview-more {
+  text-align: center; color: var(--gray-400); font-style: italic;
+}
+.import-error {
+  font-size: 13px; color: #b91c1c; margin: 8px 0 0;
+}
+.import-modal-footer {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;
+  padding-top: 14px; border-top: 1px solid var(--gray-200);
+}
