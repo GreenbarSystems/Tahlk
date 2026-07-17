@@ -153,12 +153,13 @@ a:hover { text-decoration: underline; }
 .field-row select { width: 100%; max-width: 420px; }
 .req { color: var(--danger); }
 
-input[type=text], input[type=password], select, textarea {
+input[type=text], input[type=password], input[type=date], input[type=number], select, textarea {
   border: 1px solid var(--gray-300); border-radius: var(--radius);
   font-size: 13px; padding: 7px 10px; background: var(--white);
   color: var(--gray-900); outline: none; transition: border-color .15s;
 }
-input[type=text]:focus, input[type=password]:focus,
+input[type=text]:focus, input[type=password]:focus, input[type=date]:focus,
+input[type=number]:focus,
 select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px var(--green-lite); }
 
 /* ── Status chips ─────────────────────────────────────────────────────── */
@@ -251,9 +252,78 @@ select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px
 .record-timer { font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; color: var(--danger); min-width: 44px; }
 .audio-saved  { font-size: 12px; color: var(--green); font-weight: 600; }
 
-.patient-alias-row { display: flex; align-items: center; gap: 10px; }
-.patient-alias-row label { font-size: 12px; color: var(--gray-500); white-space: nowrap; }
-.patient-alias-row input { max-width: 240px; }
+/* ── Patients roster ──────────────────────────────────────────────────── */
+.patients-page { max-width: 760px; }
+.patients-header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin-bottom: 18px; flex-wrap: wrap;
+}
+.patients-header .settings-title { margin-bottom: 0; }
+.patients-count {
+  font-size: 12px; font-weight: 600; color: var(--gray-500);
+  text-transform: uppercase; letter-spacing: .4px;
+}
+
+/* Add/edit form as a card, matching the settings-section pattern. A left
+   accent bar appears in edit mode so it's obvious the form is now editing an
+   existing patient rather than adding a new one. */
+.patient-form {
+  background: var(--white); border-radius: var(--radius-lg); box-shadow: var(--shadow);
+  padding: 18px 20px; margin-bottom: 20px;
+  border-left: 3px solid transparent; transition: border-color .15s;
+}
+.patient-form--editing { border-left-color: var(--green); }
+.patient-form-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+.patient-form-title { font-size: 13px; font-weight: 700; color: var(--gray-700); }
+.patient-form-editing-hint { font-size: 12px; font-weight: 600; color: var(--green); }
+.patient-form--editing .patient-form-title { display: none; }
+
+.patient-form-row { display: grid; grid-template-columns: 1fr 190px; gap: 16px; }
+.patient-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+.patient-field-label {
+  font-size: 12px; font-weight: 600; color: var(--gray-700);
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.patient-field input, .patient-field textarea { width: 100%; }
+.patient-field textarea { resize: vertical; min-height: 52px; }
+.patient-form-actions { display: flex; gap: 8px; margin-top: 2px; }
+
+/* Search over the roster. Icon sits inside the input's left padding.
+   `input.patient-search` (not `.patient-search`) so the left-padding override
+   ties the base `input[type=text]` rule's specificity and wins on source
+   order — a bare class selector loses to it and the text renders under the
+   icon. */
+.patient-search-wrap { position: relative; margin-bottom: 14px; }
+input.patient-search { width: 100%; padding-left: 34px; }
+.patient-search-icon {
+  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+  color: var(--gray-400); display: flex; pointer-events: none;
+}
+
+/* List — real <ul>/<li>, each row a bordered card that lifts on hover. */
+.patient-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.patient-row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  background: var(--white); border: 1px solid var(--gray-200);
+  border-radius: var(--radius-lg); padding: 12px 14px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.patient-row:hover { border-color: var(--gray-300); box-shadow: var(--shadow); }
+.patient-main { min-width: 0; }   /* let notes ellipsis instead of overflowing */
+.patient-alias { font-size: 14px; font-weight: 700; color: var(--gray-900); }
+.patient-dob { font-size: 12px; color: var(--gray-500); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.patient-notes {
+  font-size: 12.5px; color: var(--gray-700); margin-top: 6px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.patient-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.patient-no-results { text-align: center; padding: 24px; color: var(--gray-500); font-size: 13px; }
+
+@media (max-width: 560px) {
+  .patient-form-row { grid-template-columns: 1fr; }
+  .patient-row { flex-direction: column; }
+  .patient-actions { align-self: flex-end; }
+}
 
 .status-banner {
   background: var(--teal-lite); color: var(--teal);

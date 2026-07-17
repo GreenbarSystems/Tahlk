@@ -23,3 +23,8 @@ export const iconCheck = () =>
 export const iconClose = () =>
   `<svg ${ICON_ATTRS}><path d="M4 4L12 12M12 4L4 12" stroke="currentColor" ` +
   `stroke-width="1.6" stroke-linecap="round"/></svg>`;
+
+export const iconSearch = () =>
+  `<svg ${ICON_ATTRS}><circle cx="7" cy="7" r="4.5" stroke="currentColor" ` +
+  `stroke-width="1.6"/><path d="M10.5 10.5L14 14" stroke="currentColor" ` +
+  `stroke-width="1.6" stroke-linecap="round"/></svg>`;

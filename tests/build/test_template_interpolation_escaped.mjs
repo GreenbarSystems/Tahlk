@@ -85,6 +85,7 @@ const SAFE_CALL_HELPERS = new Set([
   'statusLabel', // src/utils/format.js: returns fixed literal per known status
   'iconCheck',   // src/solo/icons.js: returns a fixed, hand-authored SVG literal
   'iconClose',   // src/solo/icons.js: returns a fixed, hand-authored SVG literal
+  'iconSearch',  // src/solo/icons.js: returns a fixed, hand-authored SVG literal
 ]);
 
 // Bare identifiers that are safe by construction (never derived from
