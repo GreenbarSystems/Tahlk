@@ -162,7 +162,7 @@ export function wireNoteSection(ctx) {
       if (err.code === 'no_api_key') {
         toast('No Anthropic API key. Open Settings to add one.');
       } else if (err.code === 'baa_required') {
-        toast('Confirm your Anthropic BAA in Settings before generating notes.');
+        toast('Confirm your agreements in Settings before generating notes.');
       } else {
         toast(userMessage(err, 'Note generation failed.'));
       }

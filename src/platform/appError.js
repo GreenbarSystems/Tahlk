@@ -66,10 +66,10 @@ export function userMessage(err, fallback = 'Something went wrong.') {
     case 'no_api_key':
       return 'No Anthropic API key. Open Settings to add one.';
     case 'baa_required':
-      // The Rust gate refuses to call Anthropic until the provider has
-      // acknowledged the Anthropic BAA. Point them at Settings; the CTA
-      // there is the toggle in the “BAA acknowledgment” section.
-      return 'Confirm your Anthropic BAA in Settings before generating notes.';
+      // The Rust gate refuses to generate notes until the provider has
+      // confirmed their agreements (BAA + EULA with Greenbar). Point them at
+      // Settings; the CTA there is the toggle in the “Agreements” section.
+      return 'Confirm your agreements in Settings before generating notes.';
     case 'no_model':
       return 'Transcription model is missing. Reinstall Tahlk to restore it.';
     case 'network':

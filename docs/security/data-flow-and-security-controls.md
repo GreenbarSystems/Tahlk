@@ -159,12 +159,14 @@ Both items are recognized, scoped remediation items, not unknowns — flagging t
 
 ## 8. Business Associate Agreement status
 
-Two distinct BAA relationships are relevant to this product, and their status should not be conflated:
+Under the **managed-key model** this product is built around, the compliance chain is: the practice (Covered Entity) → **Greenbar Systems** (Business Associate, under a provider↔Greenbar BAA, alongside a EULA) → Anthropic (Greenbar's subcontractor, under Greenbar's own BAA with Anthropic). Two BAA relationships matter, and their status should not be conflated:
 
-1. **The provider's own account.** Under the current bring-your-own-key (BYOK) model, each practice creates and controls its own Anthropic account and API key. HIPAA requires that account to be covered by a BAA between the practice and Anthropic before any PHI is sent through it. Tahlk's self-attestation gate (§3.4) requires the clinician to affirmatively acknowledge this before the app will generate a note from real data, and records that acknowledgment with a timestamp for the practice's own audit trail. Software cannot verify the underlying legal agreement exists — only that the clinician attested to it.
-2. **Greenbar Systems' own BAA with Anthropic**, relevant to a planned future managed-key offering (not shipped) and to Greenbar's own handling of any PHI. This status is currently being reconfirmed internally as of this document's date and should not be treated as settled until updated here with a specific date and outcome.
+1. **Provider ↔ Greenbar (BAA + EULA).** Required before a practice uses real patient information. The in-app confirmation gate (§3.4) records that the practice has accepted these agreements, with a timestamp, for the practice's own audit trail. Software cannot verify the underlying legal agreements exist — only that the clinician confirmed them.
+2. **Greenbar ↔ Anthropic (subcontractor BAA).** Required because Anthropic processes PHI on Greenbar's behalf in the managed chain. **Status: applied for, not yet executed** (re-confirmed by the product owner 2026-07-13) — do not treat as settled until updated here with a specific date and outcome.
 
-**Transitional note on the current beta:** as of this document's date, the BAA acknowledgment gate described in §3.4 is enforced in the shipping build. A documented architectural decision (`docs/adr/0003-disable-baa-gate-for-beta.md`) to temporarily make this gate non-blocking during the current beta period — on the basis that beta testers are using test data only, not real patient data, pending a managed-key offering — has been approved internally and is pending merge into the shipping build at the time of writing. This document, and `docs/security/hipaa-risk-assessment.md`, must both be updated the moment that change ships, and this section should not be relied upon as current without checking the code state directly.
+**Current implementation vs. the model.** The managed-key proxy (`MANAGED-KEY-PROXY-CONTRACT.md`, v1 draft) is **not built**. During the current test-data-only beta the transcript is sent using a provider-supplied Anthropic key entered in the app (bring-your-own-key) as a **transitional mechanism**, not the end-state. Real-PHI use is not supported until both BAAs above are executed and the managed proxy ships.
+
+**Beta gate status.** Per `docs/adr/0003-disable-baa-gate-for-beta.md` (merged), the confirmation gate described in §3.4 is currently **non-blocking** for the test-data-only beta — `baa::GATE_ENABLED = false`, so a missing confirmation does not stop note generation on test data. It re-enables (`GATE_ENABLED = true`) before real patient use. This document and `docs/security/hipaa-risk-assessment.md` must both be updated whenever that flag changes; do not rely on this section without checking the code state directly.
 
 ---
 
@@ -183,8 +185,8 @@ Two distinct BAA relationships are relevant to this product, and their status sh
 | Record deletion / right-to-delete | **Gap** — no full-record deletion capability yet |
 | Screen-capture exposure | **Gap** — no content-protection flag; screen-share tools can capture on-screen PHI |
 | Clipboard handling | **Partial** — auto-clears after a window, but not on app quit |
-| Provider's own BAA with Anthropic | Self-attested at the app level; cannot be verified by software |
-| Greenbar's own BAA with Anthropic | Being reconfirmed as of this document's date |
+| Provider ↔ Greenbar BAA + EULA | Recorded via in-app confirmation; cannot be verified by software |
+| Greenbar ↔ Anthropic (subcontractor) BAA | Applied for, not yet executed (2026-07-13) |
 | Incident response runbook | **Gap** — self-disclosed, planned, not yet built |
 
 None of the open items above involve a failure of the encryption or transport controls themselves; they are accountability and completeness gaps layered on top of a sound cryptographic foundation, which is the honest characterization we would give an auditor asking us directly.

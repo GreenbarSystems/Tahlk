@@ -75,18 +75,29 @@ only surfaces, and there is no command that returns the key to the frontend.
 See [Encryption at Rest](#encryption-at-rest-sqlcipher) below for how this
 relates to the (separate) database encryption key.
 
-Tahlk is bring-your-own-key by design, not a transitional state: transcripts
-go directly from the provider's device to Anthropic under the *provider's own*
-Anthropic account and BAA — Tahlk is never in that data path as a party to the
-agreement. See the BAA acknowledgment gate below.
+Bring-your-own-key is the **transitional beta mechanism, not the end-state
+model.** The model Tahlk is moving to is managed-key: Greenbar Systems holds
+the Anthropic relationship, and the provider's compliance agreements are with
+Greenbar (see [MANAGED-KEY-ROLLOUT.md](MANAGED-KEY-ROLLOUT.md) and "Agreements"
+below). During the current test-data-only beta the provider still supplies
+their own Anthropic key (entered above), used directly by `generate_note`; the
+managed-key proxy is not yet built.
 
-## Anthropic BAA acknowledgment (HIPAA)
+## Agreements & the BAA gate (HIPAA)
 
-Tahlk sends session transcripts to Anthropic for note generation. Under HIPAA,
-any PHI transmitted to a third party requires an executed Business Associate
-Agreement (BAA) between the covered entity and that third party. The
-mechanism below exists so Tahlk can refuse to make that call until the
-provider has affirmed a BAA is in place.
+Tahlk sends session transcripts to Anthropic for note generation — PHI leaving
+the device. Under HIPAA that requires a Business Associate Agreement (BAA).
+Under the managed-key model, the provider's agreements are between their
+organization and **Greenbar Systems** — a BAA (Greenbar is the Business
+Associate; Anthropic is Greenbar's subcontractor) plus a EULA — not directly
+with Anthropic. The in-app gate below exists so Tahlk can refuse note
+generation until the provider confirms those agreements are in place.
+
+> **Status (do not overstate this):** the managed model's prerequisites are not
+> yet met — Greenbar's own BAA with Anthropic is applied-for, not executed (see
+> [hipaa-risk-assessment.md](docs/security/hipaa-risk-assessment.md) Flow D), and
+> the managed proxy is not built. Real-PHI use is therefore not yet supported;
+> the beta is test-data-only.
 
 > **Currently non-blocking (ADR 0003).** For the current test-data-only beta,
 > `baa::GATE_ENABLED = false` — the gate below is fully implemented and
@@ -126,18 +137,18 @@ row that holds the acknowledgment.
   step-3 checkbox alongside the API key, with the button inert until it's
   checked. During the current beta this step is removed from onboarding
   (ADR 0003); it returns when the gate is re-enabled.
-- **Settings → BAA acknowledgment** — shows current status (Acknowledged /
-  Not acknowledged), the timestamp and provider name, and a toggle to
-  record or clear it. Always available, regardless of `GATE_ENABLED` — a
-  tester whose org already has a real BAA can record it now for an accurate
-  local audit trail. When the gate is enforced, revocation takes effect
-  immediately: the very next `generate_note` call from that device is
-  rejected with error code `baa_required`.
+- **Settings → Agreements (BAA & EULA)** — shows current status (Confirmed /
+  Not confirmed), the timestamp and provider name, and a toggle to record or
+  clear it. Always available, regardless of `GATE_ENABLED` — a tester whose org
+  has accepted Greenbar's BAA + EULA can record it now for an accurate local
+  audit trail. When the gate is enforced, revocation takes effect immediately:
+  the very next `generate_note` call from that device is rejected with error
+  code `baa_required`.
 
 **Error surface.** When the gate refuses, Rust returns
 `AppError::BaaRequired` which serializes to `{"code":"baa_required", ...}`.
-The encounter panel branches on this code and toasts “Confirm your Anthropic
-BAA in Settings before generating notes.” The wire string is guarded by a
+The encounter panel branches on this code and toasts “Confirm your agreements
+in Settings before generating notes.” The wire string is guarded by a
 Rust unit test (`baa::tests::error_code_wire_shape`) so a rename cannot slip
 past review.
 

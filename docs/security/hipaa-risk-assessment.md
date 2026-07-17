@@ -42,7 +42,7 @@ call the provider explicitly triggers.
 | A | Session audio recording | Patient conversation audio | At rest (device) | Yes — AES-256-GCM (`0e32611`) |
 | B | Transcription (whisper.cpp sidecar) | Patient conversation, audio + text | Transient at rest (device) | No — bounded-window plaintext, see [§2 Flow B](#flow-b--transcript-and-audio-scratch-files-transient-plaintext) |
 | C | Note export (.txt / .pdf) | Full clinical note | At rest (device, provider-chosen path) | No — by design, see [§2 Flow C](#flow-c--provider-directed-note-pdftxt-export-unencrypted) |
-| D | Note generation (Anthropic API, BYOK mode) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; **BAA with Anthropic applied for, not yet confirmed executed** — see [§2 Flow D](#flow-d--note-generation-via-anthropic-byok-mode) |
+| D | Note generation (Anthropic; managed-key model, BYOK during beta) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; **managed-key model — provider↔Greenbar BAA+EULA and Greenbar↔Anthropic BAA both required before real-PHI use; Greenbar↔Anthropic BAA applied for, not yet executed** — see [§2 Flow D](#flow-d--note-generation-via-anthropic-managed-key-model-byok-during-beta) |
 | E | Signed note, transcript, audit log, provider/patient records | Everything above, persisted | At rest (device, app-managed SQLite) | Yes — SQLCipher (confirmed clean in the prior PHI-at-rest audit) |
 | F | Diagnostics log export | App diagnostics only | At rest (device, provider-chosen path) | No, but confirmed non-PHI, see [§2 Flow F](#flow-f--diagnostics-log-export-unencrypted-file-no-phi-content) |
 
@@ -150,76 +150,80 @@ treatment (checked via `grep -n "export_note|fs::write" src-tauri/src/export.rs`
 
 ---
 
-### Flow D — Note generation via Anthropic (BYOK mode)
+### Flow D — Note generation via Anthropic (managed-key model; BYOK during beta)
 
-**What it is.** `generate_note` (`src-tauri/src/notes.rs:309`) sends the
-session transcript — PHI — to Anthropic's API to produce the structured
-clinical note, using the provider's own Anthropic API key (Bring-Your-Own-Key
-mode; this is the only mode currently shipped — the managed-key proxy
-described in `MANAGED-KEY-PROXY-CONTRACT.md` is a v1 draft, not yet built).
+**What it is.** `generate_note` (`src-tauri/src/notes.rs`) sends the session
+transcript — PHI — to Anthropic's API to produce the structured clinical note.
+
+The **governing model is managed-key** (see `MANAGED-KEY-ROLLOUT.md`): **Greenbar
+Systems is the provider's Business Associate**, and Greenbar — not the individual
+practice — holds the relationship with Anthropic, which is Greenbar's
+**subcontractor**. The provider's agreements are with Greenbar: a Business
+Associate Agreement (BAA) and an End User License Agreement (EULA).
+
+**Current implementation, stated plainly to avoid overclaiming the model:** the
+managed-key proxy (`MANAGED-KEY-PROXY-CONTRACT.md`, a v1 draft) is **not built**.
+During the current test-data-only beta the transcript is sent using a
+provider-supplied Anthropic key entered in the app (bring-your-own-key) — a
+**transitional mechanism**, not the end-state. The compliance model above is the
+target the product is built around; the implementation has not caught up to it.
 
 **Risk classification:** Conditionally permitted third-party PHI disclosure —
-gated, not blanket-accepted. **Condition currently unmet / in progress:** the
-BAA with Anthropic has been applied for but is not yet confirmed executed as
-of this writing (see below) — this flow should be treated as an open item,
-not a fully closed one, until that's confirmed.
+gated, not blanket-accepted. **Condition currently unmet:** the managed model's
+prerequisites are not in place (see status below), so real-PHI use is not yet
+supported. Treat this as an open item.
 
 **Why sending PHI to Anthropic is not an automatic compliance violation:**
-HIPAA permits disclosing PHI to a third party that has signed a Business
-Associate Agreement (BAA) as your Business Associate. It does **not** permit
-sending PHI to a party with no BAA in place. Tahlk's mitigation is a hard
+HIPAA permits a Covered Entity to disclose PHI to a Business Associate under a
+signed BAA, and permits that Business Associate to use a subcontractor under a
+back-to-back BAA. The intended chain is: **provider (Covered Entity) → Greenbar
+(Business Associate, under the provider↔Greenbar BAA) → Anthropic
+(subcontractor, under Greenbar's BAA with Anthropic)**. Every link needs a BAA;
+the ones still pending are called out below. Tahlk's in-app mitigation is a hard
 technical gate, not a policy statement:
 
-- `require_ack` (`src-tauri/src/baa.rs:113`) is called at the very top of
-  `generate_note` (`notes.rs:320`) — strictly before the API key is read,
-  before the HTTP client is built, and before the transcript is touched in
-  any way. If the provider has not acknowledged a current BAA attestation,
-  the call is refused with `AppError::BaaRequired` and **no transcript
-  content leaves the device.** This ordering is deliberate and documented
-  inline in the source (`notes.rs:316-320`).
+- `require_ack` (`src-tauri/src/baa.rs`) is called at the very top of
+  `generate_note` — strictly before the API key is read, before the HTTP client
+  is built, and before the transcript is touched in any way. If the provider has
+  not confirmed the required agreements, the call is refused with
+  `AppError::BaaRequired` and **no transcript content leaves the device.** This
+  ordering is deliberate and documented inline in the source.
 - The transcript is TLS-encrypted in transit to Anthropic (standard HTTPS).
 - Prompt-injection hardening wraps the transcript in tagged delimiters before
-  it's sent (audit finding H6, `notes.rs:336-340`).
+  it's sent (audit finding H6).
 - Upstream error handling never surfaces the request or response body into
   logs or the app's error surface — only an HTTP status code or a fixed
-  generic string (audit findings M9/M10, `notes.rs:408-422`) — so a failed
-  generation call can't leak transcript content through the error path.
+  generic string (audit findings M9/M10) — so a failed generation call can't
+  leak transcript content through the error path.
 
-**Current real-world BAA status (as of this document, self-reported by the
-product owner, not independently verified by code inspection — code cannot
-confirm the state of a legal agreement):** an application for a BAA with
-Anthropic has been submitted; **it is not yet confirmed executed/countersigned**
-as of this writing. This is a live gap, not a closed item — see action items
-below. **Re-confirmed unchanged (still applied for, not executed) by the
-product owner on 2026-07-13** — do not treat the passage of time alone as
-progress; the next update to this line must reflect an actual status change,
-not merely a later re-confirmation of the same status.
+**Current real-world status (self-reported by the product owner; code cannot
+confirm the state of a legal agreement):** **Greenbar's BAA with Anthropic** —
+required because Anthropic is Greenbar's subcontractor in the managed chain — has
+been applied for but is **not yet confirmed executed/countersigned**.
+**Re-confirmed unchanged (still applied for, not executed) by the product owner
+on 2026-07-13** — do not treat the passage of time alone as progress; the next
+update to this line must reflect an actual status change. The provider-facing
+**BAA and EULA with Greenbar** likewise must be executed with each practice
+before that practice uses real patient information.
 
-**What this means for your BAA obligations (action item, not a code
-concern):** Tahlk's technical gate only enforces that *some* acknowledgment
-exists in the local database — it does not itself constitute or replace a
-signed BAA between the provider (or your organization, if Tahlk is acting as
-the Business Associate here) and Anthropic. **Confirm and keep current:**
-(1) which entity is the Covered Entity and which is the Business Associate in
-this flow for your deployment model, (2) **track the pending Anthropic BAA
-application above through to actual execution, and re-run this section's
-status line once it's confirmed countersigned — do not treat "applied" as
-equivalent to "in effect" for compliance purposes**, (3) confirm a real,
-signed BAA with Anthropic is in effect for every account using BYOK note
-generation once executed, and (4) that the in-app acknowledgment
-(`baa_ack_set`, `src-tauri/src/baa.rs:143`) is kept in sync with that
-real-world agreement — the gate trusts the local
-flag; it cannot verify the underlying paperwork exists.
+**Action items (not code concerns):** Tahlk's technical gate only enforces that
+*some* confirmation exists in the local database — it does not itself constitute
+or replace the signed agreements. Track to completion: (1) execute Greenbar's
+BAA with Anthropic and re-run this status line once countersigned — do not treat
+"applied" as equivalent to "in effect"; (2) execute, and make available to
+practices, the provider↔Greenbar BAA and EULA; (3) build the managed-key proxy
+and re-assess this flow under this document before release; (4) keep the in-app
+confirmation (`baa_ack_set`) in sync with those real-world agreements — the gate
+trusts the local flag; it cannot verify the underlying paperwork.
 
-**Conditions to remain accepted:** `require_ack` must remain the first
-statement in `generate_note` (before any key read, client build, or
-transcript handling); the BAA acknowledgment flow must remain a hard `Result`
-gate (`AppError::BaaRequired`), not a soft warning; the managed-key proxy, if
-and when shipped, must be re-assessed under this document before release —
-it changes the disclosure boundary (Tahlk's own key + proxy become a
-Business Associate in the chain, per `MANAGED-KEY-PROXY-CONTRACT.md` §1's own
-banner: *"The proxy is a HIPAA Business Associate... MUST NOT log, persist,
-or cache request/response bodies."*).
+**Conditions to remain accepted:** `require_ack` must remain the first statement
+in `generate_note` (before any key read, client build, or transcript handling);
+the confirmation flow must remain a hard `Result` gate (`AppError::BaaRequired`),
+not a soft warning; the managed-key proxy, when built, must be re-assessed under
+this document before release — it moves the Anthropic API key server-side to
+Greenbar (per `MANAGED-KEY-PROXY-CONTRACT.md` §1's own banner: *"The proxy is a
+HIPAA Business Associate... MUST NOT log, persist, or cache request/response
+bodies."*).
 
 ---
 

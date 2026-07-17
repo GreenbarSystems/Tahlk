@@ -20,6 +20,17 @@ Anthropic account and their own BAA if they were sending real PHI — but this
 beta cohort isn't, so the gate is pure onboarding friction with zero
 compliance benefit for the data actually in flight right now.
 
+> **Model clarification (2026-07-17, does not change this decision):** the
+> compliance model has since been defined as **managed-key**: the provider's
+> BAA and a EULA are with **Greenbar Systems** (Greenbar is the Business
+> Associate; Anthropic is Greenbar's subcontractor), not the provider directly
+> with Anthropic — see `MANAGED-KEY-ROLLOUT.md` and
+> `docs/security/hipaa-risk-assessment.md` Flow D. This ADR's decision (make the
+> gate non-blocking for the test-data-only beta) is unchanged; only read the
+> "provider's own BAA with Anthropic" framing above as the transitional BYOK
+> mechanism, not the target model. The confirmation the gate records is now the
+> provider's acceptance of Greenbar's BAA + EULA.
+
 ## Decision
 
 Soft-disable the gate rather than delete it.

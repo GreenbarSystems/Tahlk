@@ -122,9 +122,11 @@ test('fromInvoke preserves baa_required code from Rust rejection', () => {
 test('userMessage returns the Settings CTA for baa_required', () => {
   const err = new AppError('baa_required', 'blah');
   const msg = userMessage(err);
-  // We assert on the *shape* of the message (mentions BAA + Settings) rather
-  // than the exact string so copy tweaks don't break this test unnecessarily.
-  assert.match(msg, /BAA/);
+  // We assert on the *shape* of the message (points at the agreements +
+  // Settings) rather than the exact string so copy tweaks don't break this
+  // test unnecessarily. Copy moved from "BAA" to "agreements" when the model
+  // became a BAA + EULA with Greenbar rather than a BAA with Anthropic.
+  assert.match(msg, /agreement/i);
   assert.match(msg, /Settings/);
 });
 

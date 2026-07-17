@@ -19,28 +19,28 @@ to a signed note. You do not need any programming or IT background to follow it.
 
 > **Beta note:** Tahlk is currently in a test-data-only beta — please do not
 > enter real patient information yet. The steps below describe the full app
-> experience, but the BAA requirement in step 3 is not yet enforced by the
-> app itself during this phase; it becomes required (with a matching setup
-> step) before real PHI use is supported.
+> experience, but the agreements in step 3 are not yet enforced by the app
+> during this phase; they become required before real patient use is supported.
 
 ## What you'll need before you start
 
 1. **Tahlk running on your computer.** Have your technical contact get the app
    open for you the first time using [SETUP.md](SETUP.md). After that, you open
    it like any other app.
-2. **An Anthropic account and API key.** Tahlk uses Anthropic's AI (Claude) to
-   draft your notes from what was said. You bring your own Anthropic account and
-   key so transcripts go directly to Anthropic under your own agreement with
-   them — Tahlk never stores your key on any server. The app's first-run setup
-   has a built-in "How do I get one?" walkthrough, so you can create the key
-   right when it asks.
-3. **A signed Business Associate Agreement (BAA) with Anthropic**, before you
-   ever send real patient information. Because visit transcripts are protected
-   health information (PHI), HIPAA requires a BAA between your organization
-   and Anthropic. During the current test-data-only beta the app does not yet
-   block on this, but you should still have it in place before treating Tahlk
-   as ready for real patients. If you already have one, you can record it
-   voluntarily in **Settings → BAA acknowledgment** for your own audit trail.
+2. **An Anthropic API key** (during the beta). Tahlk uses Anthropic's AI (Claude)
+   to draft your notes from what was said. For now you supply an Anthropic API
+   key, saved securely on your device and never sent to Tahlk; the app's setup
+   has a built-in "How do I get one?" walkthrough. This is a temporary beta step —
+   in the full version, Greenbar Systems (the maker of Tahlk) handles the
+   connection to Anthropic for you, so you won't need your own key.
+3. **Your agreements with Greenbar Systems**, before you ever use real patient
+   information. Because visit transcripts are protected health information (PHI),
+   HIPAA requires a Business Associate Agreement (BAA) — this is between your
+   organization and **Greenbar Systems** (not Anthropic), alongside an End User
+   License Agreement (EULA). Greenbar is responsible for the agreement with
+   Anthropic. During the current test-data-only beta the app doesn't block on
+   this, but both need to be in place before you treat Tahlk as ready for real
+   patients. You can record that they're in place under **Settings → Agreements**.
 
 You don't have to gather all of this before opening the app — the first-run
 setup explains each item as you reach it and links out to where you get it.
@@ -60,13 +60,14 @@ The welcome screen has two quick steps:
    recorded as the signer on each note.
 2. **Note generation API key** — paste your Anthropic API key (it starts with
    `sk-ant-`). If you don't have one yet, expand **"How do I get one?"** for a
-   step-by-step. Your key is saved in your operating system's secure
-   credential store (the same place your computer keeps other app passwords)
-   and is never sent to any Tahlk server.
+   step-by-step. Your key is saved securely on your device (the same place your
+   computer keeps other app passwords) and is never sent to any Tahlk server.
+   This is a temporary beta step — the full version handles the AI connection
+   for you.
 
 When both are filled in, click **Start using Tahlk**. Setup does not currently
-ask about the Anthropic BAA (see the beta note above) — if your organization
-already has one, you can record it from **Settings → BAA acknowledgment** at
+ask about your agreements (see the beta note above) — you can record that
+they're in place from **Settings → Agreements** at
 any time for your own audit trail.
 
 ## Your first recording → note → sign
@@ -82,9 +83,9 @@ session you'll move through these steps:
    comes bundled with Tahlk, so there's nothing to download and no audio leaves
    the device. The transcript appears in an editable box.
 3. **Generate the note.** Pick a note template from the dropdown, then click
-   **Generate Note**. This is the step that sends the transcript to Anthropic
-   (under your account and BAA) and drafts a clinical note. Review and edit the
-   draft — it's fully editable until you sign.
+   **Generate Note**. This is the step that sends the transcript to Anthropic —
+   covered by your BAA with Greenbar — and drafts a clinical note. Review and
+   edit the draft; it's fully editable until you sign.
 4. **Sign.** When the note is correct, click **Sign & Attest Note**. Signing
    locks the note and records a tamper-evident (SHA-256) fingerprint of the
    exact signed content, so the record can't be silently altered afterward.
@@ -98,7 +99,7 @@ first session it becomes a quick, repeatable routine.
 
 - **Audio and transcripts stay on your device.** Transcription runs locally.
 - **Only the transcript is sent to Anthropic**, and only when you click
-  **Generate Note** — under your own account and BAA.
+  **Generate Note** — covered by your BAA with Greenbar.
 - **Your notes are stored locally** in an encrypted database on your computer.
 - **Signed notes are tamper-evident** via a running SHA-256 hash chain.
 
@@ -108,5 +109,6 @@ first session it becomes a quick, repeatable routine.
   contact): [SETUP.md](SETUP.md).
 - **API key questions:** the in-app setup screen has expandable help with a
   link to Anthropic's console.
-- **BAA questions:** see **Settings → BAA acknowledgment** for a link to
-  Anthropic's BAA request process.
+- **BAA / EULA questions:** these agreements are with Greenbar Systems — contact
+  your Greenbar representative. You record that they're in place under
+  **Settings → Agreements**.

@@ -2,18 +2,24 @@
 
 Thank you for helping test Tahlk. This guide will get you up and running.
 
+> **Please use test data only during the beta.** Don't enter real patient
+> information yet — the agreements that cover real patient use aren't in place
+> during this phase (see below).
+
 ## What you'll need first
 
-Before you install Tahlk, please have these two things ready:
+Before you install Tahlk, please have this ready:
 
-1. **An Anthropic account and API key.** Tahlk uses Anthropic's Claude AI to
-   turn your conversation into a clinical note. You'll need your own
-   Anthropic account and key — Tahlk walks you through getting one during
-   setup if you don't already have it.
-2. **A signed Business Associate Agreement (BAA) with Anthropic.** Because
-   session recordings involve patient health information, this agreement
-   needs to be in place before Tahlk will generate notes. If you haven't
-   started this yet, Tahlk links you to where to request one.
+1. **An Anthropic API key** (a temporary beta step). Tahlk uses Anthropic's
+   Claude AI to turn your conversation into a clinical note. For the beta you
+   supply an Anthropic key — Tahlk walks you through getting one during setup.
+   In the full version, Greenbar Systems (the maker of Tahlk) handles the
+   connection to Anthropic for you, so you won't need your own key.
+
+For real patient use later, you'll also have a **Business Associate Agreement
+(BAA)** and an **End User License Agreement (EULA)** with **Greenbar Systems** —
+not with Anthropic; Greenbar handles the Anthropic side. These aren't required
+for the test-data-only beta.
 
 ## Installing Tahlk
 
@@ -26,14 +32,14 @@ Before you install Tahlk, please have these two things ready:
 
 ## Setting up your account
 
-The first time you open Tahlk, it will walk you through three quick steps:
+The first time you open Tahlk, it will walk you through two quick steps:
 
 1. **Your profile** — your name, credentials (e.g. MD, LCSW), and specialty.
-2. **Your Anthropic API key** — paste in the key from the first step above.
-3. **Confirming your BAA** — check the box confirming your BAA with Anthropic
-   is in place.
+2. **Your Anthropic API key** — paste in the key from above.
 
-Then click **Start using Tahlk** and you're ready to go.
+Then click **Start using Tahlk** and you're ready to go. (There's no agreement
+step during the beta — that's for real patient use later, and you'll record it
+under **Settings → Agreements** when the time comes.)
 
 ## Recording your first session
 
@@ -53,6 +59,7 @@ Here's the flow for each patient visit:
 - Your audio and transcripts stay on your own computer.
 - Only the text of the transcript is sent to Anthropic, and only when you
   click Generate Note.
+- Nothing is ever sent to Tahlk's own servers.
 - Notes are saved securely on your device once signed.
 
 ## Questions or issues?
