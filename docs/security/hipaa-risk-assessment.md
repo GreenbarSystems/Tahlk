@@ -42,7 +42,7 @@ call the provider explicitly triggers.
 | A | Session audio recording | Patient conversation audio | At rest (device) | Yes — AES-256-GCM (`0e32611`) |
 | B | Transcription (whisper.cpp sidecar) | Patient conversation, audio + text | Transient at rest (device) | No — bounded-window plaintext, see [§2 Flow B](#flow-b--transcript-and-audio-scratch-files-transient-plaintext) |
 | C | Note export (.txt / .pdf) | Full clinical note | At rest (device, provider-chosen path) | No — by design, see [§2 Flow C](#flow-c--provider-directed-note-pdftxt-export-unencrypted) |
-| D | Note generation (Anthropic; managed-key model, BYOK during beta) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; **managed-key model — provider↔Greenbar BAA+EULA and Greenbar↔Anthropic BAA both required before real-PHI use; Greenbar↔Anthropic BAA applied for, not yet executed** — see [§2 Flow D](#flow-d--note-generation-via-anthropic-managed-key-model-byok-during-beta) |
+| D | Note generation (Anthropic; managed-key model, BYOK during beta) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; **managed-key model — provider↔Greenbar BAA+EULA and Greenbar↔Anthropic BAA both required before real-PHI use; Greenbar↔Anthropic BAA executed 2026-07-18 (ZDR provisioning pending Anthropic approval); provider↔Greenbar BAA + EULA in attorney drafting week of 2026-07-13, not yet executed with any practice** — see [§2 Flow D](#flow-d--note-generation-via-anthropic-managed-key-model-byok-during-beta) |
 | E | Signed note, transcript, audit log, provider/patient records | Everything above, persisted | At rest (device, app-managed SQLite) | Yes — SQLCipher (confirmed clean in the prior PHI-at-rest audit) |
 | F | Diagnostics log export | App diagnostics only | At rest (device, provider-chosen path) | No, but confirmed non-PHI, see [§2 Flow F](#flow-f--diagnostics-log-export-unencrypted-file-no-phi-content) |
 
@@ -197,24 +197,35 @@ technical gate, not a policy statement:
   leak transcript content through the error path.
 
 **Current real-world status (self-reported by the product owner; code cannot
-confirm the state of a legal agreement):** **Greenbar's BAA with Anthropic** —
-required because Anthropic is Greenbar's subcontractor in the managed chain — has
-been applied for but is **not yet confirmed executed/countersigned**.
-**Re-confirmed unchanged (still applied for, not executed) by the product owner
-on 2026-07-13** — do not treat the passage of time alone as progress; the next
-update to this line must reflect an actual status change. The provider-facing
-**BAA and EULA with Greenbar** likewise must be executed with each practice
-before that practice uses real patient information.
+confirm the state of a legal agreement):**
+
+- **Greenbar ↔ Anthropic BAA:** **executed 2026-07-18.** Zero-Data-Retention
+  (ZDR) provisioning on the dedicated Anthropic organization behind the future
+  managed-key proxy is **pending Anthropic approval** — the BAA is signed, but
+  ZDR must be provisioned on the org before the `TAHLK_ANTHROPIC_KEY` in
+  `MANAGED-KEY-PROXY-CONTRACT.md` §3 is usable for real-PHI traffic (see that
+  contract's §3 and §7, which require the upstream Anthropic org to have ZDR
+  enabled). Update this line — with the Anthropic-provided approval date — the
+  moment ZDR is confirmed active on the org; do not treat the signed BAA alone
+  as sufficient to route real PHI through the managed proxy.
+- **Provider ↔ Greenbar BAA + EULA:** **in attorney drafting, week of
+  2026-07-13.** A licensed healthcare attorney is drafting both agreements —
+  see the required-contract-elements list in `MANAGED-KEY-ROLLOUT.md` §2
+  ("BAA template ready to sign with each practice"). Not yet executed with any
+  practice. Neither agreement is available to show a practice until the
+  attorney-reviewed drafts land; real-PHI beta invitations must not go out
+  before that point.
 
 **Action items (not code concerns):** Tahlk's technical gate only enforces that
 *some* confirmation exists in the local database — it does not itself constitute
-or replace the signed agreements. Track to completion: (1) execute Greenbar's
-BAA with Anthropic and re-run this status line once countersigned — do not treat
-"applied" as equivalent to "in effect"; (2) execute, and make available to
-practices, the provider↔Greenbar BAA and EULA; (3) build the managed-key proxy
-and re-assess this flow under this document before release; (4) keep the in-app
-confirmation (`baa_ack_set`) in sync with those real-world agreements — the gate
-trusts the local flag; it cannot verify the underlying paperwork.
+or replace the signed agreements. Track to completion: (1) confirm ZDR
+provisioning on the Anthropic org and record the approval date on the status
+line above; (2) finalize the attorney-drafted provider↔Greenbar BAA and EULA,
+then execute them with each practice before that practice uses real patient
+information; (3) build the managed-key proxy and re-assess this flow under this
+document before release; (4) keep the in-app confirmation (`baa_ack_set`) in
+sync with those real-world agreements — the gate trusts the local flag; it
+cannot verify the underlying paperwork.
 
 **Conditions to remain accepted:** `require_ack` must remain the first statement
 in `generate_note` (before any key read, client build, or transcript handling);
@@ -633,7 +644,7 @@ This document should be re-reviewed:
   executed) with the product owner as of this same date — see §2 Flow D.
 - `c3e9383` — cheap documentation-only fixes from the same audit pass
   (no code changes).
-- (this update) — §4 rewritten from "planned remediation, tracked, not yet
+- (audit-log hash-chain update) — §4 rewritten from "planned remediation, tracked, not yet
   built" to describe the shipped fix: `auditLog.js` is now SHA-256
   hash-chained (`hashAuditEntry`/`verifyAuditChain` in
   `src/utils/contentHash.js`), truncation past `MAX_AUDIT_ENTRIES` now
@@ -645,3 +656,11 @@ This document should be re-reviewed:
   implementation via bug-injection-and-revert. Flagged the still-open
   `currentUser()` identity gap (§3.2) as a separate item this change does
   not resolve.
+- (2026-07-18 update) — Flow D status advanced: the Greenbar↔Anthropic BAA
+  was **executed 2026-07-18** (previously "applied for, not yet executed");
+  ZDR provisioning on the dedicated Anthropic organization behind the future
+  managed-key proxy is now the outstanding technical prerequisite and is
+  pending Anthropic approval. Separately, the provider↔Greenbar BAA and EULA
+  moved into **attorney drafting the week of 2026-07-13**; neither is executed
+  with any practice yet. Updated: §2 top-of-table Flow D row, §2 Flow D
+  "Current real-world status" and "Action items" bodies.

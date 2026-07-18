@@ -161,8 +161,8 @@ Both items are recognized, scoped remediation items, not unknowns — flagging t
 
 Under the **managed-key model** this product is built around, the compliance chain is: the practice (Covered Entity) → **Greenbar Systems** (Business Associate, under a provider↔Greenbar BAA, alongside a EULA) → Anthropic (Greenbar's subcontractor, under Greenbar's own BAA with Anthropic). Two BAA relationships matter, and their status should not be conflated:
 
-1. **Provider ↔ Greenbar (BAA + EULA).** Required before a practice uses real patient information. The in-app confirmation gate (§3.4) records that the practice has accepted these agreements, with a timestamp, for the practice's own audit trail. Software cannot verify the underlying legal agreements exist — only that the clinician confirmed them.
-2. **Greenbar ↔ Anthropic (subcontractor BAA).** Required because Anthropic processes PHI on Greenbar's behalf in the managed chain. **Status: applied for, not yet executed** (re-confirmed by the product owner 2026-07-13) — do not treat as settled until updated here with a specific date and outcome.
+1. **Provider ↔ Greenbar (BAA + EULA).** Required before a practice uses real patient information. The in-app confirmation gate (§3.4) records that the practice has accepted these agreements, with a timestamp, for the practice's own audit trail. Software cannot verify the underlying legal agreements exist — only that the clinician confirmed them. **Status: in attorney drafting, week of 2026-07-13.** A licensed healthcare attorney is drafting both the BAA and the EULA; neither is executed with any practice yet. Real-PHI beta invitations must not go out until the attorney-reviewed drafts are finalized and signed with the receiving practice.
+2. **Greenbar ↔ Anthropic (subcontractor BAA).** Required because Anthropic processes PHI on Greenbar's behalf in the managed chain. **Status: executed 2026-07-18. Zero-Data-Retention (ZDR) provisioning on the dedicated Anthropic organization behind the future managed-key proxy is pending Anthropic approval** — the BAA is signed, but ZDR must be provisioned on the org before the `TAHLK_ANTHROPIC_KEY` referenced in `MANAGED-KEY-PROXY-CONTRACT.md` §3 and §7 is usable for real-PHI traffic. Update this line — with the Anthropic-provided approval date — the moment ZDR is confirmed active on the org.
 
 **Current implementation vs. the model.** The managed-key proxy (`MANAGED-KEY-PROXY-CONTRACT.md`, v1 draft) is **not built**. During the current test-data-only beta the transcript is sent using a provider-supplied Anthropic key entered in the app (bring-your-own-key) as a **transitional mechanism**, not the end-state. Real-PHI use is not supported until both BAAs above are executed and the managed proxy ships.
 
@@ -185,8 +185,8 @@ Under the **managed-key model** this product is built around, the compliance cha
 | Record deletion / right-to-delete | **Gap** — no full-record deletion capability yet |
 | Screen-capture exposure | **Gap** — no content-protection flag; screen-share tools can capture on-screen PHI |
 | Clipboard handling | **Partial** — auto-clears after a window, but not on app quit |
-| Provider ↔ Greenbar BAA + EULA | Recorded via in-app confirmation; cannot be verified by software |
-| Greenbar ↔ Anthropic (subcontractor) BAA | Applied for, not yet executed (2026-07-13) |
+| Provider ↔ Greenbar BAA + EULA | In attorney drafting (week of 2026-07-13); not yet executed with any practice. In-app confirmation records provider acknowledgment; software cannot verify the underlying legal agreements |
+| Greenbar ↔ Anthropic (subcontractor) BAA | Executed 2026-07-18. ZDR provisioning on the dedicated Anthropic org pending Anthropic approval — required before the managed-key proxy can route real-PHI traffic |
 | Incident response runbook | **Gap** — self-disclosed, planned, not yet built |
 
 None of the open items above involve a failure of the encryption or transport controls themselves; they are accountability and completeness gaps layered on top of a sound cryptographic foundation, which is the honest characterization we would give an auditor asking us directly.

@@ -93,11 +93,15 @@ Associate; Anthropic is Greenbar's subcontractor) plus a EULA — not directly
 with Anthropic. The in-app gate below exists so Tahlk can refuse note
 generation until the provider confirms those agreements are in place.
 
-> **Status (do not overstate this):** the managed model's prerequisites are not
-> yet met — Greenbar's own BAA with Anthropic is applied-for, not executed (see
-> [hipaa-risk-assessment.md](docs/security/hipaa-risk-assessment.md) Flow D), and
-> the managed proxy is not built. Real-PHI use is therefore not yet supported;
-> the beta is test-data-only.
+> **Status (do not overstate this):** the managed model's prerequisites are
+> partially in place — Greenbar's own BAA with Anthropic was **executed
+> 2026-07-18**, but ZDR provisioning on the dedicated Anthropic organization
+> behind the future managed-key proxy is pending Anthropic approval (see
+> [hipaa-risk-assessment.md](docs/security/hipaa-risk-assessment.md) Flow D).
+> Separately, the provider↔Greenbar BAA and EULA are in attorney drafting the
+> week of 2026-07-13; neither is executed with any practice yet. The
+> managed-key proxy itself is still not built. Real-PHI use is therefore not
+> yet supported; the beta remains test-data-only.
 
 > **Currently non-blocking (ADR 0003).** For the current test-data-only beta,
 > `baa::GATE_ENABLED = false` — the gate below is fully implemented and

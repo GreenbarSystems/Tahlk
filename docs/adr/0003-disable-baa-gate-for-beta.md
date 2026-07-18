@@ -78,3 +78,22 @@ the gate is a flag flip away from fully back on, not a rebuild.
 2. **Beta scope changes to include real PHI before #1 ships** — flip
    `GATE_ENABLED` back to `true` and restore the onboarding step immediately;
    do not wait for the managed key in that scenario.
+
+## Status update — 2026-07-18
+
+Progress on the compliance prerequisites that gate re-enabling this flag,
+recorded here so this ADR reflects the same real-world status as
+`docs/security/hipaa-risk-assessment.md` §2 Flow D:
+
+- **Greenbar ↔ Anthropic BAA: executed 2026-07-18.** ZDR provisioning on the
+  dedicated Anthropic organization behind the future managed-key proxy is
+  pending Anthropic approval. Real-PHI use through the managed proxy is
+  blocked on ZDR provisioning, not on the BAA itself.
+- **Provider ↔ Greenbar BAA + EULA: in attorney drafting, week of
+  2026-07-13.** A licensed healthcare attorney is drafting both agreements.
+  Neither is finalized or executed with any practice yet.
+
+Neither change flips `GATE_ENABLED` on its own. Criterion #1 above still
+requires the managed-key proxy to ship; criterion #2 still requires an
+explicit scope change. This ADR remains in force until one of those two
+conditions is met.

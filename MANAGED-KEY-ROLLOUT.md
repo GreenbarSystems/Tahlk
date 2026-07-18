@@ -38,19 +38,36 @@ identified it as omitting several standard BAA-readiness elements (Medium
 finding, area 10). Revised below — corrections and additions are marked.
 
 **Legal / compliance**
-- [ ] **HIPAA readiness enabled on Anthropic's Console** for the dedicated
+- [x] **HIPAA readiness enabled on Anthropic's Console** for the dedicated
       organization the proxy will use (Console → Settings → Privacy →
       accept the standard BAA as an authorized legal representative, or a
       negotiated BAA via Anthropic sales if the standard terms don't fit).
-      **Correction:** the earlier version of this checklist listed
-      "Zero-Data-Retention (ZDR) enabled" as a *separate* item from the BAA.
-      Per Anthropic's own documentation, HIPAA readiness and ZDR are
-      **alternative** arrangements, not additive — enabling HIPAA readiness
-      is the complete requirement; there is no separate ZDR step to also
-      enable. Use a Console organization dedicated to this proxy, never one
-      also used for unrelated/non-PHI work — HIPAA readiness is permanent
-      and org-wide once enabled, and blocks any non-eligible API feature
-      with a hard `400` error.
+      **BAA executed 2026-07-18.**
+      **Correction (pre-existing, kept for history):** the earlier version of
+      this checklist listed "Zero-Data-Retention (ZDR) enabled" as a *separate*
+      item from the BAA. Per Anthropic's own documentation, HIPAA readiness and
+      ZDR are **alternative** arrangements, not additive — enabling HIPAA
+      readiness is the complete requirement; there is no separate ZDR step to
+      also enable. Use a Console organization dedicated to this proxy, never
+      one also used for unrelated/non-PHI work — HIPAA readiness is permanent
+      and org-wide once enabled, and blocks any non-eligible API feature with a
+      hard `400` error.
+      **Empirical note (2026-07-18):** in the actual provisioning path Greenbar
+      followed, Anthropic granted the BAA first and is treating ZDR provisioning
+      on the dedicated org as a **separate, sequential approval step** — which
+      is the opposite of what the correction paragraph above predicts. Both are
+      recorded here so the discrepancy is visible; the operational status right
+      now is "BAA signed, ZDR pending Anthropic approval," and
+      `MANAGED-KEY-PROXY-CONTRACT.md` §3 and §7 (which independently require
+      the upstream org to have ZDR enabled) remain the authoritative technical
+      requirement. Reconcile this correction paragraph with Anthropic's current
+      program terms once ZDR is approved and the operational picture is stable
+      — do not silently delete either side of the contradiction before then.
+- [ ] **ZDR provisioning approved by Anthropic** on the dedicated org —
+      **pending Anthropic approval as of 2026-07-18**. Record the approval date
+      here and in `docs/security/hipaa-risk-assessment.md` §2 Flow D the moment
+      it lands. Until this box is checked, the managed-key proxy MUST NOT route
+      real-PHI traffic even though the BAA itself is signed.
 - [ ] **BAA template ready to sign with each practice** (Tahlk is the
       practice's BA), containing — at minimum, per 45 CFR §164.504(e)(2)'s
       required contract elements — the permitted/required uses of PHI, a
@@ -68,6 +85,9 @@ finding, area 10). Revised below — corrections and additions are marked.
       obligations at termination. **This is a real legal document — draft or
       review by a licensed healthcare attorney before it is shown to any
       practice; do not adapt a public template without that review.**
+      **Status (2026-07-18):** in attorney drafting, week of 2026-07-13.
+      Neither the provider↔Greenbar BAA nor the EULA is finalized or executed
+      with any practice yet.
 - [ ] Privacy policy / disclosures updated to state that, in managed mode, a
       (de-identified) transcript is sent to Anthropic under Greenbar's
       HIPAA-ready Console organization.
