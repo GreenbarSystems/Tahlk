@@ -359,14 +359,20 @@ fn migrate_plaintext_to_encrypted(
 }
 
 pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
+    let hex_key = db_key::load_or_generate_dek()?;
+    open_database_with_dek(app, &hex_key)
+}
+
+/// Open (or create) the encrypted SQLite database using a caller-supplied hex
+/// DEK. Used by the auth path (Stage 4+) where the DEK comes from
+/// `auth::unlock_with_password` rather than the OS keychain.
+pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<SqlitePool, AppError> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| AppError::internal_from(format!("could not resolve app_data_dir: {}", e)))?;
     std::fs::create_dir_all(&data_dir).map_err(AppError::storage_from)?;
     let db_path = data_dir.join("tahlk.db");
-
-    let hex_key = db_key::load_or_generate_dek()?;
 
     // Legacy upgrade path: existing plaintext DB gets copied into a new
     // encrypted file, then swapped into place. Skipped on fresh installs
@@ -376,7 +382,7 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
     // every fresh connection and reject a plaintext file with "NOTADB".
     if is_plaintext_db(&db_path).map_err(AppError::storage_from)? {
         let encrypted_tmp = data_dir.join("tahlk.db.encrypted");
-        migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, &hex_key)?;
+        migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, hex_key)?;
         std::fs::rename(&encrypted_tmp, &db_path).map_err(AppError::storage_from)?;
     }
 
@@ -402,7 +408,7 @@ pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
     // more than one.)
     let manager = SqliteConnectionManager::file(&db_path);
     let customizer = KeyingCustomizer {
-        hex_key: Arc::new(hex_key),
+        hex_key: Arc::new(hex_key.to_string()),
     };
     let pool = Pool::builder()
         .max_size(4)

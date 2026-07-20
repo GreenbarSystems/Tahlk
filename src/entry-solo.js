@@ -13,6 +13,8 @@ import { clearClipboardOnExit } from './export/exportFormatter.js';
 import { startIdleWatcher } from './core/idleLock.js';
 import { showLockScreen } from './solo/lockScreen.js';
 import * as telemetry from './core/telemetry.js';
+import { authRepo } from './data/authRepo.js';
+import { showSignInScreen, runFirstOpenAuth } from './solo/authScreen.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
 import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
@@ -70,6 +72,17 @@ async function bootstrap() {
   // rather than gating bootstrap on that being configured yet.
   startIdleWatcher(() => showLockScreen(() => {}));
   await telemetry.init();   // opt-in gated; subscribes to the bus, records nothing unless enabled
+
+  const authEnabled = await authRepo.isEnabled();
+  if (authEnabled) {
+    const authConfigured = await authRepo.isConfigured();
+    const app = document.getElementById('app');
+    if (!authConfigured) {
+      await runFirstOpenAuth(app, () => {});
+    } else {
+      await new Promise(resolve => showSignInScreen(resolve));
+    }
+  }
 
   if (!isOnboarded()) {
     document.getElementById('app').innerHTML = renderOnboarding();

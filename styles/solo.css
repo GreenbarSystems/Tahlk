@@ -710,3 +710,93 @@ a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-r
   display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;
   padding-top: 14px; border-top: 1px solid var(--gray-200);
 }
+
+/* ─── Auth screens (ADR 0004) ────────────────────────────────────────────── */
+
+/* Sign-in screen — full-viewport centered card, rendered into #app before the
+   app shell exists. Intentionally matches the onboarding-backdrop look so the
+   visual contract is "this is Tahlk, not a browser dialog." */
+.auth-signin-backdrop {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; background: var(--gray-100);
+}
+.auth-signin-card {
+  background: var(--white); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md); padding: 48px 40px 40px;
+  width: 100%; max-width: 420px; text-align: center;
+}
+.auth-icon { font-size: 48px; margin-bottom: 12px; }
+.auth-title { font-size: 22px; font-weight: 700; color: var(--gray-900); margin-bottom: 6px; }
+.auth-sub   { font-size: 14px; color: var(--gray-500); margin-bottom: 20px; }
+.auth-error { font-size: 13px; color: var(--danger); margin: 6px 0 0; }
+.auth-forgot-row { margin-top: 12px; }
+.auth-full-btn { width: 100%; margin-top: 8px; }
+
+/* Forgot-password modal card */
+.auth-modal-card {
+  background: var(--white); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md); padding: 32px 36px 28px;
+  width: 100%; max-width: 480px;
+}
+.auth-modal-title { font-size: 18px; font-weight: 700; color: var(--gray-900); margin-bottom: 8px; }
+.auth-title-danger { color: var(--danger); }
+.auth-modal-actions {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;
+}
+
+/* Option list inside forgot-password modal */
+.auth-option-list { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+.auth-option-btn {
+  display: flex; align-items: flex-start; gap: 14px;
+  background: var(--gray-100); border: 1px solid var(--gray-200);
+  border-radius: var(--radius); padding: 14px 16px;
+  text-align: left; cursor: pointer; width: 100%;
+  transition: border-color 0.12s;
+}
+.auth-option-btn:hover { border-color: var(--green); background: var(--gray-100); }
+.auth-option-btn--danger:hover { border-color: var(--danger); }
+.auth-option-btn strong { display: block; font-weight: 600; color: var(--gray-900); margin-bottom: 2px; }
+.auth-option-icon { font-size: 22px; flex-shrink: 0; margin-top: 1px; }
+.auth-option-desc { font-size: 13px; color: var(--gray-500); display: block; }
+
+/* Step badge — appears above the card title in multi-step flows */
+.auth-step-badge {
+  display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--green); background: var(--green-lite);
+  border-radius: 99px; padding: 3px 10px; margin-bottom: 10px;
+}
+
+/* Password strength meter */
+.auth-strength-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.auth-strength-bar {
+  flex: 1; height: 4px; background: var(--gray-200); border-radius: 99px; overflow: hidden;
+}
+.auth-strength-fill { height: 100%; width: 0; border-radius: 99px; transition: width 0.2s, background 0.2s; }
+.auth-strength-label { font-size: 12px; font-weight: 600; min-width: 42px; }
+
+/* Recovery code display */
+.auth-code-box {
+  background: var(--gray-100); border: 1px solid var(--gray-200);
+  border-radius: var(--radius); padding: 20px; margin: 16px 0 8px; text-align: center;
+}
+.auth-code-display {
+  font-family: monospace, monospace; font-size: 18px; letter-spacing: 2px;
+  color: var(--gray-900); word-break: break-all;
+}
+.auth-code-actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 4px; }
+.auth-code-hint { font-size: 13px; color: var(--green); text-align: center; margin: 6px 0 0; }
+
+/* Summary list after all codes saved */
+.auth-summary-list {
+  list-style: none; padding: 0; margin: 16px 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.auth-summary-list li {
+  font-size: 14px; color: var(--gray-700); padding: 8px 12px;
+  background: var(--gray-100); border-radius: var(--radius);
+}
+
+/* Email reminder step footer */
+.auth-reminder-footer {
+  display: flex; gap: 8px; justify-content: flex-end;
+}

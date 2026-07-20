@@ -103,39 +103,49 @@ pub fn run() {
                 default_hook(info);
             }));
 
-            // Fail-closed on any DB open error — including keychain unreachable
-            // (M1) or wrong-key (tampered / corrupted DEK). We would rather
-            // refuse to launch than silently fall back to an unencrypted DB and
-            // expose PHI. Log the failure before the panic so the on-disk log
-            // names the cause (e.g. "Storage error: ...") even on a GUI launch.
-            let pool = db::open_database(&app.handle()).unwrap_or_else(|e| {
-                let safe = log_safety::cap_len(&e.to_string());
-                log::error!("failed to open encrypted SQLite database: {safe}");
-                panic!("failed to open encrypted SQLite database: {safe}");
-            });
+            // When ADR 0004 auth is active AND already configured, the keychain
+            // DEK entry has been removed (by auth_set_password) and the DB can
+            // only be opened with the DEK unwrapped from the user's password.
+            // Defer opening to auth_unlock_password, which runs after the JS
+            // auth screen collects the password. When auth is not yet configured
+            // (first ever launch) or the flag is off, fall through to the
+            // existing keychain path so the app still works on those launches.
+            if !auth::AUTH_V1_ENABLED || !auth::is_auth_configured() {
+                // Fail-closed on any DB open error — including keychain unreachable
+                // (M1) or wrong-key (tampered / corrupted DEK). We would rather
+                // refuse to launch than silently fall back to an unencrypted DB and
+                // expose PHI. Log the failure before the panic so the on-disk log
+                // names the cause (e.g. "Storage error: ...") even on a GUI launch.
+                let pool = db::open_database(&app.handle()).unwrap_or_else(|e| {
+                    let safe = log_safety::cap_len(&e.to_string());
+                    log::error!("failed to open encrypted SQLite database: {safe}");
+                    panic!("failed to open encrypted SQLite database: {safe}");
+                });
 
-            // One-shot at-rest audio migration: encrypt any legacy plaintext
-            // `<id>.wav` files and rewrite their DB paths to `<id>.wav.enc`.
-            // Best-effort — a migration hiccup is logged but must not block
-            // launch (the DB is already open and the app is usable; a lingering
-            // plaintext is a leak we surface in the log, not a hard failure).
-            // Runs before we hand the pool to state so it borrows the pool
-            // directly. Idempotent/resumable — see audio_crypto.
-            match (|| -> Result<usize, errors::AppError> {
-                let conn = pool.get()?;
-                let audio_dir = app
-                    .path()
-                    .app_data_dir()
-                    .map_err(errors::AppError::internal_from)?
-                    .join("audio");
-                let key = audio_crypto::audio_key()?;
-                audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)
-            })() {
-                Ok(_) => {}
-                Err(e) => log::error!("audio at-rest migration skipped: {}", log_safety::cap_len(&e.to_string())),
+                // One-shot at-rest audio migration: encrypt any legacy plaintext
+                // `<id>.wav` files and rewrite their DB paths to `<id>.wav.enc`.
+                // Best-effort — a migration hiccup is logged but must not block
+                // launch (the DB is already open and the app is usable; a lingering
+                // plaintext is a leak we surface in the log, not a hard failure).
+                // Runs before we hand the pool to state so it borrows the pool
+                // directly. Idempotent/resumable — see audio_crypto.
+                match (|| -> Result<usize, errors::AppError> {
+                    let conn = pool.get()?;
+                    let audio_dir = app
+                        .path()
+                        .app_data_dir()
+                        .map_err(errors::AppError::internal_from)?
+                        .join("audio");
+                    let key = audio_crypto::audio_key()?;
+                    audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)
+                })() {
+                    Ok(_) => {}
+                    Err(e) => log::error!("audio at-rest migration skipped: {}", log_safety::cap_len(&e.to_string())),
+                }
+
+                app.manage(db::new_state(pool));
             }
-
-            app.manage(db::new_state(pool));
+            // else: auth IS configured — DbState is managed later by auth_unlock_password.
 
             // Content protection (audit finding: "no window content-protection
             // flag — screen sharing/recording/remote-desktop tools can capture
@@ -204,8 +214,10 @@ pub fn run() {
             notes::generate_note,
             export::export_note_to_file,
             export::export_note_pdf_to_file,
+            auth::auth_is_enabled,
             auth::auth_is_configured,
             auth::auth_set_password,
+            auth::auth_reset_with_recovery_code,
             auth::auth_unlock_password,
             auth::auth_unlock_recovery,
             auth::auth_change_password,

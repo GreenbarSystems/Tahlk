@@ -44,9 +44,8 @@
 //! ## Feature flag
 //!
 //! `AUTH_V1_ENABLED` gates whether the app enforces auth at startup.
-//! Stage 2 (this file): module built and tested; flag = `false`.
-//! Stage 3: JS screens wired, `db.rs` switched to call `unlock_with_password`
-//! before opening the DB, flag flipped to `true` in a single coordinated commit.
+//! Flag is now `true` (Stage 4): JS screens wired, `db.rs` opens the database
+//! via `open_database_with_dek` after the password is verified here.
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -61,9 +60,8 @@ use crate::errors::AppError;
 use crate::hex::{from_hex, to_hex};
 use crate::time::utc_now_iso;
 
-/// Feature flag for ADR 0004. Flip this to `true` in the Stage 3 commit that
-/// wires the JS auth screens and switches `db.rs` to use `unlock_with_password`.
-pub(crate) const AUTH_V1_ENABLED: bool = false;
+/// Feature flag for ADR 0004.
+pub(crate) const AUTH_V1_ENABLED: bool = true;
 
 /// OS keychain item name for the PBKDF2 password hash.
 /// Stored format: `"<iterations>:<salt_hex>:<hash_hex>"` (matches `lock.rs`).
@@ -666,8 +664,8 @@ pub(crate) fn generate_new_recovery_codes(
 /// configuration).
 ///
 /// If the old keychain delete fails the entry lingers, but no PHI is exposed:
-/// Stage 3 will switch `db.rs` to source the DEK from this module instead of
-/// `db_key`, at which point the orphaned entry is unreachable.
+/// `db.rs` now sources the DEK from this module instead of `db_key`, so the
+/// orphaned entry is unreachable in the normal auth path.
 pub(crate) fn migrate_from_plaintext_dek(
     plaintext_dek_hex: &str,
     password: &str,
@@ -725,9 +723,32 @@ pub(crate) fn nuke_and_reinstall(
     Ok(())
 }
 
+/// Forgot-password reset via a recovery code. Derives the DEK from `code`,
+/// then re-wraps it under `new_password` and 3 fresh recovery codes.
+/// All prior recovery rows are atomically replaced; the caller must surface
+/// the returned codes to the provider (re-run Screen C in the JS flow).
+pub(crate) fn reset_password_with_recovery_code(
+    code: &str,
+    new_password: &str,
+    wraps_db_path: &Path,
+) -> Result<[RecoveryCode; 3], AppError> {
+    let dek = unlock_with_recovery_code(code, wraps_db_path)?;
+    // set_password uses INSERT OR REPLACE, so this atomically overwrites all
+    // 4 rows (password + 3 recovery) and updates auth_password_hash.
+    set_password(new_password, &dek, wraps_db_path)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tauri commands
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns whether ADR 0004 auth enforcement is enabled in this build.
+/// When false, all other auth commands error and the JS startup flow skips
+/// the auth gate entirely — existing behavior is preserved.
+#[tauri::command]
+pub(crate) fn auth_is_enabled() -> bool {
+    AUTH_V1_ENABLED
+}
 
 /// Returns true only when `AUTH_V1_ENABLED` and auth has been configured.
 /// When false, the JS startup flow skips the password screen entirely.
@@ -738,7 +759,9 @@ pub(crate) fn auth_is_configured() -> bool {
 
 /// First-open or post-nuke setup: sets the master password and returns the
 /// three recovery codes (display strings) for the provider to store securely.
-/// All subsequent calls while auth is already configured return an error.
+/// Deletes the keychain DEK entry so that `db.rs::open_database` (which reads
+/// from the keychain) can no longer bypass the auth gate — the auth DEK in
+/// `tahlk_auth.db` becomes the only route to the database key.
 #[tauri::command]
 pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<String>, AppError> {
     if !AUTH_V1_ENABLED {
@@ -751,19 +774,58 @@ pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<
     dek.copy_from_slice(&dek_vec);
     let path = wraps_db_path(&app)?;
     let codes = set_password(&password, &dek, &path)?;
+
+    // Remove the keychain DEK so subsequent launches must go through the auth
+    // path. Best-effort: a delete failure leaves the keychain as a fallback
+    // but is logged; the wrapped copy is what guards forward security.
+    if let Ok(entry) = crate::keychain::entry(crate::db_key::KEYRING_USER) {
+        if let Err(e) = entry.delete_credential() {
+            log::warn!("auth_set_password: could not remove keychain DEK: {e}");
+        }
+    }
+
     Ok(codes.iter().map(|c| c.display()).collect())
 }
 
-/// Startup unlock via master password. The DEK is returned to Rust only and
-/// never surfaced to JS. Stage 3 will route it into `db::open_database`.
+/// Startup unlock via master password. Verifies the password, unwraps the DEK,
+/// opens `tahlk.db` with that key, runs post-open migrations, and registers
+/// the pool as `DbState`. After this command returns `Ok`, all DB-backed
+/// commands become available for the session.
 #[tauri::command]
 pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(), AppError> {
     if !AUTH_V1_ENABLED {
         return Err(AppError::invalid("auth_v1 is not enabled in this build"));
     }
     let path = wraps_db_path(&app)?;
-    let _dek = unlock_with_password(&password, &path)?;
-    // Stage 3: route _dek into the DB open path.
+    let dek = unlock_with_password(&password, &path)?;
+    let hex_key = to_hex(&dek);
+
+    let pool = crate::db::open_database_with_dek(&app, &hex_key).map_err(|e| {
+        log::error!(
+            "auth_unlock_password: failed to open database: {}",
+            crate::log_safety::cap_len(&e.to_string())
+        );
+        e
+    })?;
+
+    // Audio at-rest migration — same best-effort logic as lib.rs::setup().
+    if let Err(e) = (|| -> Result<usize, AppError> {
+        let conn = pool.get()?;
+        let audio_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(AppError::internal_from)?
+            .join("audio");
+        let key = crate::audio_crypto::audio_key()?;
+        crate::audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)
+    })() {
+        log::error!(
+            "audio at-rest migration skipped post-auth: {}",
+            crate::log_safety::cap_len(&e.to_string())
+        );
+    }
+
+    app.manage(crate::db::new_state(pool));
     Ok(())
 }
 
@@ -793,6 +855,23 @@ pub(crate) fn auth_change_password(
     }
     let path = wraps_db_path(&app)?;
     change_password(&old_password, &new_password, &path)
+}
+
+/// Forgot-password reset via a recovery code. Wraps the DEK under a new
+/// password; returns three new recovery code display strings. Old codes
+/// (including the two unused ones) are permanently replaced.
+#[tauri::command]
+pub(crate) fn auth_reset_with_recovery_code(
+    app: AppHandle,
+    code: String,
+    new_password: String,
+) -> Result<Vec<String>, AppError> {
+    if !AUTH_V1_ENABLED {
+        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
+    }
+    let path = wraps_db_path(&app)?;
+    let codes = reset_password_with_recovery_code(&code, &new_password, &path)?;
+    Ok(codes.iter().map(|c| c.display()).collect())
 }
 
 /// Regenerate all three recovery codes. Requires the current password.
