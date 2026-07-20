@@ -31,6 +31,7 @@ use tauri::Manager;
 
 mod audio;
 mod audio_crypto;
+mod auth;
 mod baa;
 mod db;
 mod db_key;
@@ -203,6 +204,13 @@ pub fn run() {
             notes::generate_note,
             export::export_note_to_file,
             export::export_note_pdf_to_file,
+            auth::auth_is_configured,
+            auth::auth_set_password,
+            auth::auth_unlock_password,
+            auth::auth_unlock_recovery,
+            auth::auth_change_password,
+            auth::auth_generate_recovery_codes,
+            auth::auth_nuke_and_reinstall,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
