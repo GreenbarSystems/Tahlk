@@ -800,3 +800,17 @@ a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-r
 .auth-reminder-footer {
   display: flex; gap: 8px; justify-content: flex-end;
 }
+
+/* Settings subsection header (narrower than h3, no top border) */
+.settings-sub-h {
+  font-size: 13px; font-weight: 600; color: var(--gray-700);
+  margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.settings-subsection { margin-top: 8px; }
+
+/* Regen codes modal — wider than auth-modal-card to fit the code display comfortably */
+.auth-regen-modal-card {
+  background: var(--white); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md); padding: 32px 36px 28px;
+  width: 100%; max-width: 560px;
+}

@@ -13,6 +13,8 @@ import { verifyAllChains } from '../domain/historyChain.js';
 import { checkLlmAuditDrift, describeDrift } from '../domain/llmAuditDrift.js';
 import { iconCheck } from './icons.js';
 import { lockRepo } from '../data/lockRepo.js';
+import { authRepo } from '../data/authRepo.js';
+import { showRegenCodesFlow } from './authScreen.js';
 import {
   DEFAULT_TIMEOUT_MINUTES,
   isLockEnabled,
@@ -51,6 +53,7 @@ export async function renderSettings() {
   const pinSet = await lockRepo.isPinSet().catch(() => false);
   const lockOn = isLockEnabled();
   const lockTimeout = getLockTimeoutMinutes();
+  const authEnabled = await authRepo.isEnabled().catch(() => false);
 
   return `
     <div class="settings-page">
@@ -114,6 +117,51 @@ export async function renderSettings() {
         </div>
         <p class="settings-desc">Default: ${DEFAULT_TIMEOUT_MINUTES} minutes.</p>
       </section>
+
+      ${authEnabled ? `
+      <section class="settings-section">
+        <h3>Account security</h3>
+        <p class="settings-desc">
+          Your Tahlk password protects access to this device's patient records.
+          <span class="baa-status-pill baa-status-pill--ok" style="margin-left:8px">Password set</span>
+        </p>
+
+        <div class="settings-subsection">
+          <h4 class="settings-sub-h">Change password</h4>
+          <div class="field-row">
+            <label for="s-auth-old-pw">Current password</label>
+            <input id="s-auth-old-pw" type="password" autocomplete="current-password" />
+          </div>
+          <div class="field-row">
+            <label for="s-auth-new-pw">New password</label>
+            <input id="s-auth-new-pw" type="password" autocomplete="new-password" />
+            <div class="auth-strength-row" id="s-auth-strength-row" hidden>
+              <div class="auth-strength-bar">
+                <div class="auth-strength-fill" id="s-auth-strength-fill"></div>
+              </div>
+              <span class="auth-strength-label" id="s-auth-strength-label"></span>
+            </div>
+          </div>
+          <div class="field-row">
+            <label for="s-auth-new-pw2">Confirm new password</label>
+            <input id="s-auth-new-pw2" type="password" autocomplete="new-password" />
+          </div>
+          <p class="auth-error" id="s-auth-pw-error" hidden></p>
+          <button class="btn btn-secondary" id="s-auth-change-pw">Change password</button>
+        </div>
+
+        <div class="settings-subsection" style="margin-top:16px">
+          <h4 class="settings-sub-h">Recovery codes</h4>
+          <p class="settings-desc">
+            Any of your three recovery codes restores access to your records if you forget
+            your password. Regenerating replaces all three immediately — old codes stop working.
+          </p>
+          <button class="btn btn-secondary" id="s-auth-regen-codes">
+            Regenerate recovery codes…
+          </button>
+        </div>
+      </section>
+      ` : ''}
 
       <section class="settings-section">
         <h3>AI note generation</h3>
@@ -325,7 +373,77 @@ function wireAsyncActionButton({ id, resultId, busyLabel, idleLabel, failPrefix,
   });
 }
 
+const STRENGTH_LABELS = ['', 'Weak', 'Fair', 'Good', 'Strong'];
+const STRENGTH_COLORS = ['', 'var(--danger)', 'var(--warn)', 'var(--teal)', 'var(--green)'];
+const AUTH_PASSWORD_MIN_LEN = 12;
+
+function settingsPasswordStrength(pw) {
+  if (!pw || pw.length < 4) return 0;
+  let s = 0;
+  if (pw.length >= AUTH_PASSWORD_MIN_LEN) s++;
+  if (pw.length >= 20) s++;
+  if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) s++;
+  if (/\d/.test(pw)) s++;
+  if (/[^A-Za-z0-9]/.test(pw)) s++;
+  return Math.min(s, 4);
+}
+
 export function wireSettings() {
+  // ── Account security ────────────────────────────────────────────────────────
+
+  const newPwInput = document.getElementById('s-auth-new-pw');
+  if (newPwInput) {
+    newPwInput.addEventListener('input', () => {
+      const s = settingsPasswordStrength(newPwInput.value);
+      const row = document.getElementById('s-auth-strength-row');
+      const fill = document.getElementById('s-auth-strength-fill');
+      const label = document.getElementById('s-auth-strength-label');
+      if (row) row.hidden = !newPwInput.value;
+      if (fill) { fill.style.width = `${s * 25}%`; fill.style.background = STRENGTH_COLORS[s] || ''; }
+      if (label) { label.textContent = STRENGTH_LABELS[s] || ''; label.style.color = STRENGTH_COLORS[s] || ''; }
+    });
+  }
+
+  document.getElementById('s-auth-change-pw')?.addEventListener('click', async () => {
+    const oldPw = document.getElementById('s-auth-old-pw')?.value || '';
+    const newPw = document.getElementById('s-auth-new-pw')?.value || '';
+    const newPw2 = document.getElementById('s-auth-new-pw2')?.value || '';
+    const errorEl = document.getElementById('s-auth-pw-error');
+    const btn = document.getElementById('s-auth-change-pw');
+
+    function showErr(msg) { if (errorEl) { errorEl.textContent = msg; errorEl.hidden = false; } }
+    if (errorEl) errorEl.hidden = true;
+
+    if (!oldPw) { showErr('Enter your current password.'); return; }
+    if (!newPw) { showErr('Enter a new password.'); return; }
+    if (newPw.length < AUTH_PASSWORD_MIN_LEN) {
+      showErr(`New password must be at least ${AUTH_PASSWORD_MIN_LEN} characters.`); return;
+    }
+    if (newPw !== newPw2) { showErr('New passwords do not match.'); return; }
+
+    btn.disabled = true;
+    try {
+      await authRepo.changePassword(oldPw, newPw);
+      for (const id of ['s-auth-old-pw', 's-auth-new-pw', 's-auth-new-pw2']) {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      }
+      const row = document.getElementById('s-auth-strength-row');
+      if (row) row.hidden = true;
+      toast('Password changed.');
+    } catch (err) {
+      showErr(userMessage(err, 'Could not change password. Check your current password and try again.'));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('s-auth-regen-codes')?.addEventListener('click', () => {
+    showRegenCodesFlow();
+  });
+
+  // ── Provider profile ────────────────────────────────────────────────────────
+
   document.getElementById('s-save-provider')?.addEventListener('click', () => {
     const profile = {
       name:        document.getElementById('s-name')?.value.trim() || '',

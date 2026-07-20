@@ -1,11 +1,16 @@
 // ADR 0004 auth screens — shown before the app shell renders at every process start.
 //
 // Exports:
-//   showSignInScreen(onUnlocked)       — subsequent opens: password prompt + lockout.
+//   showSignInScreen(onUnlocked)        — subsequent opens: password prompt + lockout.
 //   runFirstOpenAuth(appEl, onComplete) — first-open: Screens A → C → D.
+//   showMigrationInterstitial(appEl, onContinue) — one-time explainer for existing
+//       users upgrading from a pre-auth install; call before runFirstOpenAuth.
+//   showRegenCodesFlow()               — modal flow for settings: verify password,
+//       then display three new recovery codes one at a time.
 //
-// Both render into a caller-supplied element (typically #app). The screen is
-// cleared and replaced by the normal app flow once auth passes.
+// Sign-in and first-open both render into a caller-supplied element (#app).
+// showRegenCodesFlow appends its own modal to <body> so the settings page stays
+// mounted underneath.
 //
 // Failed-attempt lockout mirrors lockScreen.js: 5 tries → 30s cooldown,
 // doubling each time the threshold is crossed again.
@@ -603,4 +608,182 @@ function renderEmailReminderScreen(appEl, codes, onComplete) {
     a.click();
     onComplete();
   });
+}
+
+// ─── Migration interstitial ───────────────────────────────────────────────────
+
+// One-time screen shown to existing users who have data but haven't set a
+// password yet (i.e. they're upgrading from a pre-ADR-0004 install). Renders
+// into `appEl` (#app) and calls `onContinue` when they dismiss it; the caller
+// should then run `runFirstOpenAuth`.
+//
+// Brand-new users don't see this — the "Step 1 of 3" heading in Screen A is
+// enough context for someone who has never had the app open before.
+export function showMigrationInterstitial(appEl, onContinue) {
+  appEl.innerHTML = `
+    <div class="onboarding-backdrop">
+      <div class="onboarding-card">
+        <div class="auth-icon" aria-hidden="true">🔐</div>
+        <h1 class="onboarding-title">Your records now need a password.</h1>
+        <p class="onboarding-sub">
+          Tahlk now requires a password before it opens. This protects your patient
+          records if someone else opens your laptop.
+        </p>
+        <p class="onboarding-sub">
+          This takes about 30 seconds to set up and doesn't affect any of your
+          existing notes, recordings, or patient records.
+        </p>
+        <div class="onboarding-footer">
+          <button class="btn btn-primary btn-lg" id="auth-migration-go">
+            Set up my password →
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  appEl.querySelector('#auth-migration-go').addEventListener('click', onContinue);
+}
+
+// ─── Settings: regenerate recovery codes ─────────────────────────────────────
+
+// Two-phase modal flow suitable for use from the Settings page (the app shell
+// stays mounted underneath since this appends to <body>):
+//   Phase 1 — verify current password
+//   Phase 2 — display each new code one at a time with copy / download
+export function showRegenCodesFlow() {
+  const modal = createModal({ closeOnEscape: false, closeOnBackdrop: false });
+  const { card } = modal;
+  card.className = 'auth-regen-modal-card';
+  renderRegenPasswordStep(card, modal);
+  modal.open();
+}
+
+function renderRegenPasswordStep(card, modal) {
+  card.innerHTML = `
+    <h2 class="auth-modal-title">Regenerate recovery codes</h2>
+    <p class="auth-sub">
+      Your three current recovery codes will be immediately and permanently
+      invalidated. Enter your password to continue.
+    </p>
+    <form id="auth-regen-form" autocomplete="off">
+      <div class="field-row">
+        <label for="auth-regen-pw">Current password</label>
+        <input id="auth-regen-pw" type="password" autocomplete="current-password" />
+      </div>
+      <p class="auth-error" id="auth-regen-error" hidden></p>
+      <div class="auth-modal-actions">
+        <button type="button" class="btn btn-secondary" id="auth-regen-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="auth-regen-submit">Regenerate</button>
+      </div>
+    </form>
+  `;
+
+  card.querySelector('#auth-regen-cancel').addEventListener('click', () => modal.close());
+
+  const form = card.querySelector('#auth-regen-form');
+  form.addEventListener('submit', async e => {
+    e.preventDefault?.();
+    const pw = card.querySelector('#auth-regen-pw').value;
+    const errorEl = card.querySelector('#auth-regen-error');
+    const submitBtn = card.querySelector('#auth-regen-submit');
+    if (!pw) { errorEl.textContent = 'Enter your password.'; errorEl.hidden = false; return; }
+
+    submitBtn.disabled = true;
+    errorEl.hidden = true;
+    try {
+      const newCodes = await authRepo.generateRecoveryCodes(pw);
+      renderRegenCodesStep(card, modal, newCodes);
+    } catch (err) {
+      errorEl.textContent = userMessage(err, 'Incorrect password or could not regenerate codes.');
+      errorEl.hidden = false;
+      submitBtn.disabled = false;
+    }
+  });
+
+  card.querySelector('#auth-regen-pw').focus?.();
+}
+
+function renderRegenCodesStep(card, modal, codes) {
+  let idx = 0;
+
+  function renderOne() {
+    if (idx >= codes.length) {
+      card.innerHTML = `
+        <h2 class="auth-modal-title">All new codes saved.</h2>
+        <p class="auth-sub">
+          Your three old recovery codes are permanently gone. Keep your new codes
+          in separate safe locations — any one of them recovers access to your records.
+        </p>
+        <ul class="auth-summary-list">
+          ${codes.map((_, i) => `<li>Recovery code ${i + 1} — saved ✓</li>`).join('')}
+        </ul>
+        <div class="auth-modal-actions">
+          <button class="btn btn-primary" id="auth-regen-done">Done</button>
+        </div>
+      `;
+      card.querySelector('#auth-regen-done').addEventListener('click', () => modal.close());
+      return;
+    }
+
+    const code = codes[idx];
+    const isLast = idx === codes.length - 1;
+
+    card.innerHTML = `
+      <h2 class="auth-modal-title">New code ${idx + 1} of ${codes.length}</h2>
+      <p class="auth-sub">Save this code before continuing. Your old codes are already invalidated.</p>
+      <div class="auth-code-box">
+        <code class="auth-code-display" aria-label="Recovery code ${idx + 1}">
+          ${escapeHtml(code)}
+        </code>
+      </div>
+      <div class="auth-code-actions">
+        <button class="btn btn-secondary" id="auth-regen-copy">Copy to clipboard</button>
+        <button class="btn btn-secondary" id="auth-regen-dl">Download as text</button>
+      </div>
+      <p class="auth-code-hint" id="auth-regen-hint" hidden>✓ Saved — you can continue.</p>
+      <p class="auth-error" id="auth-regen-err" hidden></p>
+      <div class="auth-modal-actions">
+        <button class="btn btn-primary" id="auth-regen-next" disabled>
+          ${isLast ? "I've saved all three codes →" : 'Next code →'}
+        </button>
+      </div>
+    `;
+
+    const nextBtn = card.querySelector('#auth-regen-next');
+    const hintEl = card.querySelector('#auth-regen-hint');
+    const errEl = card.querySelector('#auth-regen-err');
+
+    function markSaved() {
+      nextBtn.disabled = false;
+      hintEl.hidden = false;
+    }
+
+    card.querySelector('#auth-regen-copy').addEventListener('click', async () => {
+      try { await clipboardWriteText(code); }
+      catch { errEl.textContent = 'Could not copy — select the code above and copy manually.'; errEl.hidden = false; }
+      markSaved();
+    });
+
+    card.querySelector('#auth-regen-dl').addEventListener('click', () => {
+      const text = [
+        `Tahlk Recovery Code ${idx + 1} of ${codes.length}`,
+        '',
+        code,
+        '',
+        'Any one of your three codes recovers access to your Tahlk records.',
+      ].join('\n');
+      const blob = new Blob([text], { type: 'text/plain' });
+      const a = Object.assign(document.createElement('a'), {
+        href: URL.createObjectURL(blob),
+        download: `tahlk-recovery-code-${idx + 1}.txt`,
+      });
+      a.click();
+      URL.revokeObjectURL(a.href);
+      markSaved();
+    });
+
+    nextBtn.addEventListener('click', () => { idx++; renderOne(); });
+  }
+
+  renderOne();
 }

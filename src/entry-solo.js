@@ -14,7 +14,7 @@ import { startIdleWatcher } from './core/idleLock.js';
 import { showLockScreen } from './solo/lockScreen.js';
 import * as telemetry from './core/telemetry.js';
 import { authRepo } from './data/authRepo.js';
-import { showSignInScreen, runFirstOpenAuth } from './solo/authScreen.js';
+import { showSignInScreen, runFirstOpenAuth, showMigrationInterstitial } from './solo/authScreen.js';
 import { isOnboarded, renderOnboarding, wireOnboarding } from './solo/onboarding.js';
 import { renderHeader, wireHeaderNav } from './solo/soloHeader.js';
 import { renderHomeScreen, wireHomeScreen } from './solo/homeScreen.js';
@@ -78,6 +78,11 @@ async function bootstrap() {
     const authConfigured = await authRepo.isConfigured();
     const app = document.getElementById('app');
     if (!authConfigured) {
+      // If the user already has data (i.e. they onboarded before auth existed),
+      // show a one-time explainer before dropping them into the password-setup flow.
+      if (isOnboarded()) {
+        await new Promise(resolve => showMigrationInterstitial(app, resolve));
+      }
       await runFirstOpenAuth(app, () => {});
     } else {
       await new Promise(resolve => showSignInScreen(resolve));
