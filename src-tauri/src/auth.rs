@@ -1348,7 +1348,7 @@ mod tests {
                     .optional()
                     .unwrap();
                 if let Some(h) = hex {
-                    if let Ok(recovered) = from_hex(&h)
+                    if let Some(recovered) = from_hex(&h)
                         .and_then(|w| unwrap_dek(&kek, &w).ok())
                     {
                         assert_eq!(recovered, dek);
