@@ -63,8 +63,10 @@ pub(crate) fn litigation_hold_is_active(conn: &Connection) -> Result<bool, AppEr
 /// caller to skip it.
 pub(crate) fn litigation_hold_check(conn: &Connection, subject: &str) -> Result<(), AppError> {
     if litigation_hold_is_active(conn)? {
-        return Err(AppError::invalid(format!(
-            "litigation hold is active — {subject} cannot be deleted until the hold is lifted"
+        // Precondition, not a frontend bug: the provider set this hold and
+        // needs to be told it is why the deletion refused.
+        return Err(AppError::precondition(format!(
+            "Litigation hold is active — {subject} cannot be deleted until the hold is lifted."
         )));
     }
     Ok(())
@@ -109,18 +111,45 @@ fn retention_years(conn: &Connection) -> i64 {
     .clamp(MIN_RETENTION_YEARS, MAX_RETENTION_YEARS)
 }
 
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
 /// Compute the retention cutoff date by subtracting `years` from `today`.
 ///
 /// `today` must be in `YYYY-MM-DD` format (the same format used for
 /// `encounters.encounter_date`). ISO date strings sort lexicographically, so
 /// `encounter_date < cutoff` gives the correct "older than N years" filter.
+///
+/// Feb 29 is the one case plain year subtraction gets wrong. The original
+/// implementation copied `-MM-DD` verbatim, so on 2028-02-29 with the default
+/// 7-year window it produced `"2021-02-29"` — a date that does not exist.
+/// Lexicographic comparison then treats `"2021-02-28" < "2021-02-29"` as true,
+/// so a record dated 2021-02-28 was destroyed after 6 years and 364 days:
+/// one day EARLY. With the default window that fires on every Feb 29, since
+/// 2028→2021, 2032→2025 and 2036→2029 are all non-leap.
+///
+/// Rolls FORWARD to Mar 1 rather than back to Feb 28, so the residual error is
+/// one day of over-retention. Retaining a record slightly too long is a
+/// recoverable policy deviation; destroying one early is not.
 fn cutoff_date(today: &str, years: i64) -> Option<String> {
-    if today.len() < 10 {
+    // `get` rather than direct slicing: a multi-byte character would make
+    // byte-index slicing panic, and this parses caller-adjacent data.
+    let year: i64 = today.get(0..4)?.parse().ok()?;
+    let month: u32 = today.get(5..7)?.parse().ok()?;
+    let day: u32 = today.get(8..10)?.parse().ok()?;
+    if today.get(4..5) != Some("-") || today.get(7..8) != Some("-") {
         return None;
     }
-    let year: i64 = today[..4].parse().ok()?;
-    let rest = &today[4..10]; // "-MM-DD"
-    Some(format!("{:04}{}", year - years, rest))
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let target = year - years;
+    if month == 2 && day == 29 && !is_leap_year(target) {
+        return Some(format!("{target:04}-03-01"));
+    }
+    Some(format!("{target:04}-{month:02}-{day:02}"))
 }
 
 /// Read the configured record-retention window. Defaults to 7 years when the
@@ -371,6 +400,42 @@ mod tests {
         assert!(cutoff_date("bad", 7).is_none());
         assert!(cutoff_date("", 7).is_none());
         assert!(cutoff_date("26-07", 7).is_none()); // too short
+        assert!(cutoff_date("2026/07/20", 7).is_none(), "wrong separators");
+        assert!(cutoff_date("2026-13-01", 7).is_none(), "month out of range");
+        assert!(cutoff_date("2026-07-00", 7).is_none(), "day out of range");
+    }
+
+    #[test]
+    fn a_leap_day_cutoff_rolls_forward_never_back() {
+        // 2028-02-29 minus 7 years is not a real date. The old code emitted
+        // "2021-02-29", and since ISO dates compare lexicographically that
+        // made "2021-02-28" eligible — destroying a record one day early.
+        assert_eq!(cutoff_date("2028-02-29", 7), Some("2021-03-01".to_string()));
+        assert_eq!(cutoff_date("2028-02-29", 1), Some("2027-03-01".to_string()));
+        assert_eq!(cutoff_date("2028-02-29", 3), Some("2025-03-01".to_string()));
+
+        // The record the bug would have destroyed early must now survive:
+        // it is NOT strictly less than the corrected cutoff... and one dated
+        // the day before still is, which is correct.
+        let cutoff = cutoff_date("2028-02-29", 7).unwrap();
+        assert!("2021-03-01".to_string() >= cutoff, "boundary day is retained");
+        assert!("2021-02-28".to_string() < cutoff, "genuinely older records still expire");
+    }
+
+    #[test]
+    fn a_leap_day_landing_on_a_leap_year_is_preserved_exactly() {
+        // 2028 and 2024 are both leap years, so Feb 29 is real on both ends
+        // and no adjustment should happen.
+        assert_eq!(cutoff_date("2028-02-29", 4), Some("2024-02-29".to_string()));
+        assert_eq!(cutoff_date("2028-02-29", 8), Some("2020-02-29".to_string()));
+    }
+
+    #[test]
+    fn leap_year_rule_handles_century_boundaries() {
+        assert!(is_leap_year(2024));
+        assert!(is_leap_year(2000), "divisible by 400");
+        assert!(!is_leap_year(1900), "divisible by 100 but not 400");
+        assert!(!is_leap_year(2023));
     }
 
     // ── Retention window clamping (C-4) ─────────────────────────────────

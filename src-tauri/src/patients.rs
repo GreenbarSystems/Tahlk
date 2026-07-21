@@ -343,8 +343,8 @@ mod tests {
         set_hold(&conn, true);
 
         let err = delete_patient_conn(&mut conn, "pt-1", "Dr. Chen").unwrap_err();
-        assert!(matches!(err, AppError::InvalidInput(_)));
-        assert!(format!("{err}").contains("litigation hold"));
+        assert!(matches!(err, AppError::PreconditionFailed(_)));
+        assert!(format!("{err}").to_lowercase().contains("litigation hold"));
         assert!(
             get_patient_conn(&conn, "pt-1").unwrap().is_some(),
             "a blocked delete must leave the roster row intact"

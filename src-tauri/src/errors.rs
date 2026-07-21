@@ -41,6 +41,18 @@ pub enum AppError {
     /// KV secret namespace, missing field). Never surfaced verbatim to end
     /// users — it means the frontend violated an invariant and is a bug.
     InvalidInput(String),
+    /// A rule the PROVIDER needs to know about refused the operation: a
+    /// litigation hold blocking a deletion, an already-signed encounter
+    /// refusing a re-sign, a signed note refusing a content overwrite.
+    ///
+    /// Distinct from `InvalidInput` because the JS side must treat the two
+    /// oppositely. `InvalidInput` means the frontend has a bug and its text is
+    /// meaningless to a clinician, so `userMessage` deliberately swallows it.
+    /// That swallowing was applied to these messages too, so a provider blocked
+    /// by a legal hold saw "Delete failed: unknown error" — the app knew
+    /// exactly why and declined to say. This variant's message IS the
+    /// explanation and is safe to show verbatim.
+    PreconditionFailed(String),
     /// SQLite or filesystem I/O failure.
     Storage(String),
     /// Anything else — includes serde failures, bugs, and unknown OS errors.
@@ -60,6 +72,7 @@ impl AppError {
             AppError::UpstreamEmpty   => "upstream_empty",
             AppError::Transcription(_)=> "transcription",
             AppError::InvalidInput(_) => "invalid_input",
+            AppError::PreconditionFailed(_) => "precondition_failed",
             AppError::Storage(_)      => "storage",
             AppError::Internal(_)     => "internal",
         }
@@ -76,6 +89,8 @@ impl AppError {
             AppError::UpstreamEmpty   => "Anthropic returned an empty response.".into(),
             AppError::Transcription(m)=> format!("Transcription failed: {}", m),
             AppError::InvalidInput(m) => format!("Invalid input: {}", m),
+            // No prefix: this string is shown to the provider as-is.
+            AppError::PreconditionFailed(m) => m.clone(),
             AppError::Storage(m)      => format!("Storage error: {}", m),
             AppError::Internal(m)     => format!("Internal error: {}", m),
         }
@@ -107,6 +122,9 @@ impl AppError {
     pub(crate) fn storage_from<E: fmt::Display>(e: E)  -> Self { AppError::Storage(e.to_string()) }
     pub(crate) fn internal_from<E: fmt::Display>(e: E) -> Self { AppError::Internal(e.to_string()) }
     pub(crate) fn invalid<S: Into<String>>(m: S)       -> Self { AppError::InvalidInput(m.into()) }
+    /// For rules the provider needs explained. The message is shown verbatim,
+    /// so write it for a clinician, not for a log.
+    pub(crate) fn precondition<S: Into<String>>(m: S)  -> Self { AppError::PreconditionFailed(m.into()) }
 }
 
 // Convenience: rusqlite errors always map to Storage (they're all disk/DB).

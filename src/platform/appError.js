@@ -87,6 +87,15 @@ export function userMessage(err, fallback = 'Something went wrong.') {
     case 'invalid_input':
       // The frontend violated an invariant — never blame the user for this.
       return fallback;
+    case 'precondition_failed':
+      // A rule the provider needs explained: a litigation hold blocking a
+      // deletion, a signed note refusing an edit. Rust writes these strings
+      // for a clinician, so show them verbatim.
+      //
+      // These used to arrive as `invalid_input` and hit the branch above, so
+      // a provider stopped by a legal hold saw "Delete failed: unknown error"
+      // — the app knew precisely why and declined to say.
+      return e.message && e.message !== e.code ? e.message : fallback;
     case 'storage':
       return 'Could not read or write local data.';
     case 'internal':

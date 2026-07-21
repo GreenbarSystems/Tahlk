@@ -82,8 +82,8 @@ pub(crate) fn enforce_signed_immutability(
         && want_audio_path.map(str::to_string) == audio_path;
 
     if !unchanged {
-        return Err(AppError::invalid(
-            "cannot modify a signed encounter (only patient_alias may change)",
+        return Err(AppError::precondition(
+            "This note is signed and locked. Only the patient alias can still be corrected.",
         ));
     }
     Ok(())
@@ -179,8 +179,8 @@ pub(crate) fn mark_signed(
             )
             .optional()?;
         return match existing {
-            Some(_) => Err(AppError::invalid(format!(
-                "cannot re-sign encounter {id}: already signed"
+            Some(_) => Err(AppError::precondition(format!(
+                "This note is already signed. Signing again would replace the original attestation ({id})."
             ))),
             None => Err(AppError::invalid(format!("encounter {id} not found"))),
         };
@@ -610,8 +610,8 @@ fn upsert_encounter_row(
         // immutability SELECT and this UPDATE. Report it rather than
         // silently dropping the write so the caller can reload the row and
         // decide how to proceed.
-        return Err(AppError::invalid(
-            "encounter was signed by a concurrent request; reload and retry",
+        return Err(AppError::precondition(
+            "This note was signed while you were editing it. Reload the encounter to see the signed version.",
         ));
     }
     Ok(())
@@ -711,7 +711,10 @@ mod tests {
             .unwrap_err();
         // Same variant enforce_signed_immutability uses, so JS handles an
         // "already signed" conflict identically across both sign-off paths.
-        assert!(matches!(err, AppError::InvalidInput(_)));
+        // PreconditionFailed rather than InvalidInput: a provider clicking
+        // Sign twice is not a frontend bug, and the message explaining why it
+        // refused is safe — and useful — to show them.
+        assert!(matches!(err, AppError::PreconditionFailed(_)));
 
         let after = signed_meta(&conn, "enc-1");
         assert_eq!(before, after, "rejected re-sign must not mutate the row");
@@ -780,10 +783,9 @@ mod tests {
             "signed_hash": null
         });
         let err = enforce_signed_immutability(&conn, &incoming).unwrap_err();
-        // The wire code stays `invalid_input` (per AppError::invalid) so JS
-        // can toast the message unchanged. Assert the variant directly since
-        // `code()` is private to the errors module.
-        assert!(matches!(err, AppError::InvalidInput(_)));
+        // Wire code is `precondition_failed`, which JS shows verbatim. Assert
+        // the variant directly since `code()` is private to the errors module.
+        assert!(matches!(err, AppError::PreconditionFailed(_)));
     }
 
     #[test]
@@ -913,7 +915,7 @@ mod tests {
             None,
         );
         assert!(result.is_err(), "conflicting write to a signed row must be rejected");
-        assert!(matches!(result.unwrap_err(), AppError::InvalidInput(_)));
+        assert!(matches!(result.unwrap_err(), AppError::PreconditionFailed(_)));
         // Original sign-off metadata must remain untouched.
         let (signed_at, signed_hash): (String, String) = conn
             .query_row(
@@ -1252,8 +1254,10 @@ mod tests {
 
         let err = delete_encounter_in_tx(&conn, "enc-1", "test-provider", "patient_request")
             .unwrap_err();
-        assert!(matches!(err, AppError::InvalidInput(_)));
-        assert!(format!("{err}").contains("litigation hold"));
+        // PreconditionFailed, not InvalidInput: the provider set this hold and
+        // must be told it is the reason, so the message is shown verbatim.
+        assert!(matches!(err, AppError::PreconditionFailed(_)));
+        assert!(format!("{err}").to_lowercase().contains("litigation hold"));
         assert!(
             get_encounter_conn(&conn, "enc-1").unwrap().is_some(),
             "a blocked destruction must leave the record intact"
@@ -1269,7 +1273,7 @@ mod tests {
 
         let err = delete_encounter_row(&mut conn, "enc-1", "test-provider", "provider_request")
             .unwrap_err();
-        assert!(format!("{err}").contains("litigation hold"));
+        assert!(format!("{err}").to_lowercase().contains("litigation hold"));
         assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_some());
         assert_eq!(
             kv_count(&conn),

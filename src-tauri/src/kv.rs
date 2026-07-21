@@ -144,8 +144,8 @@ fn block_if_encounter_signed(
         )
         .optional()?;
     if status.as_deref() == Some("signed") {
-        return Err(AppError::invalid(
-            "cannot overwrite note content of a signed encounter",
+        return Err(AppError::precondition(
+            "This note is signed and locked — its content can no longer be changed.",
         ));
     }
     Ok(())
