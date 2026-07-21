@@ -82,11 +82,41 @@ fn provider_id_from_kv(conn: &Connection) -> String {
     .unwrap_or_else(|| "provider".to_string())
 }
 
-const KV_RETENTION_YEARS: &str = "note_settings_v1::retention_years";
-const KV_LITIGATION_HOLD: &str = "note_settings_v1::litigation_hold";
+// pub(crate) so `secrets::WRITE_ONLY_PROTECTED_KEYS` can name them directly
+// rather than repeating the literals — the guard and the reader must never
+// drift apart. Both are write-blocked on the generic KV API: they gate PHI
+// destruction, and the dedicated commands below are the only sanctioned
+// write path (they validate, and they write a config_audit row).
+pub(crate) const KV_RETENTION_YEARS: &str = "note_settings_v1::retention_years";
+pub(crate) const KV_LITIGATION_HOLD: &str = "note_settings_v1::litigation_hold";
 const DEFAULT_RETENTION_YEARS: i64 = 7;
 const MIN_RETENTION_YEARS: i64 = 1;
 const MAX_RETENTION_YEARS: i64 = 30;
+
+/// The configured retention window, always clamped to [MIN, MAX].
+///
+/// The single reader for this value. `retention_set_years` validates its input
+/// against 1..=30, but that guard only covers the sanctioned write path —
+/// `retention_get_years` clamped on read while `retention_list_candidates` and
+/// `retention_destroy_eligible` parsed the raw row with no clamp at all. A
+/// value written around the command (previously possible via generic `kv_set`,
+/// now blocked; still possible via direct DB access) therefore reached the
+/// destroy path unbounded: `"0"` yields a cutoff of today and makes every
+/// signed encounter eligible for destruction.
+///
+/// Clamping on READ rather than trusting the write path means the invariant
+/// holds regardless of how the row got there.
+fn retention_years(conn: &Connection) -> i64 {
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = ?1",
+        params![KV_RETENTION_YEARS],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse::<i64>().ok())
+    .unwrap_or(DEFAULT_RETENTION_YEARS)
+    .clamp(MIN_RETENTION_YEARS, MAX_RETENTION_YEARS)
+}
 
 /// Compute the retention cutoff date by subtracting `years` from `today`.
 ///
@@ -107,17 +137,7 @@ fn cutoff_date(today: &str, years: i64) -> Option<String> {
 #[tauri::command]
 pub(crate) fn retention_get_years(state: State<'_, DbState>) -> Result<i64, AppError> {
     let conn = state.0.get()?;
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_RETENTION_YEARS],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(raw
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(DEFAULT_RETENTION_YEARS)
-        .clamp(MIN_RETENTION_YEARS, MAX_RETENTION_YEARS))
+    Ok(retention_years(&conn))
 }
 
 /// Set the record-retention window in years. Accepted range: 1–30.
@@ -210,15 +230,7 @@ pub(crate) fn retention_list_candidates(
         return Ok(vec![]);
     }
 
-    let years: i64 = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_RETENTION_YEARS],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_RETENTION_YEARS);
+    let years = retention_years(&conn);
 
     let today_iso = crate::time::utc_now_iso();
     let cutoff = cutoff_date(&today_iso[..10], years)
@@ -277,19 +289,24 @@ pub(crate) async fn retention_destroy_eligible(
 
     let provider_id = provider_id_from_kv(&conn);
 
-    let years: i64 = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_RETENTION_YEARS],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_RETENTION_YEARS);
+    let years = retention_years(&conn);
 
     let today_iso = crate::time::utc_now_iso();
-    let cutoff = cutoff_date(&today_iso[..10], years)
+    let today = &today_iso[..10];
+    let cutoff = cutoff_date(today, years)
         .ok_or_else(|| AppError::invalid("internal: utc_now_iso did not produce YYYY-MM-DD"))?;
+
+    // Last line of defence before an irreversible batch delete. `years` is
+    // clamped to >= 1 so a cutoff at or after today should be unreachable — if
+    // it happens anyway, the window is nonsensical and destroying against it
+    // would sweep records that are nowhere near expiry. Refuse rather than
+    // proceed; ISO dates compare lexicographically.
+    if cutoff.as_str() >= today {
+        return Err(AppError::invalid(format!(
+            "refusing to destroy: computed retention cutoff {cutoff} is not in the past \
+             (today {today}, window {years}y) — retention policy looks corrupt"
+        )));
+    }
 
     let ids: Vec<String> = {
         let mut stmt = conn.prepare(
@@ -354,5 +371,77 @@ mod tests {
         assert!(cutoff_date("bad", 7).is_none());
         assert!(cutoff_date("", 7).is_none());
         assert!(cutoff_date("26-07", 7).is_none()); // too short
+    }
+
+    // ── Retention window clamping (C-4) ─────────────────────────────────
+    //
+    // retention_set_years validates 1..=30, but that only covers the
+    // sanctioned write path. The destroy path used to parse the raw kv row
+    // with no clamp, so a value written around the command reached it
+    // unbounded — "0" produces a cutoff of today and makes every signed
+    // encounter eligible. Clamping on READ makes the invariant hold no matter
+    // how the row got there.
+
+    fn kv_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn seed_years(conn: &Connection, raw: &str) {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+            params![KV_RETENTION_YEARS, raw],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_zero_retention_window_cannot_reach_the_destroy_path() {
+        // The exact value the kv_set chain used to plant.
+        let conn = kv_db();
+        seed_years(&conn, "0");
+        assert_eq!(
+            retention_years(&conn),
+            MIN_RETENTION_YEARS,
+            "0 must clamp to the minimum, not yield a cutoff of today"
+        );
+        // And the resulting cutoff is genuinely in the past.
+        let cutoff = cutoff_date("2026-07-20", retention_years(&conn)).unwrap();
+        assert!(cutoff.as_str() < "2026-07-20");
+    }
+
+    #[test]
+    fn out_of_range_and_malformed_windows_are_clamped_or_defaulted() {
+        let conn = kv_db();
+
+        seed_years(&conn, "-5");
+        assert_eq!(retention_years(&conn), MIN_RETENTION_YEARS, "negative clamps up");
+
+        seed_years(&conn, "9999");
+        assert_eq!(retention_years(&conn), MAX_RETENTION_YEARS, "huge clamps down");
+
+        seed_years(&conn, "not a number");
+        assert_eq!(
+            retention_years(&conn),
+            DEFAULT_RETENTION_YEARS,
+            "unparseable falls back to the default, not to 0"
+        );
+
+        seed_years(&conn, "7");
+        assert_eq!(retention_years(&conn), 7, "in-range values pass through");
+    }
+
+    #[test]
+    fn a_missing_window_row_uses_the_default() {
+        let conn = kv_db();
+        assert_eq!(retention_years(&conn), DEFAULT_RETENTION_YEARS);
     }
 }

@@ -106,7 +106,25 @@ pub(crate) const NOTE_PROVIDER_PROFILE_KEY: &str = "note_provider_v1::profile";
 /// 1. Append the exact key string and update the `write_only_protected_keys_is_pinned` pin.
 /// 2. Create a dedicated `#[tauri::command]` for the write path (bypasses `guard_write_key`).
 /// 3. The read path via `kv_get`/`kv_list` remains open — no extra steps needed for reads.
-pub(crate) const WRITE_ONLY_PROTECTED_KEYS: &[&str] = &[NOTE_PROVIDER_PROFILE_KEY];
+pub(crate) const WRITE_ONLY_PROTECTED_KEYS: &[&str] = &[
+    NOTE_PROVIDER_PROFILE_KEY,
+    // Both gate PHI destruction, so a generic write to either is a destruction
+    // primitive. Left unguarded, three permitted invokes destroyed every signed
+    // encounter in the database:
+    //   kv_set(litigation_hold, "false")   → lifts a legal hold, and because it
+    //                                        bypasses retention_hold_set it
+    //                                        writes NO config_audit row, so the
+    //                                        tamper-evident trail shows nothing
+    //   kv_set(retention_years, "0")       → bypasses the 1..=30 validation that
+    //                                        lives only in retention_set_years
+    //   retention_destroy_eligible()       → cutoff becomes today; every signed
+    //                                        encounter is "expired"
+    // and the resulting destruction_log is full of legitimate-looking
+    // `retention_expired` rows. Writes now go only through retention_set_years /
+    // retention_hold_set, which validate and audit. Reads stay open.
+    crate::retention::KV_RETENTION_YEARS,
+    crate::retention::KV_LITIGATION_HOLD,
+];
 
 /// True when `key` names a value that must live in the OS keychain and is
 /// therefore forbidden from the generic KV API. Pure function — no DB.
@@ -365,9 +383,40 @@ mod tests {
     fn write_only_protected_keys_is_pinned() {
         assert_eq!(
             WRITE_ONLY_PROTECTED_KEYS,
-            &[NOTE_PROVIDER_PROFILE_KEY],
+            &[
+                NOTE_PROVIDER_PROFILE_KEY,
+                crate::retention::KV_RETENTION_YEARS,
+                crate::retention::KV_LITIGATION_HOLD,
+            ],
             "WRITE_ONLY_PROTECTED_KEYS changed — review carefully and update this pin."
         );
+    }
+
+    // C-4: the retention window and litigation-hold flag gate PHI destruction.
+    // A generic write to either is a destruction primitive (see the chain
+    // documented on WRITE_ONLY_PROTECTED_KEYS), so both must be blocked on the
+    // write path while staying readable — the Settings pane reads them, and
+    // blocking reads would strand the UI.
+    #[test]
+    fn retention_policy_keys_are_write_blocked_but_readable() {
+        for key in [
+            crate::retention::KV_RETENTION_YEARS,
+            crate::retention::KV_LITIGATION_HOLD,
+        ] {
+            let err = guard_write_key(key).unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidInput(_)),
+                "guard_write_key({key}) must reject: it gates PHI destruction"
+            );
+            assert!(
+                guard_key(key).is_ok(),
+                "guard_key({key}) must allow — reads stay open for the Settings pane"
+            );
+            assert!(
+                !is_secret_key(key),
+                "{key} is write-protected, not keychain-only — reads must not be blocked"
+            );
+        }
     }
 
     // C3: the provider profile key must be blocked from generic writes but still
