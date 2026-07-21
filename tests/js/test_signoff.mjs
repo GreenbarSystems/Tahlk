@@ -31,8 +31,10 @@ import { hashHistoryEntry } from '../../src/utils/contentHash.js';
 // through three narrow, actor-deriving-server-side paths:
 //   - history_note_generated(encounterId, contentHash)  → actor "AI (Tahlk)"
 //   - history_note_edited(encounterId, contentHash)      → actor = provider
-//   - mark_encounter_signed(id, signedAt, signedHash)    → atomically appends
-//     the `signed` history row in the SAME transaction as the status flip
+//   - mark_encounter_signed(id, signedHash)              → atomically appends
+//     the `signed` history row in the SAME transaction as the status flip.
+//     `signed_at` is NOT a parameter: Rust derives it from utc_now_iso() so a
+//     compromised WebView cannot backdate a signature (audit finding H2).
 // The mock derives prevHash from the tail, stamps a monotonic timestamp, and
 // computes entryHash via the SAME hashHistoryEntry the Rust side matches
 // byte-for-byte, so a chain built through the mock verifies under the real
@@ -148,7 +150,11 @@ test('signNote flips status via mark_encounter_signed, never upsert_encounter', 
   const mark = calls.find(c => c.cmd === 'mark_encounter_signed');
   assert.equal(mark.args.id, id);
   assert.match(mark.args.signedHash, /^[0-9a-f]{64}$/);
-  assert.equal(typeof mark.args.signedAt, 'string');
+  // H2: the client must NOT be able to supply signed_at. Rust derives it from
+  // utc_now_iso() inside mark_encounter_signed. Asserting absence (rather than
+  // the old `typeof === 'string'`) means this test fails if the parameter is
+  // ever reintroduced, instead of passing only while it exists.
+  assert.equal(mark.args.signedAt, undefined, 'signed_at must be server-derived, not client-supplied');
 });
 
 test('post-sign tampering is detectable', async () => {

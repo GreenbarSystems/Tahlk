@@ -28,6 +28,26 @@ class FakeEl {
   getAttribute(a) { return this._attrs[a]; }
   addEventListener(type, fn) { this._on[type] = fn; }
   removeEventListener(type) { delete this._on[type]; }
+  focus() { globalThis.document.activeElement = this; }
+  // Minimal querySelectorAll covering the focusable selector modal.js's focus
+  // trap uses (tag names plus [href]/[tabindex]). Implemented as a real subtree
+  // walk rather than a `() => []` stub so the trap stays exercisable from tests
+  // instead of being permanently invisible to them.
+  querySelectorAll() {
+    const focusableTags = new Set(['button', 'input', 'select', 'textarea']);
+    const out = [];
+    const walk = node => {
+      for (const c of node.children) {
+        const tag = (c.tagName || '').toLowerCase();
+        if (focusableTags.has(tag) || c._attrs.href != null || c._attrs.tabindex != null) {
+          out.push(c);
+        }
+        walk(c);
+      }
+    };
+    walk(this);
+    return out;
+  }
   appendChild(child) { child.parent = this; this.children.push(child); return child; }
   remove() {
     if (!this.parent) return;
@@ -51,6 +71,8 @@ globalThis.document = {
   addEventListener: (type, fn) => { docListeners[type] = fn; },
   removeEventListener: type => { delete docListeners[type]; },
   get body() { return body; },
+  // modal.js captures this on open() and restores focus to it on close().
+  activeElement: null,
 };
 
 function pressKey(key) {

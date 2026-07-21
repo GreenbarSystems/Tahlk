@@ -149,7 +149,10 @@
                 var enc = _encounters[args.id];
                 if (enc) {
                   enc.status = 'signed';
-                  enc.signed_at = args.signedAt;
+                  // Derived here, not taken from args — mirrors Rust's
+                  // utc_now_iso() so the preview matches the real command,
+                  // which no longer accepts a client signed_at (H2).
+                  enc.signed_at = new Date().toISOString();
                   enc.signed_hash = args.signedHash;
                 }
                 return null;
