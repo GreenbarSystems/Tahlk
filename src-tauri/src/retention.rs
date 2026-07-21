@@ -236,9 +236,10 @@ pub(crate) async fn retention_destroy_eligible(
         let mut stmt = conn.prepare(
             "SELECT id FROM encounters WHERE encounter_date < ?1 AND status = 'signed'",
         )?;
-        stmt.query_map(params![cutoff], |r| r.get(0))?
+        let result: Vec<String> = stmt.query_map(params![cutoff], |r| r.get(0))?
             .filter_map(|r| r.ok())
-            .collect()
+            .collect();
+        result
     };
 
     // Single outer transaction — all encounter deletions are atomic.

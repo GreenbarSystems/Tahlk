@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
-use crate::{db_key, errors::AppError, llm_audit, note_audit, note_history, patient_audit, DbState};
+use crate::{db_key, destruction_log, errors::AppError, llm_audit, note_audit, note_history, patient_audit, DbState};
 
 /// Alias for the desktop-wide SQLite pool type. Every command that used to
 /// take a `Mutex<Connection>` guard now takes a `PooledConnection` handed out

@@ -229,9 +229,10 @@ pub(crate) async fn destroy_patient_records(
         let mut stmt = conn.prepare(
             "SELECT id FROM encounters WHERE patient_id = ?1 OR patient_alias = ?2",
         )?;
-        stmt.query_map(params![patient_id, patient_alias], |r| r.get(0))?
+        let ids: Vec<String> = stmt.query_map(params![patient_id, patient_alias], |r| r.get(0))?
             .filter_map(|r| r.ok())
-            .collect()
+            .collect();
+        ids
     };
 
     let encounters_destroyed = encounter_ids.len() as i64;
