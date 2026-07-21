@@ -9,8 +9,9 @@
 //   • sub(evt, fn) — bus subscription that auto-registers a disposer
 //   • onEncounterUpdated — router callback to refresh the encounter list
 //
-// dispose() drains noteSection's pending edit, cancels its rAF frame, then
-// tears down every bus subscription. Safe to call more than once.
+// dispose() stops any in-flight recording (saving it to this encounter),
+// drains noteSection's pending edit, cancels its rAF frame, then tears down
+// every bus subscription. Safe to call more than once.
 
 import { kvGet } from '../../core/storageBackend.js';
 import { encountersRepo } from '../../data/encountersRepo.js';
@@ -52,7 +53,7 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   };
 
   const note = wireNoteSection(ctx);
-  wireRecordingSection(ctx);
+  const recording = wireRecordingSection(ctx);
   const transcriptCtl = wireTranscriptSection(ctx);
   wireExportSection(ctx);
 
@@ -64,6 +65,10 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   // template switches. Transcription failure stops the chain (runScribeChain
   // only generates when transcription succeeded).
   ctx.sub('scribe:audio_saved', () => {
+    // Suppressed during teardown: dispose() stops an in-flight recording, and
+    // that save must not kick off transcription + note generation against a
+    // panel whose DOM and subscriptions are about to be dropped.
+    if (disposed) return;
     runScribeChain({
       transcribeNow: transcriptCtl.transcribeNow,
       generateNow: note.generateNow,
@@ -78,6 +83,12 @@ export function wireEncounterPanel(encounter, onClose, onEncounterUpdated) {
   async function dispose() {
     if (disposed) return;
     disposed = true;
+    // Stop the microphone FIRST, and before the subscriptions are dropped:
+    // recordingSection's own scribe:audio_saved handler must still be live to
+    // record audio_path against THIS encounter. Leaving the recorder running
+    // held the mic open past unmount and let the next encounter's Stop button
+    // save this encounter's audio under that encounter's id.
+    await recording.stopForDispose();
     note.cleanup();
     await note.flushPendingEdit();
     disposers.forEach(d => d());

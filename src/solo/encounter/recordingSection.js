@@ -3,7 +3,7 @@
 // panel.js dispose().
 
 import { encountersRepo } from '../../data/encountersRepo.js';
-import { startRecording, stopRecording, isRecording, listAudioDevices, setDeviceId, getDeviceId } from '../../scribe/recorder.js';
+import { startRecording, stopRecording, abortRecording, isRecording, listAudioDevices, setDeviceId, getDeviceId } from '../../scribe/recorder.js';
 import { toast, fmtDuration } from '../../utils/format.js';
 import { userMessage } from '../../platform/appError.js';
 
@@ -36,7 +36,12 @@ export function wireRecordingSection(ctx) {
     if (recordTimer) recordTimer.textContent = fmtDuration(duration);
   });
 
-  ctx.sub('scribe:audio_saved', async ({ path }) => {
+  ctx.sub('scribe:audio_saved', async ({ path, encounterId }) => {
+    // Only claim a save that belongs to this panel's encounter. The bus is
+    // global, so without this an in-flight save from a previously-open
+    // encounter could stamp its audio_path onto whatever encounter is open
+    // when it lands.
+    if (encounterId !== ctx.currentEncounter.id) return;
     ctx.currentEncounter.audio_path = path;
     ctx.currentEncounter.status = 'recording_done';
     await encountersRepo.save(ctx.currentEncounter);
@@ -63,7 +68,7 @@ export function wireRecordingSection(ctx) {
       }
     } else {
       try {
-        await startRecording();
+        await startRecording(ctx.currentEncounter.id);
         recordBtn?.classList.add('btn-record--active');
         if (recordLabel) recordLabel.textContent = 'Stop Recording';
         // Re-populate device labels now that mic permission has been granted.
@@ -79,4 +84,25 @@ export function wireRecordingSection(ctx) {
     if (recordLabel) recordLabel.textContent = 'Re-record';
     if (recordBtn) recordBtn.disabled = false;
   });
+
+  // Teardown for panel.js dispose(). The recorder's state is module-scoped and
+  // outlives this panel, so an unmount that leaves it running holds the
+  // microphone open and lets the *next* encounter's Stop button save this
+  // encounter's audio under that encounter's id.
+  //
+  // Saves rather than discards: the capture belongs to a real clinical
+  // encounter and dropping it is record loss. Persisting it under
+  // ctx.currentEncounter.id is correct here because this panel IS the
+  // encounter the capture was started under. Abort is the fallback only when
+  // the save fails, so the microphone is released on every path.
+  async function stopForDispose() {
+    if (!isRecording()) return;
+    try {
+      await stopRecording(ctx.currentEncounter.id);
+    } catch {
+      abortRecording();
+    }
+  }
+
+  return { stopForDispose };
 }

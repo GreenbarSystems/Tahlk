@@ -11,9 +11,20 @@ let _startTime = null;
 let _timerInterval = null;
 let _stream = null;
 let _deviceId = null;
+// The encounter this capture belongs to, captured at start. Recorder state is
+// module-scoped but an encounter panel is not, so without this the two can
+// drift apart: a capture started under encounter A could be stopped by a later
+// panel and saved under encounter B's id, writing one patient's audio into
+// another patient's chart. Every stop path is checked against this value.
+let _recordingEncounterId = null;
 
 export function setDeviceId(id) { _deviceId = id || null; }
 export function getDeviceId()   { return _deviceId; }
+
+// The encounter id this capture was started under, or null when idle. Lets a
+// caller confirm the recorder still belongs to the encounter it is about to
+// stop, without reaching into module state.
+export function recordingEncounterId() { return _recordingEncounterId; }
 
 export async function listAudioDevices() {
   try {
@@ -33,7 +44,7 @@ export function recordingDuration() {
   return Math.floor((Date.now() - _startTime) / 1000);
 }
 
-export async function startRecording() {
+export async function startRecording(encounterId) {
   if (isRecording()) return;
 
   try {
@@ -49,6 +60,7 @@ export async function startRecording() {
   }
 
   _chunks = [];
+  _recordingEncounterId = encounterId ?? null;
   _mediaRecorder = new MediaRecorder(_stream, { mimeType: bestMimeType() });
   _mediaRecorder.ondataavailable = e => { if (e.data.size > 0) _chunks.push(e.data); };
   _mediaRecorder.start(1000); // collect in 1s chunks
@@ -71,8 +83,39 @@ export async function startRecording() {
 // gets a chance to run and re-enable the UI.
 const STOP_TIMEOUT_MS = 8000;
 
+// Discard an in-flight capture without persisting it: stop the recorder, drop
+// the buffered chunks, release the mic. Used as the last-resort path when a
+// capture cannot be saved to its rightful encounter — losing the audio is bad,
+// but writing it under the wrong patient is worse, and leaving the microphone
+// live after the UI is gone is worse still.
+export function abortRecording() {
+  if (_mediaRecorder) {
+    _mediaRecorder.onstop = null;
+    if (_mediaRecorder.state === 'recording') {
+      try { _mediaRecorder.stop(); } catch { /* already torn down */ }
+    }
+  }
+  clearInterval(_timerInterval);
+  _timerInterval = null;
+  _chunks = [];
+  _mediaRecorder = null;
+  stopStream();
+  emit('scribe:recording_aborted', {});
+}
+
 export async function stopRecording(encounterId) {
   if (!isRecording()) return null;
+
+  // Refuse to persist a capture under an encounter it was not started for.
+  // Unreachable once panel teardown stops the recorder (see panel.js dispose),
+  // so treat it as an assertion: discard rather than mislabel, and surface the
+  // failure instead of silently writing PHI into the wrong chart.
+  if (_recordingEncounterId !== null && encounterId !== _recordingEncounterId) {
+    abortRecording();
+    throw new Error(
+      'Recording belonged to a different encounter and was discarded rather than saved to this one.'
+    );
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -124,6 +167,10 @@ function stopStream() {
   _stream?.getTracks().forEach(t => t.stop());
   _stream = null;
   _startTime = null;
+  // Clear ownership with the stream. Leaving a stale id behind would let the
+  // next capture inherit the previous encounter's identity if start ever ran
+  // without one.
+  _recordingEncounterId = null;
 }
 
 function bestMimeType() {
