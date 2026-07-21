@@ -87,10 +87,29 @@ pub(crate) fn derive_audio_key(dek_hex: &str) -> Result<[u8; KEY_LEN], AppError>
     Ok(key)
 }
 
-/// Convenience: load the DEK from the OS keychain and derive the audio-at-rest
-/// key in one step. This is the entry point the audio commands and the startup
-/// migration use — they never touch the DEK bytes directly.
+/// Convenience: resolve the DEK and derive the audio-at-rest key in one step.
+/// This is the entry point the audio commands and the startup migration use —
+/// they never touch the DEK bytes directly.
+///
+/// Source order matters, and getting it wrong destroys PHI:
+///
+///  1. The unlocked session DEK, once auth is configured. `auth_set_password`
+///     deletes the keychain DEK entry, so from that point the wrapped copy in
+///     `tahlk_auth.db` is the only route to the key.
+///  2. The keychain, on installs where auth has not been configured yet (the
+///     legacy path in `lib.rs::setup`, which still opens the DB that way).
+///
+/// Previously this called `db_key::load_or_generate_dek()` unconditionally.
+/// After `auth_set_password` removed the keychain entry, that call fell through
+/// to its *generate* branch and minted a brand-new random DEK — so every
+/// `.wav.enc` written before the user set a password became permanently
+/// undecryptable, silently, on the first launch afterwards. `load_or_generate_dek`
+/// now refuses to generate once auth is configured, so this cannot recur even
+/// if a future caller bypasses the session DEK.
 pub(crate) fn audio_key() -> Result<[u8; KEY_LEN], AppError> {
+    if let Some(hex) = crate::auth::session_dek_hex() {
+        return derive_audio_key(&hex);
+    }
     derive_audio_key(&crate::db_key::load_or_generate_dek()?)
 }
 
@@ -347,6 +366,64 @@ mod tests {
         // The derived key must not simply echo the DEK bytes.
         let dek_bytes = dek_hex_to_bytes(&dek).unwrap();
         assert_ne!(k1, dek_bytes, "audio key must be HKDF-separated from the DEK");
+    }
+
+    // ── audio_key source-of-truth (regression: silent PHI loss) ─────────────
+    //
+    // `auth_set_password` deletes the keychain DEK entry by design. While
+    // `audio_key()` still resolved through `db_key::load_or_generate_dek()`,
+    // that deletion sent it down the *generate* branch, minting a brand-new
+    // random DEK — so every `.wav.enc` written before the user set a password
+    // became permanently undecryptable, with no error surfaced, on the first
+    // launch afterwards. These pin the resolution order.
+
+    // Deliberately ONE test, not three. `SESSION_DEK_HEX` is process-global and
+    // the test harness runs tests in parallel, so separate cases that each
+    // publish a session DEK race each other — a split version passed a full run
+    // and failed under `--exact` filtering. Sequencing the whole scenario in a
+    // single test makes the assertions deterministic.
+    #[test]
+    fn audio_key_resolves_from_session_dek_and_survives_password_setup() {
+        // 1. Resolution order: with a session DEK published, audio_key() must
+        //    derive from it and never consult the keychain.
+        crate::auth::set_session_dek_hex(&test_dek());
+        let before = audio_key().expect("audio_key must resolve from the session DEK");
+        assert_eq!(
+            before,
+            derive_audio_key(&test_dek()).unwrap(),
+            "audio_key must derive from the unlocked session DEK, not the keychain"
+        );
+
+        // Encrypt as a pre-auth install would.
+        let blob = encrypt(&before, b"RIFF....session audio").unwrap();
+
+        // 2. auth_set_password wraps the SAME DEK bytes it read from the
+        //    keychain and republishes them before deleting the entry, so the
+        //    audio key is unchanged. This is why no re-encryption migration is
+        //    needed — and precisely what the old keychain lookup broke.
+        crate::auth::set_session_dek_hex(&test_dek());
+        let after = audio_key().unwrap();
+        assert_eq!(after, before, "audio key must not change across password setup");
+        assert_eq!(
+            decrypt(&after, &blob).unwrap(),
+            b"RIFF....session audio",
+            "audio encrypted before password setup must still decrypt afterwards"
+        );
+
+        // 3. The damage the old path caused, asserted so the cost is explicit:
+        //    a regenerated DEK yields a key that cannot authenticate existing
+        //    blobs. Under the bug this is what every .wav.enc on the device hit.
+        let regenerated = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        crate::auth::set_session_dek_hex(regenerated);
+        let minted = audio_key().unwrap();
+        assert_ne!(minted, before);
+        assert!(
+            decrypt(&minted, &blob).is_err(),
+            "a regenerated DEK must not be able to read audio written under the old one"
+        );
+
+        // Leave the global as this module's test DEK, not the throwaway one.
+        crate::auth::set_session_dek_hex(&test_dek());
     }
 
     #[test]

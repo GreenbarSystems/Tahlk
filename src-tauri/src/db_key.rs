@@ -49,7 +49,21 @@ pub(crate) fn load_or_generate_dek() -> Result<String, AppError> {
                 bad.len()
             )));
         }
-        _ => { /* no entry yet — fall through to generation */ }
+        _ => { /* no entry yet — fall through to the generation guard below */ }
+    }
+
+    // Absence of the entry is only a "first launch" signal while auth is
+    // unconfigured. Once `auth_set_password` has run it deliberately DELETES
+    // this entry, so a missing key there means the caller should have used the
+    // session DEK (see `audio_crypto::audio_key`) and did not. Generating here
+    // would mint a key unrelated to the one the existing data was encrypted
+    // under — irrecoverably orphaning it. Fail closed instead.
+    if crate::auth::is_auth_configured() {
+        return Err(AppError::internal_from(
+            "database encryption key requested from the keychain, but auth is configured \
+             and the entry was removed by design; the unlocked session DEK must be used \
+             instead — refusing to generate a replacement key",
+        ));
     }
 
     // First-launch: generate a fresh 256-bit key.

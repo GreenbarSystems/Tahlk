@@ -44,6 +44,7 @@
 
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::sync::RwLock;
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::hkdf;
@@ -445,6 +446,39 @@ fn wraps_db_path(app: &AppHandle) -> Result<std::path::PathBuf, AppError> {
 // High-level auth operations (take &Path, no AppHandle — testable without Tauri)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The DEK for the current unlocked session, hex-encoded.
+///
+/// Once auth is configured, `auth_set_password` deletes the keychain DEK entry
+/// so the wrapped copy in `tahlk_auth.db` is the only route to the key. Anything
+/// that needs the DEK *after* that point — notably `audio_crypto::audio_key`,
+/// which derives the audio-at-rest key from it — must read the unwrapped value
+/// from here rather than from the keychain, because the keychain no longer has
+/// it and `db_key::load_or_generate_dek` would otherwise mint a replacement.
+///
+/// `RwLock<Option<_>>` rather than `OnceLock`: `auth_nuke_and_reinstall`
+/// followed by a fresh `auth_set_password` in the same process legitimately
+/// produces a *different* DEK, and a write-once cell would silently retain the
+/// stale one.
+///
+/// Held as hex to match the existing DEK plumbing (`to_hex` at the unlock
+/// sites, `PRAGMA key = "x'..'"`, `derive_audio_key(&str)`); this adds no
+/// plaintext-key exposure the process did not already have.
+static SESSION_DEK_HEX: RwLock<Option<String>> = RwLock::new(None);
+
+/// Record the unwrapped DEK for this session. Called from every path that
+/// legitimately obtains it: first-time setup, password unlock, recovery unlock,
+/// and password change.
+pub(crate) fn set_session_dek_hex(hex: &str) {
+    if let Ok(mut slot) = SESSION_DEK_HEX.write() {
+        *slot = Some(hex.to_string());
+    }
+}
+
+/// The current session's DEK hex, or `None` before unlock.
+pub(crate) fn session_dek_hex() -> Option<String> {
+    SESSION_DEK_HEX.read().ok().and_then(|s| s.clone())
+}
+
 /// Returns true if the `auth_password_hash` keychain item exists.
 pub(crate) fn is_auth_configured() -> bool {
     keyring_entry()
@@ -775,6 +809,12 @@ pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<
     let path = wraps_db_path(&app)?;
     let codes = set_password(&password, &dek, &path)?;
 
+    // Publish the DEK for this session BEFORE the keychain entry is deleted
+    // below. Without this, audio_crypto::audio_key() would look for a keychain
+    // entry that no longer exists and db_key would mint a fresh random DEK —
+    // silently orphaning every previously-encrypted .wav.enc on this device.
+    crate::auth::set_session_dek_hex(&dek_hex);
+
     // Remove the keychain DEK so subsequent launches must go through the auth
     // path. Best-effort: a delete failure leaves the keychain as a fallback
     // but is logged; the wrapped copy is what guards forward security.
@@ -796,6 +836,8 @@ pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(
     let path = wraps_db_path(&app)?;
     let dek = unlock_with_password(&password, &path)?;
     let hex_key = to_hex(&dek);
+    // Publish before the audio migration below, which calls audio_key().
+    set_session_dek_hex(&hex_key);
 
     let pool = crate::db::open_database_with_dek(&app, &hex_key).map_err(|e| {
         log::error!(
@@ -832,7 +874,8 @@ pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(
 #[tauri::command]
 pub(crate) fn auth_unlock_recovery(app: AppHandle, code: String) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    let _dek = unlock_with_recovery_code(&code, &path)?;
+    let dek = unlock_with_recovery_code(&code, &path)?;
+    set_session_dek_hex(&to_hex(&dek));
     Ok(())
 }
 
