@@ -290,7 +290,13 @@ export function wireNoteSection(ctx) {
 
   // Manual audio purge — available on signed encounters that still have a .wav.
   document.getElementById('btn-purge-audio')?.addEventListener('click', async () => {
-    if (!confirm('Delete the recorded audio for this encounter? The signed note and transcript are unaffected. This cannot be undone.')) return;
+    const ok = await confirmModal({
+      title: 'Delete this recording?',
+      message: 'The signed note and transcript are unaffected. The audio cannot be recovered.',
+      confirmLabel: 'Delete audio',
+      confirmClass: 'btn-danger',
+    });
+    if (!ok) return;
     const purgeBtn = document.getElementById('btn-purge-audio');
     if (purgeBtn) purgeBtn.disabled = true;
     const { removed, error } = await purgeAudio(ctx.currentEncounter.id, { reason: 'manual' });

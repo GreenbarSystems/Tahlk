@@ -14,6 +14,11 @@ import { retentionRepo } from '../data/retentionRepo.js';
 import { verifyAllChains } from '../domain/historyChain.js';
 import { checkLlmAuditDrift, describeDrift } from '../domain/llmAuditDrift.js';
 import { iconCheck } from './icons.js';
+// In-app dialogs, not the browser-native confirm()/prompt(). Those block the
+// WebView's event loop and are not implemented in every configuration Tauri
+// ships on — where prompt() is stubbed it returns null unconditionally, which
+// made the typed-name confirmation below impossible to satisfy.
+import { confirmModal, promptModal } from './confirmModal.js';
 import { lockRepo } from '../data/lockRepo.js';
 import { authRepo } from '../data/authRepo.js';
 import { showRegenCodesFlow } from './authScreen.js';
@@ -580,7 +585,12 @@ export function wireSettings() {
   });
 
   document.getElementById('s-clear-apikey')?.addEventListener('click', async () => {
-    if (!confirm('Remove the stored API key?')) return;
+    if (!await confirmModal({
+    title: 'Remove API key?',
+    message: 'Note generation will stop working until you add a key again.',
+    confirmLabel: 'Remove key',
+    confirmClass: 'btn-danger',
+  })) return;
     try {
       await secretsRepo.clearApiKey();
       toast('API key removed.');
@@ -611,7 +621,12 @@ export function wireSettings() {
         });
         toast('Agreements confirmed.');
       } else {
-        if (!confirm('Remove your confirmation of the BAA and EULA?')) {
+        if (!await confirmModal({
+          title: 'Remove your agreement confirmation?',
+          message: 'Note generation is blocked until the BAA and EULA are confirmed again.',
+          confirmLabel: 'Remove confirmation',
+          confirmClass: 'btn-danger',
+        })) {
           e.target.checked = true;
           return;
         }
@@ -639,8 +654,14 @@ export function wireSettings() {
     }
   });
 
-  document.getElementById('s-diag-clear')?.addEventListener('click', () => {
-    if (!confirm('Clear the usage & error reporting stored on this device?')) return;
+  document.getElementById('s-diag-clear')?.addEventListener('click', async () => {
+    const ok = await confirmModal({
+      title: 'Clear diagnostics?',
+      message: 'Removes the usage and error reporting stored on this device. Clinical records are unaffected.',
+      confirmLabel: 'Clear',
+      confirmClass: 'btn-danger',
+    });
+    if (!ok) return;
     telemetry.clear();
     const count = document.getElementById('s-diag-count');
     if (count) count.textContent = '0 events stored';
@@ -714,21 +735,28 @@ export function wireSettings() {
         // Require provider name confirmation before bulk destruction (Low finding L2).
         const providerName = (kvGet(PROVIDER_KEY) || {}).name || '';
         if (providerName) {
-          const typed = prompt(
-            `Type your name to confirm permanent deletion of ${n} record${n === 1 ? '' : 's'}.\n\n` +
-            `Expected: ${providerName}\n\n` +
-            `This is irreversible and will be logged to the destruction log.`
-          );
-          if ((typed || '').trim() !== providerName.trim()) {
+          const typed = await promptModal({
+            title: `Permanently delete ${n} record${n === 1 ? '' : 's'}?`,
+            message: 'Type your name to confirm. This is irreversible and will be recorded in the destruction log.',
+            expected: providerName,
+            placeholder: 'Your name',
+            confirmLabel: 'Delete permanently',
+            confirmClass: 'btn-danger',
+          });
+          // null means cancelled; a mismatch is a distinct outcome worth
+          // naming, so the provider knows the click registered.
+          if (typed === null) return;
+          if (typed.trim() !== providerName.trim()) {
             toast('Name did not match — deletion cancelled.');
             return;
           }
-        } else {
-          const confirmed = confirm(
-            `Permanently delete ${n} encounter record${n === 1 ? '' : 's'} past the retention window?\n\n` +
-            `This is irreversible and will be logged to the destruction log.`
-          );
-          if (!confirmed) return;
+        } else if (!await confirmModal({
+          title: `Permanently delete ${n} record${n === 1 ? '' : 's'}?`,
+          message: 'These encounters are past the retention window. This is irreversible and will be recorded in the destruction log.',
+          confirmLabel: 'Delete permanently',
+          confirmClass: 'btn-danger',
+        })) {
+          return;
         }
         const btn = document.getElementById('s-retention-destroy');
         if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
@@ -785,7 +813,12 @@ export function wireSettings() {
 
   function wireLockRemoveButton(btn) {
     btn.addEventListener('click', async () => {
-      if (!confirm('Remove your lock PIN? Screen lock will be turned off.')) return;
+      if (!await confirmModal({
+    title: 'Remove your lock PIN?',
+    message: 'Screen lock will be turned off, so the app will no longer lock itself when idle.',
+    confirmLabel: 'Remove PIN',
+    confirmClass: 'btn-danger',
+  })) return;
       try {
         await lockRepo.clearPin();
         setLockEnabled(false);
