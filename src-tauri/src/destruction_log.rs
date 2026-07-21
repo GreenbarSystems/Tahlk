@@ -64,6 +64,31 @@ pub(crate) fn append(
     Ok(())
 }
 
+/// Record a destruction-log CSV export event.
+///
+/// Appends a system-level row to destruction_log so the act of exporting
+/// the log is itself audited (Low finding L4 closed). Uses entity_type =
+/// "system" and entity_id = "destlog_csv_export" to distinguish from PHI
+/// destruction events. Actor is derived from the KV provider profile.
+#[tauri::command]
+pub(crate) fn destruction_log_note_exported(
+    state: State<'_, DbState>,
+    row_count: i64,
+) -> Result<(), AppError> {
+    let conn = state.0.get()?;
+    let provider_id: String = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "provider".to_string());
+    append(&conn, &provider_id, "system", "destlog_csv_export", "", "export", row_count)
+}
+
 /// Returns the last `limit` rows (default 50, max 500), newest first.
 /// Read-only — no delete or clear command is registered for this table.
 #[tauri::command]

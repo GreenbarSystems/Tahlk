@@ -32,10 +32,10 @@ export const patientsRepo = {
   delete: id            => invoke('delete_patient', { id, providerId: currentProviderId() }),
   // Permanently destroys all PHI for a patient: cascade-deletes every linked
   // encounter (note_audit scrubbed, note_history hard-deleted, each logged to
-  // destruction_log), then removes the patient roster row. Returns
-  // { encounters_destroyed: number }. Audio cleanup is the caller's responsibility
-  // — audio files live outside the DB and must be removed separately.
-  destroyRecords:    id => invoke('destroy_patient_records', { patientId: id, providerId: currentProviderId() }),
+  // destruction_log), removes the patient roster row, and cleans up audio
+  // files. Returns { encounters_destroyed: number }. Actor identity and audio
+  // cleanup are handled server-side.
+  destroyRecords:    id => invoke('destroy_patient_records', { patientId: id }),
   // Returns the number of encounters that WOULD be destroyed by destroyRecords.
   // Call this to show the provider a count before they confirm the irreversible action.
   countEncounters:   id => invoke('count_patient_encounters', { patientId: id }),

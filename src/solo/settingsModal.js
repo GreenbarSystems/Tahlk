@@ -663,16 +663,16 @@ export function wireSettings() {
     idleLabel: 'Check for records due for deletion',
     failPrefix: 'Could not check retention',
     run: async resultEl => {
-      const today = new Date().toISOString().slice(0, 10);
-      const candidates = await retentionRepo.listCandidates(today);
+      // Cutoff date is now server-side — no today argument needed.
+      const candidates = await retentionRepo.listCandidates();
       if (!resultEl) return;
       if (candidates.length === 0) {
-        resultEl.textContent = 'No records are past their retention window.';
+        resultEl.textContent = 'No signed records are past their retention window.';
         return;
       }
       const n = candidates.length;
       resultEl.innerHTML = `
-        <strong>${n} encounter record${n === 1 ? '' : 's'} ${n === 1 ? 'is' : 'are'} past the retention window.</strong>
+        <strong>${n} signed encounter record${n === 1 ? '' : 's'} ${n === 1 ? 'is' : 'are'} past the retention window.</strong>
         <br>Oldest: ${escapeHtml(candidates[0].encounter_date)}
         ${candidates[0].patient_alias ? ` — ${escapeHtml(candidates[0].patient_alias)}` : ''}.
         <br><button class="btn btn-danger btn-sm" id="s-retention-destroy" style="margin-top:8px">
@@ -680,15 +680,29 @@ export function wireSettings() {
         </button>
       `;
       document.getElementById('s-retention-destroy')?.addEventListener('click', async () => {
-        const confirmed = confirm(
-          `Permanently delete ${n} encounter record${n === 1 ? '' : 's'} past the retention window?\n\n` +
-          `This is irreversible and will be logged to the destruction log.`
-        );
-        if (!confirmed) return;
+        // Require provider name confirmation before bulk destruction (Low finding L2).
+        const providerName = (kvGet(PROVIDER_KEY) || {}).name || '';
+        if (providerName) {
+          const typed = prompt(
+            `Type your name to confirm permanent deletion of ${n} record${n === 1 ? '' : 's'}.\n\n` +
+            `Expected: ${providerName}\n\n` +
+            `This is irreversible and will be logged to the destruction log.`
+          );
+          if ((typed || '').trim() !== providerName.trim()) {
+            toast('Name did not match — deletion cancelled.');
+            return;
+          }
+        } else {
+          const confirmed = confirm(
+            `Permanently delete ${n} encounter record${n === 1 ? '' : 's'} past the retention window?\n\n` +
+            `This is irreversible and will be logged to the destruction log.`
+          );
+          if (!confirmed) return;
+        }
         const btn = document.getElementById('s-retention-destroy');
         if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
         try {
-          const { destroyed } = await retentionRepo.destroyEligible(today);
+          const { destroyed } = await retentionRepo.destroyEligible();
           if (resultEl) resultEl.textContent = `${destroyed} record${destroyed === 1 ? '' : 's'} permanently deleted.`;
           toast(`${destroyed} record${destroyed === 1 ? '' : 's'} deleted.`);
         } catch (err) {
@@ -839,7 +853,7 @@ export function wireSettings() {
     }
   });
 
-  document.getElementById('s-destlog-export')?.addEventListener('click', () => {
+  document.getElementById('s-destlog-export')?.addEventListener('click', async () => {
     if (!_destructionLogRows || _destructionLogRows.length === 0) return;
     const csv  = destructionLogToCsv(_destructionLogRows);
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -849,6 +863,9 @@ export function wireSettings() {
     a.download = `destruction-log-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    // Audit the export event — records who exported the log and how many rows
+    // were included (Low finding L4 closed).
+    invoke('destruction_log_note_exported', { rowCount: _destructionLogRows.length }).catch(() => {});
   });
 }
 

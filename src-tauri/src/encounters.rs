@@ -252,30 +252,30 @@ pub(crate) async fn delete_encounter(
     Ok(())
 }
 
-/// Transactional core of encounter destruction.
+/// Inner destruction body — runs inside the caller's transaction.
 ///
-/// Beyond the existing KV + encounters-row deletion, this now:
-///   1. Scrubs `note_audit.entry_json` with a tombstone (chain structure kept).
-///   2. Blinds `note_audit.encounter_id` (SHA-256, non-reversible) so the
-///      orphaned ID is not a CCPA "unique identifier" at rest.
-///   3. Hard-deletes `note_history` rows (no PHI; version scaffolding only).
-///   4. Appends to the append-only `destruction_log`.
+/// Takes `&Connection` so callers can pass either a bare connection or a
+/// `&Transaction` (which derefs to `Connection`), enabling two usage modes:
 ///
-/// All writes are inside one transaction — either everything succeeds or
-/// nothing is committed. Takes `provider_id` and `reason` so callers (the
-/// Tauri command and the Commit-2 patient cascade) can record the actor and
-/// legal basis accurately.
-pub(crate) fn delete_encounter_row(
-    conn: &mut Connection,
+///   * Single-encounter delete: `delete_encounter_row` creates its own
+///     transaction and calls this — same as before ADR-0005 Commit 3.
+///   * Multi-encounter cascade: `destroy_patient_records` opens one outer
+///     transaction, calls this for each encounter, then commits — making the
+///     whole cascade atomic (Medium finding M3: non-atomic cascade).
+///
+/// If a future LLM interaction log (`llm_audit` or similar) is added that
+/// references `encounter_id`, it must also be blinded here so the encounter
+/// identifier cannot be used to re-link rows to a deleted subject after
+/// destruction (Low finding L3).
+pub(crate) fn delete_encounter_in_tx(
+    conn: &Connection,
     id: &str,
     provider_id: &str,
     reason: &str,
 ) -> Result<(), AppError> {
-    let tx = conn.transaction()?;
-
     // Read patient_alias before deletion — needed for the destruction log and
     // also serves as the authoritative "not found" guard (fail before any write).
-    let patient_alias: String = tx
+    let patient_alias: String = conn
         .query_row(
             "SELECT COALESCE(patient_alias, '') FROM encounters WHERE id = ?1",
             params![id],
@@ -288,18 +288,18 @@ pub(crate) fn delete_encounter_row(
     // KV rows holding this encounter's actual note text/transcript — kept in
     // sync with data/keys.js's noteContent/noteTranscript key formats by
     // hand, since Rust has no shared import of the JS key constants.
-    tx.execute(
+    conn.execute(
         "DELETE FROM kv WHERE key IN (?1, ?2)",
         params![
             format!("note_content_v1::{id}"),
             format!("note_content_v1::transcript::{id}"),
         ],
     )?;
-    tx.execute("DELETE FROM encounters WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM encounters WHERE id = ?1", params![id])?;
 
     // Count note_audit rows before scrubbing so the destruction log reflects
     // how many PHI-bearing entries were actually touched.
-    let audit_count: i64 = tx
+    let audit_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM note_audit WHERE encounter_id = ?1",
             params![id],
@@ -317,7 +317,7 @@ pub(crate) fn delete_encounter_row(
         "legal_basis": reason,
     })
     .to_string();
-    tx.execute(
+    conn.execute(
         "UPDATE note_audit SET entry_json = ?1 WHERE encounter_id = ?2",
         params![tombstone, id],
     )?;
@@ -326,7 +326,7 @@ pub(crate) fn delete_encounter_row(
     // so the orphaned identifier cannot be used to re-link rows to a deleted
     // subject — satisfying CCPA's "unique identifier" disposal requirement.
     let blinded = sha256_hex(&format!("{id}{now}"));
-    tx.execute(
+    conn.execute(
         "UPDATE note_audit SET encounter_id = ?1 WHERE encounter_id = ?2",
         params![blinded, id],
     )?;
@@ -334,11 +334,11 @@ pub(crate) fn delete_encounter_row(
     // Hard-delete note_history — contains only hashes and action metadata,
     // no PHI. Removing it keeps the DB clean; the destruction_log records
     // that this history existed and was destroyed.
-    tx.execute("DELETE FROM note_history WHERE encounter_id = ?1", params![id])?;
+    conn.execute("DELETE FROM note_history WHERE encounter_id = ?1", params![id])?;
 
     // Append to the append-only destruction log (HIPAA PHI disposal record).
     crate::destruction_log::append(
-        &tx,
+        conn,
         provider_id,
         "encounter",
         id,
@@ -347,6 +347,23 @@ pub(crate) fn delete_encounter_row(
         audit_count,
     )?;
 
+    Ok(())
+}
+
+/// Transactional wrapper for single-encounter destruction.
+///
+/// Opens its own transaction, delegates to `delete_encounter_in_tx`, and
+/// commits. Direct callers (the Tauri command, the async delete_encounter)
+/// use this. Multi-encounter callers (patient cascade, retention purge) use
+/// `delete_encounter_in_tx` directly inside their own outer transaction.
+pub(crate) fn delete_encounter_row(
+    conn: &mut Connection,
+    id: &str,
+    provider_id: &str,
+    reason: &str,
+) -> Result<(), AppError> {
+    let tx = conn.transaction()?;
+    delete_encounter_in_tx(&tx, id, provider_id, reason)?;
     tx.commit()?;
     Ok(())
 }

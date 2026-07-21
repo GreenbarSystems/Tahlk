@@ -21,12 +21,27 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::db::{patient_row_to_json, PATIENT_COLS};
 use crate::errors::AppError;
 use crate::patient_audit;
 use crate::DbState;
+
+/// Derive the acting provider's display name from the KV-stored profile.
+/// Fallback to "provider" when the profile is absent or unparseable — mirrors
+/// the pattern in `note_audit.rs` and `note_history.rs`.
+fn provider_id_from_kv(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
+    .unwrap_or_else(|| "provider".to_string())
+}
 
 /// Clamp a caller-supplied `LIMIT` into a sane range. The ceiling and clamp
 /// live in `db::clamp_list_limit`, shared with `encounters` — this wrapper
@@ -173,31 +188,30 @@ pub(crate) fn delete_patient_conn(conn: &mut Connection, id: &str, provider_id: 
 
 /// Permanently destroy all PHI for a patient: cascade-deletes every linked
 /// encounter (scrubbing note_audit, hard-deleting note_history, logging each
-/// to destruction_log — same path as a direct encounter delete), then removes
-/// the patient roster row and appends a summary entry to destruction_log.
+/// to destruction_log), then removes the patient roster row and appends a
+/// summary entry to destruction_log, followed by best-effort audio cleanup.
 ///
-/// Encounters are linked by `encounters.patient_id = patient.id` (added in
-/// ADR-0005 Commit 2). For legacy encounters created before that column
-/// existed, `patient_alias` matching the patient's current alias serves as a
-/// fallback — so pre-migration encounters are included in the cascade.
+/// Actor identity is derived server-side from `note_provider_v1::profile` —
+/// the caller cannot forge provider attribution (Medium finding M1 closed).
 ///
-/// Each encounter destruction is its own transaction (same as
-/// `delete_encounter_row` called directly). The patient-row deletion is a
-/// separate transaction that commits atomically with the patient_audit and
-/// destruction_log rows. Audio cleanup for each encounter is best-effort and
-/// must be handled by the caller (or a follow-up command) since this function
-/// is sync and audio deletion is async.
+/// All SQL mutations run inside a single outer transaction — if any encounter
+/// deletion fails the entire cascade rolls back (Medium finding M3 closed).
+///
+/// Audio files for each encounter are removed after the SQL commit
+/// (High finding H1 closed). Audio cleanup is best-effort: a failure logs an
+/// error but does not roll back the already-committed SQL destruction.
 #[tauri::command]
-pub(crate) fn destroy_patient_records(
-    state: State<DbState>,
+pub(crate) async fn destroy_patient_records(
+    app: AppHandle,
+    state: State<'_, DbState>,
     patient_id: String,
-    provider_id: String,
 ) -> Result<Value, AppError> {
-    check_provider_id(&provider_id)?;
     let mut conn = state.0.get()?;
 
-    // Read alias first — acts as the existence guard and provides the
-    // patient_alias fallback for legacy encounter matching.
+    // Derive actor server-side — WebView cannot supply or forge provider_id.
+    let provider_id = provider_id_from_kv(&conn);
+
+    // Read alias first — existence guard and legacy encounter-match fallback.
     let patient_alias: String = conn
         .query_row(
             "SELECT alias FROM patients WHERE id = ?1",
@@ -209,6 +223,8 @@ pub(crate) fn destroy_patient_records(
 
     // Collect encounter IDs linked by patient_id OR matching the current alias
     // (legacy fallback for encounters created before ADR-0005 Commit 2).
+    // Done before the outer transaction so the collection query is outside the
+    // write path (consistent snapshot; no dirty reads from partial deletes).
     let encounter_ids: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT id FROM encounters WHERE patient_id = ?1 OR patient_alias = ?2",
@@ -220,13 +236,13 @@ pub(crate) fn destroy_patient_records(
 
     let encounters_destroyed = encounter_ids.len() as i64;
 
-    for enc_id in &encounter_ids {
-        crate::encounters::delete_encounter_row(&mut conn, enc_id, &provider_id, "patient_request")?;
-    }
-
-    // Delete the patient row + audit + destruction_log in one transaction.
+    // Single outer transaction — all encounter deletions, the patient-row
+    // removal, audit, and destruction_log entry are one atomic unit.
     {
         let tx = conn.transaction()?;
+        for enc_id in &encounter_ids {
+            crate::encounters::delete_encounter_in_tx(&tx, enc_id, &provider_id, "patient_request")?;
+        }
         tx.execute("DELETE FROM patients WHERE id = ?1", params![patient_id])?;
         patient_audit::append(&tx, &patient_id, &provider_id, "patient_records_destroyed")?;
         crate::destruction_log::append(
@@ -239,6 +255,19 @@ pub(crate) fn destroy_patient_records(
             encounters_destroyed,
         )?;
         tx.commit()?;
+    }
+    drop(conn); // release DB connection before the async .await calls below
+
+    // Best-effort audio cleanup — after the SQL commit so a file-delete failure
+    // never leaves a partially-committed DB state.
+    for enc_id in &encounter_ids {
+        if let Err(e) = crate::audio::delete_session_audio(app.clone(), enc_id.clone()).await {
+            log::error!(
+                "destroy_patient_records: audio cleanup failed for {}: {}",
+                enc_id,
+                crate::log_safety::cap_len(&e.to_string())
+            );
+        }
     }
 
     Ok(json!({ "encounters_destroyed": encounters_destroyed }))

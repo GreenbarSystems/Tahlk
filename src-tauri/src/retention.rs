@@ -17,12 +17,24 @@
 //!
 //! Storage: two rows in the existing `kv` table; no new tables.
 
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::errors::AppError;
 use crate::DbState;
+
+fn provider_id_from_kv(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
+    .unwrap_or_else(|| "provider".to_string())
+}
 
 const KV_RETENTION_YEARS: &str = "note_settings_v1::retention_years";
 const KV_LITIGATION_HOLD: &str = "note_settings_v1::litigation_hold";
@@ -107,15 +119,19 @@ pub(crate) fn retention_hold_set(
     )
 }
 
-/// List encounters whose `encounter_date` predates the retention cutoff.
-/// Returns an empty list when a litigation hold is active.
+/// List signed encounters whose `encounter_date` predates the retention cutoff.
 ///
-/// `today` must be `YYYY-MM-DD`. The result is ordered oldest-first so the
-/// caller can present records chronologically.
+/// The cutoff date is derived server-side (High finding H2 closed: caller
+/// cannot supply a future date to trigger premature destruction).
+/// Only `status = 'signed'` encounters are returned — draft/in-progress
+/// encounters are excluded so only legally attestable records are eligible
+/// (Medium finding M2 closed).
+/// Returns an empty list when a litigation hold is active.
+/// Result is ordered oldest-first so the caller can present records
+/// chronologically.
 #[tauri::command]
 pub(crate) fn retention_list_candidates(
     state: State<'_, DbState>,
-    today: String,
 ) -> Result<Vec<Value>, AppError> {
     let conn = state.0.get()?;
 
@@ -140,12 +156,14 @@ pub(crate) fn retention_list_candidates(
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_RETENTION_YEARS);
 
-    let cutoff = cutoff_date(&today, years)
-        .ok_or_else(|| AppError::invalid("today must be YYYY-MM-DD"))?;
+    let today_iso = crate::time::utc_now_iso();
+    let cutoff = cutoff_date(&today_iso[..10], years)
+        .ok_or_else(|| AppError::invalid("internal: utc_now_iso did not produce YYYY-MM-DD"))?;
 
     let mut stmt = conn.prepare(
         "SELECT id, encounter_date, patient_alias, status \
-         FROM encounters WHERE encounter_date < ?1 ORDER BY encounter_date ASC",
+         FROM encounters WHERE encounter_date < ?1 AND status = 'signed' \
+         ORDER BY encounter_date ASC",
     )?;
     let rows: Vec<Value> = stmt
         .query_map(params![cutoff], |r| {
@@ -161,73 +179,90 @@ pub(crate) fn retention_list_candidates(
     Ok(rows)
 }
 
-/// Permanently destroy all encounters past the retention window.
+/// Permanently destroy all signed encounters past the retention window.
+///
+/// Closes four ADR-0005 compliance findings:
+///   H1 (audio disposal): audio files are removed after the SQL commit.
+///   H2 (caller-supplied today): cutoff date derived server-side from
+///       `utc_now_iso()` — caller cannot pass a future date to trigger
+///       premature destruction.
+///   M1 (caller-supplied provider_id): actor derived from KV profile.
+///   M2 (non-signed candidates): only `status = 'signed'` encounters
+///       are eligible — drafts and in-progress records are excluded.
 ///
 /// Refuses when a litigation hold is active. Each encounter is destroyed via
-/// `encounters::delete_encounter_row` so note_audit is scrubbed, note_history
-/// is hard-deleted, and each act is logged to the append-only
-/// `destruction_log` with `legal_basis = "retention_expired"`. Audio files
-/// are not removed by this command — that is async and must be handled by
-/// the caller or a follow-up operation.
+/// `encounters::delete_encounter_in_tx` inside a single outer transaction so
+/// the entire batch is atomic. Audio files are removed after the SQL commit
+/// (best-effort; a failure logs an error but does not roll back the SQL).
 ///
 /// Returns `{ destroyed: N }`.
 #[tauri::command]
-pub(crate) fn retention_destroy_eligible(
+pub(crate) async fn retention_destroy_eligible(
+    app: AppHandle,
     state: State<'_, DbState>,
-    today: String,
-    provider_id: String,
 ) -> Result<Value, AppError> {
-    // Collect eligible IDs on a read-only connection, then release it before
-    // the write loop so each delete_encounter_row call gets a clean checkout.
+    let mut conn = state.0.get()?;
+
+    let hold: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![KV_LITIGATION_HOLD],
+            |r| r.get(0),
+        )
+        .ok();
+    if hold.as_deref() == Some("true") {
+        return Err(AppError::invalid(
+            "litigation hold is active — retention-based destruction is blocked",
+        ));
+    }
+
+    let provider_id = provider_id_from_kv(&conn);
+
+    let years: i64 = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![KV_RETENTION_YEARS],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_RETENTION_YEARS);
+
+    let today_iso = crate::time::utc_now_iso();
+    let cutoff = cutoff_date(&today_iso[..10], years)
+        .ok_or_else(|| AppError::invalid("internal: utc_now_iso did not produce YYYY-MM-DD"))?;
+
     let ids: Vec<String> = {
-        let conn = state.0.get()?;
-
-        let hold: Option<String> = conn
-            .query_row(
-                "SELECT value FROM kv WHERE key = ?1",
-                params![KV_LITIGATION_HOLD],
-                |r| r.get(0),
-            )
-            .ok();
-        if hold.as_deref() == Some("true") {
-            return Err(AppError::invalid(
-                "litigation hold is active — retention-based destruction is blocked",
-            ));
-        }
-
-        let years: i64 = conn
-            .query_row(
-                "SELECT value FROM kv WHERE key = ?1",
-                params![KV_RETENTION_YEARS],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_RETENTION_YEARS);
-
-        let cutoff = cutoff_date(&today, years)
-            .ok_or_else(|| AppError::invalid("today must be YYYY-MM-DD"))?;
-
-        let mut stmt =
-            conn.prepare("SELECT id FROM encounters WHERE encounter_date < ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM encounters WHERE encounter_date < ?1 AND status = 'signed'",
+        )?;
         stmt.query_map(params![cutoff], |r| r.get(0))?
             .filter_map(|r| r.ok())
             .collect()
-    }; // read connection released here
+    };
 
-    let mut destroyed = 0i64;
+    // Single outer transaction — all encounter deletions are atomic.
+    {
+        let tx = conn.transaction()?;
+        for id in &ids {
+            crate::encounters::delete_encounter_in_tx(&tx, id, &provider_id, "retention_expired")?;
+        }
+        tx.commit()?;
+    }
+    drop(conn); // release before async audio cleanup
+
+    // Best-effort audio cleanup after SQL commit.
     for id in &ids {
-        let mut conn = state.0.get()?;
-        crate::encounters::delete_encounter_row(
-            &mut conn,
-            id,
-            &provider_id,
-            "retention_expired",
-        )?;
-        destroyed += 1;
+        if let Err(e) = crate::audio::delete_session_audio(app.clone(), id.clone()).await {
+            log::error!(
+                "retention_destroy_eligible: audio cleanup failed for {}: {}",
+                id,
+                crate::log_safety::cap_len(&e.to_string())
+            );
+        }
     }
 
-    Ok(json!({ "destroyed": destroyed }))
+    Ok(json!({ "destroyed": ids.len() as i64 }))
 }
 
 #[cfg(test)]
