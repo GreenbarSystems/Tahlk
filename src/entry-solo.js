@@ -6,7 +6,7 @@ import { installCapabilities } from './core/capabilities.js';
 import { loadHistory } from './domain/historyChain.js';
 import { verifyHistoryChain } from './utils/contentHash.js';
 import { reportIntegrityFailure } from './solo/integrityAlert.js';
-import { appendAudit } from './core/auditLog.js';
+import { logRecordViewed } from './core/auditLog.js';
 import { shouldLogRecordView } from './domain/recordAccess.js';
 import { onWindowCloseRequested, destroyWindow } from './platform/tauri.js';
 import { clearClipboardOnExit } from './export/exportFormatter.js';
@@ -175,10 +175,7 @@ async function renderMainContent() {
     // Runs on every open, not just the first — HIPAA access logging tracks
     // each access event, not distinct-record-ever-viewed.
     if (shouldLogRecordView(_openEncounter)) {
-      await appendAudit(keys.noteAudit(_openEncounter.id), 'record_viewed', {
-        encounterId: _openEncounter.id,
-        status: _openEncounter.status,
-      });
+      await logRecordViewed(_openEncounter.id, _openEncounter.status);
     }
 
     // Verify the tamper-evident chain when opening a signed note. Detects

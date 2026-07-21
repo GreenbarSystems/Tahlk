@@ -42,11 +42,182 @@
 //! only append and read commands exist.
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use tauri::State;
 
 use crate::errors::AppError;
 use crate::DbState;
+
+/// SHA-256 of `data` returned as a 64-char lowercase hex string.
+/// Matches JS's `sha256Hex(str)` in contentHash.js (same algorithm, same
+/// encoding), so hashes computed here and hashes computed in JS are identical
+/// for the same input bytes — which is required for `verifyAuditChain` to
+/// pass on entries written by the narrow server-side commands below.
+fn sha256_hex(data: &[u8]) -> String {
+    use ring::digest::{digest, SHA256};
+    let hash = digest(&SHA256, data);
+    hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Internal append used by all narrow server-side audit commands.
+///
+/// Derives `actor` and `timestamp` server-side (the JS payload is never
+/// trusted for these fields), reads the chain tail for `prevHash`, constructs
+/// the entry JSON with keys sorted alphabetically (matching JS's
+/// `JSON.stringify(payload, Object.keys(payload).sort())`), computes the
+/// SHA-256 `entryHash`, and delegates the transactional INSERT to
+/// `append_audit_row`.
+///
+/// `extra_fields` carries the action-specific detail fields (encounterId,
+/// status, format, …). Keys must NOT include `action`, `actor`, `actorId`,
+/// `prevHash`, `timestamp`, or `entryHash` — those are derived or computed
+/// here. Any collision silently overwrites the caller-supplied value with the
+/// server-derived one, which is the desired behavior.
+fn server_append(
+    conn: &mut Connection,
+    encounter_id: &str,
+    action: &str,
+    extra_fields: BTreeMap<String, Value>,
+) -> Result<(), AppError> {
+    // Derive actor from the KV-stored provider profile so a compromised
+    // WebView cannot forge the actor identity in an audit entry.
+    let actor: String = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "provider".to_string());
+
+    // Read the current chain tail so we can include the correct prevHash.
+    let prev_hash: Option<String> = conn
+        .query_row(
+            "SELECT entry_hash FROM note_audit \
+             WHERE encounter_id = ?1 ORDER BY seq DESC LIMIT 1",
+            params![encounter_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let timestamp = crate::time::utc_now_iso();
+
+    // Build the hash payload as a BTreeMap so keys serialize in alphabetical
+    // order, matching JS's `JSON.stringify(payload, Object.keys(payload).sort())`.
+    // `entryHash` and `prevHash` are excluded from the hashed payload (same
+    // convention as hashAuditEntry in contentHash.js); prevHash is then added
+    // explicitly so it is covered by the hash.
+    let mut payload: BTreeMap<String, Value> = BTreeMap::new();
+    payload.insert("action".to_string(),    json!(action));
+    payload.insert("actor".to_string(),     json!(actor));
+    payload.insert("actorId".to_string(),   json!("solo"));
+    payload.insert("prevHash".to_string(), match &prev_hash {
+        Some(h) => json!(h),
+        None    => Value::Null,
+    });
+    payload.insert("timestamp".to_string(), json!(timestamp));
+    for (k, v) in extra_fields {
+        payload.insert(k, v);
+    }
+
+    let hash_json = serde_json::to_string(&payload).map_err(AppError::internal_from)?;
+    let entry_hash = sha256_hex(hash_json.as_bytes());
+
+    // Add entryHash to produce the full stored entry (superset of what was
+    // hashed — callers can round-trip this JSON and re-derive the hash,
+    // which is exactly what verifyAuditChain does).
+    payload.insert("entryHash".to_string(), json!(entry_hash));
+    let entry_json = serde_json::to_string(&payload).map_err(AppError::internal_from)?;
+
+    if entry_json.len() > MAX_ENTRY_JSON_BYTES {
+        return Err(AppError::invalid("audit entry too large"));
+    }
+
+    append_audit_row(conn, encounter_id, prev_hash.as_deref(), &entry_hash, &entry_json, 0)?;
+    Ok(())
+}
+
+/// Record that an encounter's records were viewed.
+///
+/// Actor is derived server-side — a compromised WebView cannot forge a false
+/// actor identity by crafting an `audit_append` payload.
+#[tauri::command]
+pub(crate) fn audit_log_record_viewed(
+    state: State<'_, DbState>,
+    encounter_id: String,
+    status: String,
+) -> Result<(), AppError> {
+    let mut conn = state.0.get()?;
+    let mut extra = BTreeMap::new();
+    extra.insert("encounterId".to_string(), json!(encounter_id));
+    extra.insert("status".to_string(),      json!(status));
+    server_append(&mut *conn, &encounter_id, "record_viewed", extra)
+}
+
+/// Record that an encounter note was edited.
+#[tauri::command]
+pub(crate) fn audit_log_note_edited(
+    state: State<'_, DbState>,
+    encounter_id: String,
+) -> Result<(), AppError> {
+    let mut conn = state.0.get()?;
+    let mut extra = BTreeMap::new();
+    extra.insert("encounterId".to_string(), json!(encounter_id));
+    server_append(&mut *conn, &encounter_id, "note_edited", extra)
+}
+
+/// Record that an encounter note was signed.
+#[tauri::command]
+pub(crate) fn audit_log_note_signed(
+    state: State<'_, DbState>,
+    encounter_id: String,
+    content_hash: String,
+) -> Result<(), AppError> {
+    let mut conn = state.0.get()?;
+    let mut extra = BTreeMap::new();
+    extra.insert("contentHash".to_string(), json!(content_hash));
+    extra.insert("encounterId".to_string(), json!(encounter_id));
+    server_append(&mut *conn, &encounter_id, "note_signed", extra)
+}
+
+/// Record the outcome of an audio purge.
+#[tauri::command]
+pub(crate) fn audit_log_audio_deleted(
+    state: State<'_, DbState>,
+    encounter_id: String,
+    removed: bool,
+    reason: String,
+    error: Option<String>,
+) -> Result<(), AppError> {
+    let mut conn = state.0.get()?;
+    let mut extra = BTreeMap::new();
+    extra.insert("encounterId".to_string(), json!(encounter_id));
+    extra.insert("error".to_string(), match &error {
+        Some(e) => json!(e),
+        None    => Value::Null,
+    });
+    extra.insert("reason".to_string(),  json!(reason));
+    extra.insert("removed".to_string(), json!(removed));
+    server_append(&mut *conn, &encounter_id, "audio_deleted", extra)
+}
+
+/// Record that a note was exported (to a file or to the clipboard).
+#[tauri::command]
+pub(crate) fn audit_log_note_exported(
+    state: State<'_, DbState>,
+    encounter_id: String,
+    format: String,
+    method: String,
+) -> Result<(), AppError> {
+    let mut conn = state.0.get()?;
+    let mut extra = BTreeMap::new();
+    extra.insert("format".to_string(), json!(format));
+    extra.insert("method".to_string(), json!(method));
+    server_append(&mut *conn, &encounter_id, "note_exported", extra)
+}
 
 const LEGACY_LIVE_PREFIX: &str = "note_audit_v1::";
 const LEGACY_ARCHIVE_PREFIX: &str = "note_audit_archive_v1::";
@@ -232,7 +403,10 @@ pub(crate) fn audit_archive_list(state: State<DbState>, encounter_id: String) ->
     entries_from(&conn, &encounter_id, true)
 }
 
-#[tauri::command]
+// Removed from the invoke handler — callers must use the narrow audit_log_*
+// commands above so that actor identity is derived server-side and cannot be
+// forged by a compromised WebView.
+#[allow(dead_code)]
 pub(crate) fn audit_append(
     state: State<DbState>,
     encounter_id: String,

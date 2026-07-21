@@ -4,8 +4,9 @@
 // in utils/contentHash.js), and archives (never silently discards) entries
 // evicted once the log exceeds maxEntries.
 //
-// Persisted in a proper SQLite table (`note_audit`) via three Tauri
-// commands — `audit_list`, `audit_archive_list`, `audit_append` — see
+// Persisted in a proper SQLite table (`note_audit`) via Tauri commands
+// — `audit_list`, `audit_archive_list`, and the narrow per-action commands
+// below — see
 // src-tauri/src/note_audit.rs. The old `note_audit_v1::<id>` /
 // `note_audit_archive_v1::<id>` KV blobs are migrated on first launch (Rust
 // side, idempotent) and are no longer read or written by this module once
@@ -32,6 +33,7 @@ import { currentUser } from './capabilities.js';
 import { nowISO } from '../utils/format.js';
 import { hashAuditEntry } from '../utils/contentHash.js';
 import { invoke, isTauri } from '../platform/tauri.js';
+import { keys } from '../data/keys.js';
 
 export const MAX_AUDIT_ENTRIES = 5000;
 
@@ -165,4 +167,35 @@ export async function appendAudit(key, action, details = {}, maxEntries = MAX_AU
 
   _liveCache.set(key, log);
   return entry;
+}
+
+// Narrow per-action wrappers. On Tauri these call the server-side narrow
+// commands so actor identity is derived from the KV-stored provider profile —
+// a compromised WebView cannot forge the actor field. On the non-Tauri
+// (dev/browser-preview) path they fall back to appendAudit so the dev loop
+// still works without a running Rust backend.
+
+export async function logRecordViewed(encounterId, status) {
+  if (isTauri) return invoke('audit_log_record_viewed', { encounterId, status });
+  return appendAudit(keys.noteAudit(encounterId), 'record_viewed', { encounterId, status });
+}
+
+export async function logNoteEdited(encounterId) {
+  if (isTauri) return invoke('audit_log_note_edited', { encounterId });
+  return appendAudit(keys.noteAudit(encounterId), 'note_edited', { encounterId });
+}
+
+export async function logNoteSigned(encounterId, contentHash) {
+  if (isTauri) return invoke('audit_log_note_signed', { encounterId, contentHash });
+  return appendAudit(keys.noteAudit(encounterId), 'note_signed', { encounterId, contentHash });
+}
+
+export async function logAudioDeleted(encounterId, removed, reason, error) {
+  if (isTauri) return invoke('audit_log_audio_deleted', { encounterId, removed, reason, error: error ?? null });
+  return appendAudit(keys.noteAudit(encounterId), 'audio_deleted', { encounterId, removed, reason, error });
+}
+
+export async function logNoteExported(encounterId, format, method) {
+  if (isTauri) return invoke('audit_log_note_exported', { encounterId, format, method });
+  return appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method });
 }

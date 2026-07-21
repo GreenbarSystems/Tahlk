@@ -3,7 +3,7 @@
 // module orchestrates: write content, append a chain entry, emit, audit.
 
 import { kvGet, kvSetAwait } from '../core/storageBackend.js';
-import { appendAudit } from '../core/auditLog.js';
+import { logNoteEdited, logNoteSigned, logAudioDeleted } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
 import { computeNoteHash } from '../utils/contentHash.js';
 import { appendHistoryEntry, loadHistory } from '../domain/historyChain.js';
@@ -32,7 +32,7 @@ export async function saveDraftEdited(encounterId, noteContent, transcript) {
   await kvSetAwait(keys.noteContent(encounterId), noteContent);
   const contentHash = await computeNoteHash({ transcript, noteContent, signedBy: '', encounterId });
   await appendHistoryEntry(encounterId, { action: 'edited', actor: 'provider', contentHash });
-  await appendAudit(keys.noteAudit(encounterId), 'note_edited', { encounterId });
+  await logNoteEdited(encounterId);
   emit('scribe:draft_saved', { encounterId });
 }
 
@@ -52,7 +52,7 @@ export async function signNote(encounterId, noteContent, transcript, providerNam
 
   await encountersRepo.markSigned(encounterId, nowISO(), contentHash);
 
-  await appendAudit(keys.noteAudit(encounterId), 'note_signed', { encounterId, contentHash });
+  await logNoteSigned(encounterId, contentHash);
   emit('scribe:note_signed', { encounterId, hash: contentHash });
   return contentHash;
 }
@@ -73,7 +73,7 @@ export async function purgeAudio(encounterId, { reason = 'manual' } = {}) {
   } catch (e) {
     error = e?.message || String(e);
   }
-  await appendAudit(keys.noteAudit(encounterId), 'audio_deleted', { encounterId, removed, reason, error });
+  await logAudioDeleted(encounterId, removed, reason, error);
   emit('scribe:audio_deleted', { encounterId, removed, reason, error });
   return { removed, error };
 }

@@ -1,9 +1,8 @@
 // Export formatters — plain text, SimplePractice, TherapyNotes, clipboard.
 
 import { invoke, clipboardWriteText, clipboardReadText } from '../platform/tauri.js';
-import { appendAudit } from '../core/auditLog.js';
+import { logNoteExported } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
-import { keys } from '../data/keys.js';
 import { displayDateShort } from '../utils/format.js';
 
 // How long copied PHI is allowed to linger on the clipboard before auto-clear.
@@ -71,7 +70,7 @@ export async function copyToClipboard(text, encounterId, format) {
     if (_pendingClipboardText === text) _pendingClipboardText = null;
   }, CLIPBOARD_CLEAR_MS);
 
-  await appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method: 'clipboard' });
+  await logNoteExported(encounterId, format, 'clipboard');
   emit('scribe:note_exported', { encounterId, format });
 }
 
@@ -101,6 +100,6 @@ export function exportFilename(encounter, ext = 'txt') {
 export async function saveToFile(text, encounter, format) {
   await invoke('export_note_to_file', { content: text, suggestedName: exportFilename(encounter) });
 
-  await appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format, method: 'file' });
+  await logNoteExported(encounter.id, format, 'file');
   emit('scribe:note_exported', { encounterId: encounter.id, format });
 }

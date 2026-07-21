@@ -13,9 +13,8 @@
 
 import { jsPDF } from 'jspdf';
 import { invoke } from '../platform/tauri.js';
-import { appendAudit } from '../core/auditLog.js';
+import { logNoteExported } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
-import { keys } from '../data/keys.js';
 import { exportFilename } from './exportFormatter.js';
 import { displayDateShort } from '../utils/format.js';
 
@@ -136,7 +135,7 @@ export async function saveToPdf(note, encounter) {
     suggestedName: exportFilenamePdf(encounter),
   });
 
-  await appendAudit(keys.noteAudit(encounter.id), 'note_exported', { format: 'pdf', method: 'file' });
+  await logNoteExported(encounter.id, 'pdf', 'file');
   emit('scribe:note_exported', { encounterId: encounter.id, format: 'pdf' });
 
   if (archivePdfHook) {
