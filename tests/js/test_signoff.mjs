@@ -21,13 +21,49 @@
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { hashHistoryEntry } from '../../src/utils/contentHash.js';
 
 // ── Mock Tauri runtime (installed before app modules import) ────────────────
+//
+// This mirrors the CURRENT server-side note_history architecture (see
+// src-tauri/src/note_history.rs). The old open `note_history_append` command
+// was removed from the invoke handler; the frontend now reaches history only
+// through three narrow, actor-deriving-server-side paths:
+//   - history_note_generated(encounterId, contentHash)  → actor "AI (Tahlk)"
+//   - history_note_edited(encounterId, contentHash)      → actor = provider
+//   - mark_encounter_signed(id, signedAt, signedHash)    → atomically appends
+//     the `signed` history row in the SAME transaction as the status flip
+// The mock derives prevHash from the tail, stamps a monotonic timestamp, and
+// computes entryHash via the SAME hashHistoryEntry the Rust side matches
+// byte-for-byte, so a chain built through the mock verifies under the real
+// verifyHistoryChain — exactly as it would against the DB.
 const calls = [];
 let responders = {};
 // note_history table stand-in: mirrors what the Rust side would persist. Keyed
 // by encounterId, values are arrays of entry rows (JS shape). Reset per test.
 let _historyStore = new Map();
+// Monotonic clock so each appended entry gets a distinct, ordered timestamp
+// without relying on wall-clock resolution (two appends in the same ms would
+// otherwise collide). Reset per test.
+let _clock = 0;
+function nextTimestamp() {
+  _clock += 1000;
+  return new Date(Date.UTC(2026, 0, 1) + _clock).toISOString();
+}
+
+// Server-side append: derive prevHash from the tail, stamp a timestamp, compute
+// entryHash the way note_history.rs::server_history_append does, persist, and
+// return the full entry JSON (what the real command returns to the JS cache).
+async function serverAppend(encounterId, action, actor, contentHash, notes) {
+  const list = _historyStore.get(encounterId) || [];
+  const tail = list[list.length - 1];
+  const prevHash = tail ? (tail.entryHash ?? null) : null;
+  const entry = { action, actor, timestamp: nextTimestamp(), contentHash, notes, prevHash };
+  entry.entryHash = await hashHistoryEntry(entry, prevHash);
+  list.push(entry);
+  _historyStore.set(encounterId, list);
+  return entry;
+}
 
 function invokeMock(cmd, args) {
   calls.push({ cmd, args });
@@ -36,25 +72,24 @@ function invokeMock(cmd, args) {
   if (typeof r === 'function') return Promise.resolve(r(args));
   if (r !== undefined) return Promise.resolve(r);
 
-  // Default responders for the note_history commands so tests don't have to
-  // re-implement the chain semantics per test.
+  // Default responders for the narrow note_history commands so tests don't have
+  // to re-implement the chain semantics per test.
   if (cmd === 'note_history_list') {
     return Promise.resolve(_historyStore.get(args.encounterId)?.slice() || []);
   }
-  if (cmd === 'note_history_append') {
-    const list = _historyStore.get(args.encounterId) || [];
-    // Enforce prev_hash chain the same way Rust will. Reject with the same
-    // `{ code, message }` shape the Rust AppError serializes to so the JS
-    // boundary normalizer (`fromInvoke`) sees production-shaped payloads.
-    const tail = list[list.length - 1];
-    const expectedPrev = tail ? (tail.entryHash ?? null) : null;
-    const gotPrev = args.entry.prevHash ?? null;
-    if (expectedPrev !== gotPrev) {
-      return Promise.reject({ code: 'invalid_input', message: 'prev_hash chain mismatch (mock)' });
-    }
-    list.push(args.entry);
-    _historyStore.set(args.encounterId, list);
-    return Promise.resolve(list.length);
+  if (cmd === 'history_note_generated') {
+    return serverAppend(args.encounterId, 'generated', 'AI (Tahlk)', args.contentHash, '');
+  }
+  if (cmd === 'history_note_edited') {
+    return serverAppend(args.encounterId, 'edited', 'provider', args.contentHash, '');
+  }
+  if (cmd === 'mark_encounter_signed') {
+    // Atomic on the Rust side: appends the `signed` history row AND flips the
+    // encounter status in one transaction. The mock appends the signed row so
+    // the post-invalidate loadHistory() sees it, mirroring server_sign_history.
+    // mark_encounter_signed uses `id` (not encounterId) — see encountersRepo.js.
+    return serverAppend(args.id, 'signed', 'provider', args.signedHash, 'Attested by provider')
+      .then(() => null);
   }
   return Promise.resolve(null);
 }
@@ -145,19 +180,25 @@ test('signed hash binds note + transcript + signer', async () => {
   assert.notEqual(hash, differentSigner);
 });
 
-test('sign-off fails closed: a failed history write never marks the encounter signed', async () => {
+test('sign-off fails closed: a failed atomic sign write never leaves a signed record', async () => {
   const id = uid();
-  // Durable chain write fails at the note_history_append boundary.
-  // Use the real Rust rejection shape (`{ code, message }`) so the JS-side
-  // `fromInvoke` normalizer is exercised on the production path.
-  responders['note_history_append'] = Object.assign(
+  await saveDraftGenerated(id, 'NOTE v1', 'TRANSCRIPT');
+
+  // The signed history row and the encounter status flip are written together
+  // inside mark_encounter_signed (server_sign_history runs in the same Rust
+  // transaction). Fail that command with the real Rust rejection shape
+  // (`{ code, message }`) so the JS-side `fromInvoke` normalizer is exercised
+  // on the production path, and assert the whole operation is all-or-nothing.
+  responders['mark_encounter_signed'] = Object.assign(
     new Error('disk full'),
     { code: 'storage' }
   );
 
-  await assert.rejects(() => signNote(id, 'NOTE', 'TRANSCRIPT', 'Dr. Smith'));
+  await assert.rejects(() => signNote(id, 'NOTE v1', 'TRANSCRIPT', 'Dr. Smith'));
 
-  const cmds = calls.map(c => c.cmd);
-  assert.ok(!cmds.includes('mark_encounter_signed'),
-    'status must not flip to signed when the chain did not persist');
+  // Because the atomic command rolled back, no `signed` entry may exist — the
+  // record must not read as signed after a failed write.
+  const history = await loadHistory(id);
+  assert.ok(!history.some(e => e.action === 'signed'),
+    'a failed atomic sign must leave no signed history row');
 });

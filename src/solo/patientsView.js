@@ -285,7 +285,7 @@ export function wirePatientsView(rerender) {
       const cancelId = `destroy-cancel-${patientId}`;
       const countLabel = count === 0
         ? 'any linked'
-        : `<strong>${count}</strong>`;
+        : `<strong>${escapeHtml(count)}</strong>`;
 
       const panel = document.createElement('div');
       panel.className = 'patient-destroy-panel';
@@ -299,14 +299,14 @@ export function wirePatientsView(rerender) {
           Every destruction is logged. <strong>This cannot be undone.</strong>
         </p>
         <label class="patient-destroy-panel__check">
-          <input type="checkbox" id="${checkId}" />
+          <input type="checkbox" id="${escapeHtml(checkId)}" />
           I understand this permanently destroys all records and cannot be undone.
         </label>
         <div class="patient-destroy-panel__actions">
-          <button class="btn btn-danger btn-sm" id="${submitId}" disabled>
+          <button class="btn btn-danger btn-sm" id="${escapeHtml(submitId)}" disabled>
             Destroy all records
           </button>
-          <button class="btn btn-ghost btn-sm" id="${cancelId}">Cancel</button>
+          <button class="btn btn-ghost btn-sm" id="${escapeHtml(cancelId)}">Cancel</button>
         </div>
       `;
       row.appendChild(panel);

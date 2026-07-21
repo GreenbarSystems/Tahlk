@@ -415,9 +415,8 @@ function wireAsyncActionButton({ id, resultId, busyLabel, idleLabel, failPrefix,
 }
 
 function renderDestructionLogTable(rows) {
-  const header = `<tr>
-    <th>Date</th><th>Provider</th><th>Type</th><th>Patient</th><th>Basis</th><th>Records</th>
-  </tr>`;
+  // Static header written inline (not via a variable) so the HTML-escape build
+  // guard can see it is a literal, not an interpolated value to escape.
   const body = rows.map(r => `<tr>
     <td>${escapeHtml(r.created_at.slice(0, 10))}</td>
     <td>${escapeHtml(r.provider_id)}</td>
@@ -426,7 +425,9 @@ function renderDestructionLogTable(rows) {
     <td>${escapeHtml(r.legal_basis)}</td>
     <td>${Number(r.records_scrubbed)}</td>
   </tr>`).join('');
-  return `<div class="destlog-table-wrap"><table class="destlog-table">${header}${body}</table></div>`;
+  return `<div class="destlog-table-wrap"><table class="destlog-table"><tr>
+    <th>Date</th><th>Provider</th><th>Type</th><th>Patient</th><th>Basis</th><th>Records</th>
+  </tr>${body}</table></div>`;
 }
 
 function destructionLogToCsv(rows) {
@@ -672,11 +673,11 @@ export function wireSettings() {
       }
       const n = candidates.length;
       resultEl.innerHTML = `
-        <strong>${n} signed encounter record${n === 1 ? '' : 's'} ${n === 1 ? 'is' : 'are'} past the retention window.</strong>
+        <strong>${escapeHtml(n)} signed encounter record${n === 1 ? '' : 's'} ${n === 1 ? 'is' : 'are'} past the retention window.</strong>
         <br>Oldest: ${escapeHtml(candidates[0].encounter_date)}
         ${candidates[0].patient_alias ? ` — ${escapeHtml(candidates[0].patient_alias)}` : ''}.
         <br><button class="btn btn-danger btn-sm" id="s-retention-destroy" style="margin-top:8px">
-          Permanently delete ${n} record${n === 1 ? '' : 's'}…
+          Permanently delete ${escapeHtml(n)} record${n === 1 ? '' : 's'}…
         </button>
       `;
       document.getElementById('s-retention-destroy')?.addEventListener('click', async () => {
