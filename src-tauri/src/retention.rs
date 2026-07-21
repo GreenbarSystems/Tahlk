@@ -332,15 +332,11 @@ pub(crate) async fn retention_destroy_eligible(
     }
     drop(conn); // release before async audio cleanup
 
-    // Best-effort audio cleanup after SQL commit.
+    // Audio cleanup after the SQL commit. Each unremovable file is recorded as
+    // `disposal_incomplete` rather than only logged — see
+    // audio::purge_after_destruction.
     for id in &ids {
-        if let Err(e) = crate::audio::delete_session_audio(app.clone(), id.clone()).await {
-            log::error!(
-                "retention_destroy_eligible: audio cleanup failed for {}: {}",
-                id,
-                crate::log_safety::cap_len(&e.to_string())
-            );
-        }
+        crate::audio::purge_after_destruction(&app, &state.0, id, &provider_id).await;
     }
 
     Ok(json!({ "destroyed": ids.len() as i64 }))

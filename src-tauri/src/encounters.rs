@@ -239,23 +239,21 @@ pub(crate) async fn delete_encounter(
     state: State<'_, DbState>,
     id: String,
 ) -> Result<(), AppError> {
+    let provider_id;
     {
         let mut conn = state.0.get()?;
-        let provider_id = crate::kv_ops::provider_id(&conn);
+        provider_id = crate::kv_ops::provider_id(&conn);
         delete_encounter_row(&mut conn, &id, &provider_id, "provider_request")?;
         // conn dropped here, before the .await below — no DB lock held
         // across await, same discipline notes.rs's read_api_key uses.
     }
 
-    // Best-effort, after the SQL commit: a failure here never leaves a
-    // half-deleted encounters row, only an orphaned .wav.enc file on disk,
-    // which is a strictly smaller problem than an inconsistent DB state.
-    if let Err(e) = crate::audio::delete_session_audio(app, id).await {
-        log::error!(
-            "delete_encounter: residual audio cleanup failed: {}",
-            crate::log_safety::cap_len(&e.to_string())
-        );
-    }
+    // After the SQL commit: a failure here never leaves a half-deleted
+    // encounters row, only an orphaned .wav.enc on disk — a strictly smaller
+    // problem than an inconsistent DB state, but not a silent one. An
+    // unremovable file is recorded as `disposal_incomplete` in the same
+    // destruction_log that just claimed this encounter was destroyed.
+    crate::audio::purge_after_destruction(&app, &state.0, &id, &provider_id).await;
 
     Ok(())
 }

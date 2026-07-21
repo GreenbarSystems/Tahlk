@@ -856,7 +856,16 @@ pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(
             .map_err(AppError::internal_from)?
             .join("audio");
         let key = crate::audio_crypto::audio_key()?;
-        crate::audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)
+        let n = crate::audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)?;
+        // Same reconciliation as the pre-auth path in lib.rs::setup: find PHI
+        // audio whose encounter row is gone and either finish the disposal or
+        // record that it could not be finished.
+        let provider = crate::kv_ops::provider_id(&conn);
+        let orphans = crate::audio::reconcile_orphaned_audio(&conn, &audio_dir, &provider)?;
+        if orphans > 0 {
+            log::warn!("reconciled {orphans} orphaned audio file(s) after prior destruction");
+        }
+        Ok(n)
     })() {
         log::error!(
             "audio at-rest migration skipped post-auth: {}",

@@ -140,7 +140,18 @@ pub fn run() {
                         .map_err(errors::AppError::internal_from)?
                         .join("audio");
                     let key = audio_crypto::audio_key()?;
-                    audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)
+                    let n = audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)?;
+                    // Reconcile AFTER the migration, which renames legacy
+                    // `.wav` to `.wav.enc` — sweeping first would miss them.
+                    // Finds PHI audio whose encounter row is gone, including
+                    // the case where a prior destruction died mid-cleanup and
+                    // left no record at all.
+                    let provider = crate::kv_ops::provider_id(&conn);
+                    let orphans = audio::reconcile_orphaned_audio(&conn, &audio_dir, &provider)?;
+                    if orphans > 0 {
+                        log::warn!("reconciled {orphans} orphaned audio file(s) after prior destruction");
+                    }
+                    Ok(n)
                 })() {
                     Ok(_) => {}
                     Err(e) => log::error!("audio at-rest migration skipped: {}", log_safety::cap_len(&e.to_string())),

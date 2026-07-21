@@ -252,16 +252,12 @@ pub(crate) async fn destroy_patient_records(
     }
     drop(conn); // release DB connection before the async .await calls below
 
-    // Best-effort audio cleanup — after the SQL commit so a file-delete failure
-    // never leaves a partially-committed DB state.
+    // Audio cleanup after the SQL commit, so a file-delete failure never
+    // leaves a partially-committed DB state. Each unremovable file is recorded
+    // as `disposal_incomplete` rather than only logged — see
+    // audio::purge_after_destruction.
     for enc_id in &encounter_ids {
-        if let Err(e) = crate::audio::delete_session_audio(app.clone(), enc_id.clone()).await {
-            log::error!(
-                "destroy_patient_records: audio cleanup failed for {}: {}",
-                enc_id,
-                crate::log_safety::cap_len(&e.to_string())
-            );
-        }
+        crate::audio::purge_after_destruction(&app, &state.0, enc_id, &provider_id).await;
     }
 
     Ok(json!({ "encounters_destroyed": encounters_destroyed }))
