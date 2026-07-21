@@ -91,10 +91,45 @@ pub(crate) const KEYCHAIN_ONLY_KEYS: &[&str] = &[
     crate::baa::BAA_ACK_KEY,
 ];
 
+/// Provider profile KV key. The profile is the source of truth for the actor
+/// identity stamped on patient audit trail entries. Its write path is guarded
+/// so a compromised WebView cannot forge audit identity via `kv_set` (C3 fix).
+/// Reads remain accessible via `kv_get`/`kv_list` so the existing synchronous
+/// read pattern (cache warmup → `kvGet()` in JS) continues to work.
+pub(crate) const NOTE_PROVIDER_PROFILE_KEY: &str = "note_provider_v1::profile";
+
+/// KV keys that must not be written through the generic `kv_set`/`kv_remove`
+/// commands but ARE still readable via `kv_get`/`kv_list`. Distinct from
+/// `KEYCHAIN_ONLY_KEYS` which blocks both reads and writes.
+///
+/// # Adding a new key here
+/// 1. Append the exact key string and update the `write_only_protected_keys_is_pinned` pin.
+/// 2. Create a dedicated `#[tauri::command]` for the write path (bypasses `guard_write_key`).
+/// 3. The read path via `kv_get`/`kv_list` remains open — no extra steps needed for reads.
+pub(crate) const WRITE_ONLY_PROTECTED_KEYS: &[&str] = &[NOTE_PROVIDER_PROFILE_KEY];
+
 /// True when `key` names a value that must live in the OS keychain and is
 /// therefore forbidden from the generic KV API. Pure function — no DB.
 pub(crate) fn is_secret_key(key: &str) -> bool {
     KEYCHAIN_ONLY_KEYS.contains(&key)
+}
+
+/// True when `key` must not be written through the generic `kv_set`/`kv_remove`
+/// commands (covers both keychain-only AND write-only-protected keys).
+pub(crate) fn is_write_protected(key: &str) -> bool {
+    is_secret_key(key) || WRITE_ONLY_PROTECTED_KEYS.contains(&key)
+}
+
+/// Reject writes (set / remove) to any guarded key. Used in `kv_set` and
+/// `kv_remove` instead of `guard_key` so write-protected-but-readable keys
+/// (like the provider profile) are blocked only on the mutation path.
+pub(crate) fn guard_write_key(key: &str) -> Result<(), AppError> {
+    if is_write_protected(key) {
+        return Err(AppError::invalid(
+            "this key cannot be written via the generic KV API; use the dedicated command",
+        ));
+    }
+    Ok(())
 }
 
 fn keyring_entry() -> Result<keyring::Entry, AppError> {
@@ -179,6 +214,27 @@ pub(crate) fn clear_api_key(state: State<DbState>) -> Result<(), AppError> {
 #[tauri::command]
 pub(crate) fn has_api_key(state: State<DbState>) -> Result<bool, AppError> {
     Ok(read_api_key(&state).is_some())
+}
+
+/// Dedicated write path for the provider profile (audit finding C3). Bypasses
+/// `guard_write_key` (which blocks the generic `kv_set` route) and validates
+/// profile shape before persisting. This is the ONLY write route for
+/// `note_provider_v1::profile` — generic `kv_set` and `kv_remove` are blocked.
+///
+/// Reads continue to work via `kv_get`/`kv_list` so the existing synchronous
+/// cache warmup path (`kvGet()` in JS) is undisturbed.
+#[tauri::command]
+pub(crate) fn set_provider_profile(state: State<DbState>, profile: Value) -> Result<(), AppError> {
+    match profile["name"].as_str() {
+        Some(n) if !n.trim().is_empty() => {}
+        _ => return Err(AppError::invalid("provider profile name is required")),
+    }
+    let json = serde_json::to_string(&profile).map_err(AppError::internal_from)?;
+    if json.len() > crate::kv::MAX_KV_VALUE_BYTES {
+        return Err(AppError::invalid("provider profile value too large"));
+    }
+    let conn = state.0.get()?;
+    crate::kv_ops::upsert_json(&conn, NOTE_PROVIDER_PROFILE_KEY, &json)
 }
 
 #[cfg(test)]
@@ -300,6 +356,34 @@ mod tests {
             KEYCHAIN_ONLY_KEYS,
             &[API_KEY_KV, crate::baa::BAA_ACK_KEY],
             "KEYCHAIN_ONLY_KEYS changed — review carefully and update this pin."
+        );
+    }
+
+    // Pin the write-only-protected list. Same discipline as keychain_only_keys_is_pinned:
+    // any addition requires a coordinated dedicated read/write command and a test update.
+    #[test]
+    fn write_only_protected_keys_is_pinned() {
+        assert_eq!(
+            WRITE_ONLY_PROTECTED_KEYS,
+            &[NOTE_PROVIDER_PROFILE_KEY],
+            "WRITE_ONLY_PROTECTED_KEYS changed — review carefully and update this pin."
+        );
+    }
+
+    // C3: the provider profile key must be blocked from generic writes but still
+    // readable via guard_key (which only checks KEYCHAIN_ONLY_KEYS).
+    #[test]
+    fn provider_profile_write_is_blocked_but_read_is_allowed() {
+        // Write path: guard_write_key must reject the profile key.
+        let write_err = guard_write_key(NOTE_PROVIDER_PROFILE_KEY).unwrap_err();
+        assert!(
+            matches!(write_err, AppError::InvalidInput(_)),
+            "guard_write_key must reject the profile key"
+        );
+        // Read path: guard_key (used by kv_get) must allow the profile key.
+        assert!(
+            guard_key(NOTE_PROVIDER_PROFILE_KEY).is_ok(),
+            "guard_key must allow the profile key — reads remain accessible"
         );
     }
 

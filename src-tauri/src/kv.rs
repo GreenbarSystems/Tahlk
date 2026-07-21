@@ -12,7 +12,7 @@ use tauri::State;
 
 use crate::errors::AppError;
 use crate::kv_ops;
-use crate::secrets::{guard_key, is_secret_key};
+use crate::secrets::{guard_key, guard_write_key, is_secret_key};
 use crate::DbState;
 
 /// Ceiling on KV key length. Every legitimate key in this app is a
@@ -58,7 +58,11 @@ pub(crate) fn kv_get(state: State<DbState>, key: String) -> Result<Option<Value>
 
 #[tauri::command]
 pub(crate) fn kv_set(state: State<DbState>, key: String, value: Value) -> Result<(), AppError> {
-    guard_key(&key)?;
+    // C3: block writes to write-protected keys (KEYCHAIN_ONLY + WRITE_ONLY_PROTECTED).
+    // kv_get keeps guard_key (read-only block for keychain keys); kv_set and kv_remove
+    // use guard_write_key (write block for both lists) so the provider profile remains
+    // readable via kv_get/kv_list but cannot be forged through the generic write surface.
+    guard_write_key(&key)?;
     check_key_size(&key)?;
     let json = serde_json::to_string(&value).map_err(AppError::internal_from)?;
     // Check the serialized size BEFORE taking the DB lock — a rejected write
@@ -67,12 +71,20 @@ pub(crate) fn kv_set(state: State<DbState>, key: String, value: Value) -> Result
         return Err(AppError::invalid("kv value too large"));
     }
     let conn = state.0.get()?;
+    // C1: block writes to note_content_v1::<id> / note_content_v1::transcript::<id>
+    // when the encounter is already signed. The signed_hash must remain verifiable
+    // against immutable content — allowing a post-sign overwrite via generic kv_set
+    // would silently invalidate the attestation without updating signed_hash.
+    if let Some(enc_id) = note_content_encounter_id(&key) {
+        block_if_encounter_signed(&conn, enc_id)?;
+    }
     kv_ops::upsert_json(&conn, &key, &json)
 }
 
 #[tauri::command]
 pub(crate) fn kv_remove(state: State<DbState>, key: String) -> Result<(), AppError> {
-    guard_key(&key)?;
+    // C3: same write-guard as kv_set (see comment there).
+    guard_write_key(&key)?;
     check_key_size(&key)?;
     let conn = state.0.get()?;
     kv_ops::delete_by_key(&conn, &key)?;
@@ -99,6 +111,44 @@ fn escape_like_prefix(prefix: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+/// If `key` is a note-content key for an encounter, return the encounter id.
+/// Covers both `note_content_v1::<id>` and `note_content_v1::transcript::<id>`.
+/// Returns `None` for any other key. (C1)
+fn note_content_encounter_id(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("note_content_v1::")?;
+    // Transcript variant: note_content_v1::transcript::<id>
+    if let Some(enc_id) = rest.strip_prefix("transcript::") {
+        return Some(enc_id);
+    }
+    Some(rest)
+}
+
+/// Return an error if the encounter with `enc_id` is currently signed.
+///
+/// A signed encounter's note content must be immutable so the stored
+/// `signed_hash` remains verifiable against what the provider attested.
+/// Allowing a post-sign `kv_set` would silently invalidate the attestation
+/// without touching the `signed_hash` column — an undetectable integrity gap.
+/// (C1)
+fn block_if_encounter_signed(
+    conn: &rusqlite::Connection,
+    enc_id: &str,
+) -> Result<(), AppError> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM encounters WHERE id = ?1",
+            rusqlite::params![enc_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if status.as_deref() == Some("signed") {
+        return Err(AppError::invalid(
+            "cannot overwrite note content of a signed encounter",
+        ));
+    }
+    Ok(())
 }
 
 // Inner helper driven by a bare `Connection`. Extracted from `kv_list` so unit

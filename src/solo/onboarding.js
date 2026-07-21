@@ -1,6 +1,7 @@
 // First-run onboarding — collect provider info and API key.
 
-import { kvGet, kvSet } from '../core/storageBackend.js';
+import { kvGet, kvSet, kvSetCacheOnly } from '../core/storageBackend.js';
+import { invoke } from '../platform/tauri.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
 import { toast, escapeHtml } from '../utils/format.js';
@@ -98,11 +99,21 @@ export async function wireOnboarding(onComplete) {
     const apiKey = document.getElementById('ob-apikey')?.value.trim();
     if (!apiKey) { toast('Anthropic API key is required.'); return; }
 
-    kvSet(PROVIDER_KEY, {
+    // Use the dedicated set_provider_profile command (C3 fix). Generic kv_set
+    // is write-blocked for this key; sync the in-memory cache afterwards so
+    // synchronous kvGet(keys.provider()) reads work for the rest of this session.
+    const profile = {
       name,
       credentials: document.getElementById('ob-creds')?.value.trim() || '',
       specialty:   document.getElementById('ob-specialty')?.value || 'psychiatry',
-    });
+    };
+    try {
+      await invoke('set_provider_profile', { profile });
+      kvSetCacheOnly(PROVIDER_KEY, profile);
+    } catch (e) {
+      toast(`Could not save profile: ${userMessage(e, 'unknown error')}`);
+      return;
+    }
     // Store the API key write-only — it never round-trips back to JS.
     try {
       await secretsRepo.setApiKey(apiKey);

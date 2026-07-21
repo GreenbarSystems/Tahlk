@@ -1,7 +1,7 @@
 // Settings modal — provider profile, API key, Whisper model management.
 
+import { kvGet, kvSet, kvSetCacheOnly, kvEnsure } from '../core/storageBackend.js';
 import { invoke } from '../platform/tauri.js';
-import { kvGet, kvSet, kvEnsure } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { baaRepo } from '../data/baa.js';
 import { keys } from '../data/keys.js';
@@ -515,14 +515,23 @@ export function wireSettings() {
 
   // ── Provider profile ────────────────────────────────────────────────────────
 
-  document.getElementById('s-save-provider')?.addEventListener('click', () => {
+  document.getElementById('s-save-provider')?.addEventListener('click', async () => {
     const profile = {
       name:        document.getElementById('s-name')?.value.trim() || '',
       credentials: document.getElementById('s-creds')?.value.trim() || '',
       specialty:   document.getElementById('s-specialty')?.value || 'psychiatry',
     };
-    kvSet(PROVIDER_KEY, profile);
-    toast('Profile saved.');
+    // Use the dedicated set_provider_profile command (C3 fix). Generic kv_set
+    // is write-blocked for this key to prevent audit-identity forgery.
+    // After the Rust write succeeds, sync the in-memory cache so subsequent
+    // synchronous kvGet(keys.provider()) reads reflect the new value.
+    try {
+      await invoke('set_provider_profile', { profile });
+      kvSetCacheOnly(PROVIDER_KEY, profile);
+      toast('Profile saved.');
+    } catch (e) {
+      toast(`Could not save profile: ${userMessage(e, 'unknown error')}`);
+    }
   });
 
   const apiKeyInput = document.getElementById('s-apikey');

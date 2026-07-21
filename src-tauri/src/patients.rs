@@ -26,6 +26,7 @@ use tauri::{AppHandle, State};
 use crate::db::{patient_row_to_json, PATIENT_COLS};
 use crate::errors::AppError;
 use crate::patient_audit;
+use crate::retention;
 use crate::DbState;
 
 /// Derive the acting provider's display name from the KV-stored profile.
@@ -100,20 +101,32 @@ pub(crate) fn get_patient_conn(conn: &Connection, id: &str) -> Result<Option<Val
     Ok(conn.query_row(&sql, params![id], patient_row_to_json).optional()?)
 }
 
-fn check_provider_id(provider_id: &str) -> Result<(), AppError> {
-    if provider_id.len() > crate::MAX_PROVIDER_ID_BYTES {
-        return Err(AppError::invalid(format!(
-            "provider_id exceeds {} bytes",
-            crate::MAX_PROVIDER_ID_BYTES
-        )));
-    }
-    Ok(())
+/// Read the acting provider's display name from `note_provider_v1::profile`
+/// in the KV table. Falls back to `"provider"` when the profile is absent or
+/// has no `name` field, so audit rows always carry a non-empty actor identity.
+///
+/// Provider identity is now derived server-side (audit finding C2) instead of
+/// accepting a caller-supplied `provider_id` parameter. A compromised WebView
+/// can no longer forge the audit actor identity by passing an arbitrary string
+/// to `upsert_patient` or `delete_patient`.
+fn read_provider_id(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    .and_then(|v| v["name"].as_str().map(String::from))
+    .unwrap_or_else(|| "provider".to_string())
 }
 
 #[tauri::command]
-pub(crate) fn upsert_patient(state: State<DbState>, patient: Value, provider_id: String) -> Result<(), AppError> {
-    check_provider_id(&provider_id)?;
+pub(crate) fn upsert_patient(state: State<DbState>, patient: Value) -> Result<(), AppError> {
     let mut conn = state.0.get()?;
+    let provider_id = read_provider_id(&conn);
     upsert_patient_conn(&mut conn, &patient, &provider_id)
 }
 
@@ -167,13 +180,21 @@ pub(crate) fn upsert_patient_conn(conn: &mut Connection, patient: &Value, provid
 }
 
 #[tauri::command]
-pub(crate) fn delete_patient(state: State<DbState>, id: String, provider_id: String) -> Result<(), AppError> {
-    check_provider_id(&provider_id)?;
+pub(crate) fn delete_patient(state: State<DbState>, id: String) -> Result<(), AppError> {
     let mut conn = state.0.get()?;
+    let provider_id = read_provider_id(&conn);
     delete_patient_conn(&mut conn, &id, &provider_id)
 }
 
 pub(crate) fn delete_patient_conn(conn: &mut Connection, id: &str, provider_id: &str) -> Result<(), AppError> {
+    // C5: block deletions when a litigation hold is active. The hold flag lives
+    // in the same DB (kv table), so the check uses the same connection — no
+    // extra round-trip required. Fail-open on DB error (see retention.rs doc).
+    if retention::litigation_hold_active(conn) {
+        return Err(AppError::invalid(
+            "litigation hold is active — patient records cannot be deleted until the hold is lifted",
+        ));
+    }
     let tx = conn.transaction()?;
     let n = tx.execute("DELETE FROM patients WHERE id = ?1", params![id])?;
     if n == 0 {

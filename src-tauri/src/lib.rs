@@ -183,6 +183,7 @@ pub fn run() {
             secrets::set_api_key,
             secrets::clear_api_key,
             secrets::has_api_key,
+            secrets::set_provider_profile,
             baa::baa_ack_status,
             baa::baa_ack_set,
             baa::baa_ack_clear,

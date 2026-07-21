@@ -17,12 +17,30 @@
 //!
 //! Storage: two rows in the existing `kv` table; no new tables.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
 use crate::errors::AppError;
 use crate::DbState;
+
+/// True when a litigation hold is active and all record deletions must be
+/// blocked. Called from `delete_encounter_row` and `delete_patient_conn` (C5).
+///
+/// Returns `false` on any read error — a transient DB fault should not
+/// accidentally block all deletions (fail-open is the lower-risk choice here).
+pub(crate) fn litigation_hold_active(conn: &Connection) -> bool {
+    let row: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![KV_LITIGATION_HOLD],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    row.as_deref() == Some("true")
+}
 
 fn provider_id_from_kv(conn: &Connection) -> String {
     conn.query_row(

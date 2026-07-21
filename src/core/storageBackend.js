@@ -162,6 +162,10 @@ export function kvRemove(key)       { return _backend.removeSync(key); }
 export function kvList(prefix)      { return _backend.listKeys(prefix); }
 export async function kvWarmup()    { await _backend.warmup(); }
 export async function kvEnsure(keys) { await _backend.ensureKeys(keys); }
+// Update the in-memory cache only, without triggering a Tauri kv_set call.
+// Used after writes that go through a dedicated command (e.g. set_provider_profile)
+// so synchronous kvGet() reads reflect the new value without a full warmup.
+export function kvSetCacheOnly(key, value) { _cache.set(key, value); }
 
 export function kvBackendInfo() {
   return { kind: _backend.kind, isTauri };

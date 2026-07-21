@@ -1,35 +1,21 @@
 // Patients repository — the one place that knows the patient command names and
-// argument shapes. Presentation and domain code call these methods; they never
-// see `invoke` or a command string. Mirrors encountersRepo.js.
+// argument shapes. Mirrors encountersRepo.js.
 //
-// save()/delete() resolve the acting provider's identity here and pass it as
-// providerId — the Rust side writes it into a patient_audit row in the same
-// transaction as the mutation (audit finding H2: patient CRUD previously had
-// no audit trail at all).
-//
-// Read straight from the provider profile set at onboarding, which is the same
-// source settingsModal.js uses for the BAA ack's provider_id — so both audit
-// trails name the actor identically rather than by two different rules.
-// capabilities.currentUser() ultimately derives from that same profile (Solo's
-// impl is installed in entry-solo.js), so this is not a divergence from it; it
-// just takes the one field this repo needs, with a 'provider' fallback instead
-// of currentUser()'s null-when-unset.
+// provider_id is now derived server-side from the stored provider profile (audit
+// finding C2). Previously this module read the profile from the KV cache and
+// passed it as a parameter, which a compromised WebView could replace with any
+// arbitrary string. The Rust commands now read note_provider_v1::profile directly
+// from the DB so the audit trail actor identity cannot be forged from JS.
 
 import { invoke } from '../platform/tauri.js';
-import { kvGet } from '../core/storageBackend.js';
-import { keys } from './keys.js';
-
-function currentProviderId() {
-  return (kvGet(keys.provider()) || {}).name || 'provider';
-}
 
 export const patientsRepo = {
   list:   (limit = 200) => invoke('list_patients', { limit }),
   get:    id            => invoke('get_patient', { id }),
-  save:   patient       => invoke('upsert_patient', { patient, providerId: currentProviderId() }),
+  save:   patient       => invoke('upsert_patient', { patient }),
   // Roster-only delete — removes the patients row and audit trail entry.
   // Does NOT cascade to linked encounters; use destroyRecords for that.
-  delete: id            => invoke('delete_patient', { id, providerId: currentProviderId() }),
+  delete: id            => invoke('delete_patient', { id }),
   // Permanently destroys all PHI for a patient: cascade-deletes every linked
   // encounter (note_audit scrubbed, note_history hard-deleted, each logged to
   // destruction_log), removes the patient roster row, and cleans up audio

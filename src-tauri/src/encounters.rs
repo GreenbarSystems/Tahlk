@@ -11,6 +11,7 @@ use tauri::{AppHandle, State};
 
 use crate::db::{encounter_row_to_json, ENCOUNTER_COLS};
 use crate::errors::AppError;
+use crate::retention;
 use crate::DbState;
 
 /// SHA-256 hex digest of `input` — used to blind encounter_id in note_audit
@@ -283,7 +284,6 @@ pub(crate) fn delete_encounter_in_tx(
         )
         .optional()?
         .ok_or_else(|| AppError::invalid(format!("encounter {id} not found")))?;
-
     // note_content_v1::<id> / note_content_v1::transcript::<id> are the only
     // KV rows holding this encounter's actual note text/transcript — kept in
     // sync with data/keys.js's noteContent/noteTranscript key formats by
@@ -362,6 +362,11 @@ pub(crate) fn delete_encounter_row(
     provider_id: &str,
     reason: &str,
 ) -> Result<(), AppError> {
+    if retention::litigation_hold_active(conn) {
+        return Err(AppError::invalid(
+            "litigation hold is active — encounter records cannot be deleted until the hold is lifted",
+        ));
+    }
     let tx = conn.transaction()?;
     delete_encounter_in_tx(&tx, id, provider_id, reason)?;
     tx.commit()?;

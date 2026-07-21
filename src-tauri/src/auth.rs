@@ -857,13 +857,39 @@ pub(crate) fn auth_generate_recovery_codes(
 
 /// Permanently wipe all auth data and the main encrypted database. Irreversible.
 /// For the "forgot password AND no recovery codes" scenario only.
+///
+/// Requires `credential` to be either the current master password or a valid
+/// recovery code (audit finding C4). Without this check, any JS code in a
+/// compromised WebView could call this command and silently destroy all PHI.
+/// When the wraps database does not yet exist (fresh install, nothing
+/// protected yet), the credential check is skipped.
+///
+/// If the provider has forgotten both their password and all recovery codes,
+/// they cannot use this in-app path. They must manually delete the app data
+/// directory from the operating system's file manager.
 #[tauri::command]
-pub(crate) fn auth_nuke_and_reinstall(app: AppHandle) -> Result<(), AppError> {
+pub(crate) fn auth_nuke_and_reinstall(app: AppHandle, credential: String) -> Result<(), AppError> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| AppError::internal_from(format!("could not resolve app_data_dir: {e}")))?;
-    nuke_and_reinstall(&data_dir.join("tahlk_auth.db"), &data_dir.join("tahlk.db"))
+    let wraps = data_dir.join("tahlk_auth.db");
+    let main_db = data_dir.join("tahlk.db");
+
+    // Verify the credential before destroying anything. Try password first
+    // (common case), then recovery code (forgot-password flow). Both calls
+    // perform AES-GCM decryption against the wraps DB — if both fail, reject.
+    if wraps.exists() {
+        let pass_ok = unlock_with_password(&credential, &wraps).is_ok();
+        let code_ok = !pass_ok && unlock_with_recovery_code(&credential, &wraps).is_ok();
+        if !pass_ok && !code_ok {
+            return Err(AppError::invalid(
+                "invalid credential — provide your current password or a valid recovery code to confirm",
+            ));
+        }
+    }
+
+    nuke_and_reinstall(&wraps, &main_db)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

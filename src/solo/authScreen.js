@@ -291,8 +291,9 @@ function renderNukeConfirmation(card, modal) {
       on this computer. There is no undo. Your next launch will be a fresh install.
     </p>
     <div class="field-row" style="margin-top:16px">
-      <label for="auth-nuke-confirm">Type <code>DELETE</code> to confirm</label>
-      <input id="auth-nuke-confirm" type="text" autocomplete="off" spellcheck="false" />
+      <label for="auth-nuke-credential">Enter your password or a recovery code to confirm</label>
+      <input id="auth-nuke-credential" type="password" autocomplete="off" spellcheck="false"
+             placeholder="Password or recovery code" />
     </div>
     <p class="auth-error" id="auth-nuke-error" hidden></p>
     <div class="auth-modal-actions">
@@ -303,12 +304,12 @@ function renderNukeConfirmation(card, modal) {
     </div>
   `;
 
-  const confirmInput = card.querySelector('#auth-nuke-confirm');
+  const credInput = card.querySelector('#auth-nuke-credential');
   const nukeBtn = card.querySelector('#auth-nuke-go');
   const errorEl = card.querySelector('#auth-nuke-error');
 
-  confirmInput.addEventListener('input', () => {
-    nukeBtn.disabled = confirmInput.value.trim() !== 'DELETE';
+  credInput.addEventListener('input', () => {
+    nukeBtn.disabled = !credInput.value.trim();
   });
 
   card.querySelector('#auth-nuke-back').addEventListener('click', () => {
@@ -320,17 +321,17 @@ function renderNukeConfirmation(card, modal) {
     nukeBtn.disabled = true;
     errorEl.hidden = true;
     try {
-      await authRepo.nukeAndReinstall();
+      await authRepo.nukeAndReinstall(credInput.value);
       // Hard reload so next launch starts fresh.
       window.location.reload();
     } catch (err) {
       errorEl.textContent = userMessage(err, 'Could not complete reinstall. Please try again.');
       errorEl.hidden = false;
-      nukeBtn.disabled = confirmInput.value.trim() !== 'DELETE';
+      nukeBtn.disabled = !credInput.value.trim();
     }
   });
 
-  confirmInput.focus?.();
+  credInput.focus?.();
 }
 
 // ─── first-open auth setup (Screens A → C → D) ───────────────────────────────

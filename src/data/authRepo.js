@@ -33,5 +33,7 @@ export const authRepo = {
     invoke('auth_generate_recovery_codes', { password }),
 
   // Nuclear option: wipe DB + auth_dek_wraps + all keychain entries.
-  nukeAndReinstall: () => invoke('auth_nuke_and_reinstall'),
+  // Requires the current password or a valid recovery code (C4 fix) — Rust
+  // verifies the credential before any deletion occurs.
+  nukeAndReinstall: credential => invoke('auth_nuke_and_reinstall', { credential }),
 };
