@@ -16,6 +16,35 @@ export const EAGER_PREFIXES = [
   'note_templates_v1',
 ];
 
+// ── Optimistic-write rollback ──────────────────────────────────────────────
+//
+// Every write updates the cache BEFORE the backend confirms, so synchronous
+// kvGet() stays fast. Without a rollback that optimism is a security hole:
+// Rust rejects generic writes to the guarded keys — provider profile, BAA ack,
+// retention window, litigation hold — which are precisely the values whose
+// integrity matters most. A rejected write used to leave the forged value in
+// the cache for the rest of the session while the toast said only "may not be
+// saved", and every later kvGet() returned the forgery.
+//
+// That defeated the C3 provider-profile guard outright: the poisoned name
+// flows into computeNoteHash({ signedBy }) — which Rust stores verbatim and
+// never recomputes — and into the destruction_log actor. Since the retention
+// window and litigation hold became write-protected too, a rejected write
+// there would leave the UI believing a legal hold was lifted when Rust had
+// refused to lift it.
+function _snapshot(key) {
+  return { had: _cache.has(key), prior: _cache.get(key) };
+}
+
+// Restore `key` to its pre-write state, but ONLY if the cache still holds the
+// value we optimistically wrote. A newer legitimate write that landed while
+// the failed one was in flight must not be clobbered by a stale snapshot.
+function _revert(key, snap, attempted) {
+  if (_cache.get(key) !== attempted) return;
+  if (snap.had) _cache.set(key, snap.prior);
+  else _cache.delete(key);
+}
+
 // ── TauriBackend ───────────────────────────────────────────────────────────
 
 const TauriBackend = {
@@ -53,11 +82,13 @@ const TauriBackend = {
   },
 
   setSync(key, value) {
+    const snap = _snapshot(key);
     _cache.set(key, value);
     invoke('kv_set', { key, value })
       .catch(e => {
         console.error('Tauri kv_set failed for ' + key, e);
-        toast(`Disk write failed — change may not be saved`, 4500);
+        _revert(key, snap, value);
+        toast(`Change was not saved — reverted`, 4500);
       });
   },
 
@@ -65,20 +96,32 @@ const TauriBackend = {
   // Throws on failure so callers whose correctness depends on persistence
   // (the sign-off hash chain) can fail closed instead of silently diverging.
   async setAsync(key, value) {
+    const snap = _snapshot(key);
     _cache.set(key, value);
     try {
       await invoke('kv_set', { key, value });
     } catch (e) {
       console.error('Tauri kv_set failed for ' + key, e);
-      toast(`Disk write failed — change may not be saved`, 4500);
+      // Reverting matters most here: this is the note-content path, and Rust
+      // refuses writes to a signed encounter's content. Leaving the rejected
+      // text cached would make kvGet() report content the DB never accepted.
+      _revert(key, snap, value);
+      toast(`Change was not saved — reverted`, 4500);
       throw e;
     }
   },
 
   removeSync(key) {
+    const snap = _snapshot(key);
     _cache.delete(key);
     invoke('kv_remove', { key })
-      .catch(e => console.error('Tauri kv_remove failed for ' + key, e));
+      .catch(e => {
+        console.error('Tauri kv_remove failed for ' + key, e);
+        // The attempted state is absence, so restore only if nothing has
+        // re-populated the key in the meantime.
+        if (!_cache.has(key) && snap.had) _cache.set(key, snap.prior);
+        toast(`Delete was not saved — reverted`, 4500);
+      });
   },
 
   listKeys(prefix) {
@@ -119,17 +162,26 @@ const LocalStorageBackend = {
     } catch { return null; }
   },
 
+  // Same rollback discipline as TauriBackend. The failure here is a quota or
+  // serialization error rather than a Rust guard, but the divergence is
+  // identical: a cached value that never reached storage.
   setSync(key, value) {
+    const snap = _snapshot(key);
     _cache.set(key, value);
     try { localStorage.setItem(key, JSON.stringify(value)); }
-    catch (e) { toast(`Storage error — NOT saved (${e?.name || 'unknown'})`, 4500); }
+    catch (e) {
+      _revert(key, snap, value);
+      toast(`Storage error — NOT saved (${e?.name || 'unknown'})`, 4500);
+    }
   },
 
   async setAsync(key, value) {
+    const snap = _snapshot(key);
     _cache.set(key, value);
     try {
       localStorage.setItem(key, JSON.stringify(value));
     } catch (e) {
+      _revert(key, snap, value);
       toast(`Storage error — NOT saved (${e?.name || 'unknown'})`, 4500);
       throw e;
     }
