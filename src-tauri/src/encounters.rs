@@ -226,15 +226,22 @@ pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> R
 /// scrubs PHI from the note_audit chain (tombstone + encounter_id blinding),
 /// hard-deletes note_history, and logs the act to the append-only
 /// destruction_log. Audio cleanup is best-effort after the SQL commit.
+///
+/// Takes no `provider_id`: the actor written to `destruction_log` is derived
+/// server-side from the stored profile. C2 removed the forgeable parameter
+/// from `upsert_patient` and `delete_patient` but missed this command, leaving
+/// a compromised WebView able to attribute a permanent PHI destruction to any
+/// clinician it named — on the one record HIPAA §164.310(d)(2)(i) most relies
+/// on. Every sibling destruction path already derived its actor this way.
 #[tauri::command]
 pub(crate) async fn delete_encounter(
     app: AppHandle,
     state: State<'_, DbState>,
     id: String,
-    provider_id: String,
 ) -> Result<(), AppError> {
     {
         let mut conn = state.0.get()?;
+        let provider_id = crate::kv_ops::provider_id(&conn);
         delete_encounter_row(&mut conn, &id, &provider_id, "provider_request")?;
         // conn dropped here, before the .await below — no DB lock held
         // across await, same discipline notes.rs's read_api_key uses.

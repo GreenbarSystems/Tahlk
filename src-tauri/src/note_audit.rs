@@ -82,16 +82,7 @@ fn server_append(
 ) -> Result<(), AppError> {
     // Derive actor from the KV-stored provider profile so a compromised
     // WebView cannot forge the actor identity in an audit entry.
-    let actor: String = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "provider".to_string());
+    let actor: String = crate::kv_ops::provider_id(conn);
 
     // Read the current chain tail so we can include the correct prevHash.
     let prev_hash: Option<String> = conn

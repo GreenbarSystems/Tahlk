@@ -76,16 +76,7 @@ pub(crate) fn destruction_log_note_exported(
     row_count: i64,
 ) -> Result<(), AppError> {
     let conn = state.0.get()?;
-    let provider_id: String = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "provider".to_string());
+    let provider_id = crate::kv_ops::provider_id(&conn);
     append(&conn, &provider_id, "system", "destlog_csv_export", "", "export", row_count)
 }
 

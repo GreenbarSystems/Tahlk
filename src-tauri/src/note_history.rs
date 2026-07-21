@@ -250,19 +250,8 @@ fn sha256_hex(data: &[u8]) -> String {
     hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-// Read provider name from the KV-stored provider profile.
-// Used by the narrow commands below to derive `actor` server-side.
-fn provider_name_from_kv(conn: &Connection) -> String {
-    conn.query_row(
-        "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
-        [],
-        |r| r.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-    .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
-    .unwrap_or_else(|| "provider".to_string())
-}
+// Actor is derived server-side via `kv_ops::provider_id` — this module used to
+// carry its own copy of that read (`provider_name_from_kv`).
 
 /// Raw INSERT of one note_history row inside the caller's transaction.
 /// Does NOT open its own transaction — must be called from within an
@@ -369,7 +358,7 @@ pub(crate) fn server_sign_history(
     encounter_id: &str,
     content_hash: &str,
 ) -> Result<(), AppError> {
-    let actor = provider_name_from_kv(conn);
+    let actor = crate::kv_ops::provider_id(conn);
     let notes = format!("Attested by {}", actor);
     server_history_append(conn, encounter_id, "signed", &actor, content_hash, &notes)?;
     Ok(())
@@ -401,7 +390,7 @@ pub(crate) fn history_note_edited(
 ) -> Result<Value, AppError> {
     let mut conn = state.0.get()?;
     let tx = conn.transaction()?;
-    let actor = provider_name_from_kv(&tx);
+    let actor = crate::kv_ops::provider_id(&tx);
     let entry = server_history_append(&tx, &encounter_id, "edited", &actor, &content_hash, "")?;
     tx.commit()?;
     Ok(entry)

@@ -70,17 +70,8 @@ pub(crate) fn litigation_hold_check(conn: &Connection, subject: &str) -> Result<
     Ok(())
 }
 
-fn provider_id_from_kv(conn: &Connection) -> String {
-    conn.query_row(
-        "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
-        [],
-        |r| r.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-    .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
-    .unwrap_or_else(|| "provider".to_string())
-}
+// Actor is derived server-side via `kv_ops::provider_id` — this module used to
+// carry its own copy of that read.
 
 // pub(crate) so `secrets::WRITE_ONLY_PROTECTED_KEYS` can name them directly
 // rather than repeating the literals — the guard and the reader must never
@@ -159,7 +150,7 @@ pub(crate) fn retention_set_years(
             |r| r.get(0),
         )
         .ok();
-    let actor = provider_id_from_kv(&conn);
+    let actor = crate::kv_ops::provider_id(&conn);
     crate::kv_ops::upsert_json(&conn, KV_RETENTION_YEARS, &years.to_string())?;
     crate::config_audit::append(
         &conn,
@@ -194,7 +185,7 @@ pub(crate) fn retention_hold_set(
             |r| r.get(0),
         )
         .ok();
-    let actor = provider_id_from_kv(&conn);
+    let actor = crate::kv_ops::provider_id(&conn);
     let new_value = if active { "true" } else { "false" };
     crate::kv_ops::upsert_json(&conn, KV_LITIGATION_HOLD, new_value)?;
     crate::config_audit::append(
@@ -287,7 +278,7 @@ pub(crate) async fn retention_destroy_eligible(
         ));
     }
 
-    let provider_id = provider_id_from_kv(&conn);
+    let provider_id = crate::kv_ops::provider_id(&conn);
 
     let years = retention_years(&conn);
 

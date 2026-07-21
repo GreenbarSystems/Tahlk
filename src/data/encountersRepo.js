@@ -7,12 +7,6 @@
 // patientsRepo) so the destruction_log row records who performed the act.
 
 import { invoke } from '../platform/tauri.js';
-import { kvGet } from '../core/storageBackend.js';
-import { keys } from './keys.js';
-
-function currentProviderId() {
-  return (kvGet(keys.provider()) || {}).name || 'provider';
-}
 
 export const encountersRepo = {
   list:  (limit = 50) => invoke('list_encounters', { limit }),
@@ -26,7 +20,12 @@ export const encountersRepo = {
   // + encounter_id blinding), hard-deletes note_history, and appends to the
   // append-only destruction_log. llm_audit rows (metadata only, no PHI) are
   // retained. All SQL writes are atomic in one transaction.
-  delete: id => invoke('delete_encounter', { id, providerId: currentProviderId() }),
+  // No providerId argument: Rust derives the destroying actor from the stored
+  // provider profile. Passing it from here would let a compromised WebView
+  // attribute a permanent PHI destruction to any clinician it named, in the
+  // append-only destruction_log (audit H-3; C2 closed the same hole on the
+  // patient commands but missed this one).
+  delete: id => invoke('delete_encounter', { id }),
   // Delete the .wav file on disk. Idempotent: resolves to `true` if a file
   // was removed, `false` if nothing was there. Does NOT touch the DB row —
   // callers pair this with clearAudioPath so the row and disk stay in sync.
