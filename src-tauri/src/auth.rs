@@ -452,6 +452,25 @@ pub(crate) fn is_auth_configured() -> bool {
         .is_ok()
 }
 
+/// Returns true if `path` already contains a `'password'` wrap row.
+///
+/// Used by `migrate_from_plaintext_dek` instead of `is_auth_configured()` so
+/// tests that pass a fresh temp DB are correctly seen as unconfigured even when
+/// the dev machine's OS keychain has a real app entry.
+fn wraps_db_has_password(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let Ok(conn) = open_wraps_db(path) else { return false };
+    conn.query_row(
+        "SELECT COUNT(*) FROM auth_dek_wraps WHERE wrap_type = 'password'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
 /// Set the master password for the first time (or after a full reset).
 ///
 /// Validates the password, wraps `dek` under one password KEK and three
@@ -674,7 +693,7 @@ pub(crate) fn migrate_from_plaintext_dek(
     let mut dek = [0u8; DEK_BYTES];
     dek.copy_from_slice(&dek_vec);
 
-    if is_auth_configured() {
+    if wraps_db_has_password(wraps_db_path) {
         return Err(AppError::invalid(
             "auth is already configured — use change_password to rotate the password",
         ));
