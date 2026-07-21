@@ -41,7 +41,7 @@ const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 // can be reused without positional drift.
 pub(crate) const ENCOUNTER_COLS: &str =
     "id, provider_id, encounter_date, patient_alias, status, \
-     audio_path, created_at, signed_at, signed_hash";
+     audio_path, created_at, signed_at, signed_hash, patient_id";
 
 pub(crate) fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -54,6 +54,7 @@ pub(crate) fn encounter_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value
         "created_at":     r.get::<_, String>(6)?,
         "signed_at":      r.get::<_, Option<String>>(7)?,
         "signed_hash":    r.get::<_, Option<String>>(8)?,
+        "patient_id":     r.get::<_, Option<String>>(9)?,
     }))
 }
 
@@ -166,6 +167,7 @@ const SCHEMA_TABLES: &str = "
         provider_id    TEXT NOT NULL,
         encounter_date TEXT NOT NULL,
         patient_alias  TEXT,
+        patient_id     TEXT,
         status         TEXT NOT NULL DEFAULT 'draft',
         audio_path     TEXT,
         created_at     TEXT NOT NULL,
@@ -437,6 +439,17 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     ).unwrap_or(0);
     if has_source_id == 0 {
         conn.execute_batch("ALTER TABLE patients ADD COLUMN source_id TEXT;")?;
+    }
+
+    // One-shot column migration: add patient_id to encounters on DBs created
+    // before ADR-0005 Commit 2. Same pattern as the source_id migration above.
+    let has_patient_id = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('encounters') WHERE name='patient_id'",
+        [],
+        |r| r.get::<_, i64>(0),
+    ).unwrap_or(0);
+    if has_patient_id == 0 {
+        conn.execute_batch("ALTER TABLE encounters ADD COLUMN patient_id TEXT;")?;
     }
 
     note_history::init_schema(&conn)?;

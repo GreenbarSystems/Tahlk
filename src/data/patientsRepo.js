@@ -27,5 +27,13 @@ export const patientsRepo = {
   list:   (limit = 200) => invoke('list_patients', { limit }),
   get:    id            => invoke('get_patient', { id }),
   save:   patient       => invoke('upsert_patient', { patient, providerId: currentProviderId() }),
+  // Roster-only delete — removes the patients row and audit trail entry.
+  // Does NOT cascade to linked encounters; use destroyRecords for that.
   delete: id            => invoke('delete_patient', { id, providerId: currentProviderId() }),
+  // Permanently destroys all PHI for a patient: cascade-deletes every linked
+  // encounter (note_audit scrubbed, note_history hard-deleted, each logged to
+  // destruction_log), then removes the patient roster row. Returns
+  // { encounters_destroyed: number }. Audio cleanup is the caller's responsibility
+  // — audio files live outside the DB and must be removed separately.
+  destroyRecords: id    => invoke('destroy_patient_records', { patientId: id, providerId: currentProviderId() }),
 };

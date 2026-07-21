@@ -1,10 +1,11 @@
 //! Patient roster CRUD.
 //!
 //! A lightweight standalone roster: name/alias plus an optional DOB and free
-//! notes. Deliberately NOT linked to encounters in this iteration — there is
-//! no foreign key and no `encounter.patient_id`. The table is SQLCipher-
-//! encrypted at rest like every other table (connections come pre-keyed from
-//! the pool), so alias/DOB/notes never hit disk in plaintext.
+//! notes. Since ADR-0005 Commit 2, encounters carry an optional `patient_id`
+//! foreign reference (no FK constraint) that enables cascade PHI destruction
+//! via `destroy_patient_records`. The table is SQLCipher-encrypted at rest
+//! like every other table (connections come pre-keyed from the pool), so
+//! alias/DOB/notes never hit disk in plaintext.
 //!
 //! Mirrors `encounters.rs`: `#[tauri::command]` entry points take `DbState`
 //! and delegate to pure `&Connection` helpers so the CRUD logic can be unit-
@@ -19,7 +20,7 @@
 //! existence check inside the transaction, not trusted from the caller.
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::State;
 
 use crate::db::{patient_row_to_json, PATIENT_COLS};
@@ -168,6 +169,79 @@ pub(crate) fn delete_patient_conn(conn: &mut Connection, id: &str, provider_id: 
     patient_audit::append(&tx, id, provider_id, "patient_deleted")?;
     tx.commit()?;
     Ok(())
+}
+
+/// Permanently destroy all PHI for a patient: cascade-deletes every linked
+/// encounter (scrubbing note_audit, hard-deleting note_history, logging each
+/// to destruction_log — same path as a direct encounter delete), then removes
+/// the patient roster row and appends a summary entry to destruction_log.
+///
+/// Encounters are linked by `encounters.patient_id = patient.id` (added in
+/// ADR-0005 Commit 2). For legacy encounters created before that column
+/// existed, `patient_alias` matching the patient's current alias serves as a
+/// fallback — so pre-migration encounters are included in the cascade.
+///
+/// Each encounter destruction is its own transaction (same as
+/// `delete_encounter_row` called directly). The patient-row deletion is a
+/// separate transaction that commits atomically with the patient_audit and
+/// destruction_log rows. Audio cleanup for each encounter is best-effort and
+/// must be handled by the caller (or a follow-up command) since this function
+/// is sync and audio deletion is async.
+#[tauri::command]
+pub(crate) fn destroy_patient_records(
+    state: State<DbState>,
+    patient_id: String,
+    provider_id: String,
+) -> Result<Value, AppError> {
+    check_provider_id(&provider_id)?;
+    let mut conn = state.0.get()?;
+
+    // Read alias first — acts as the existence guard and provides the
+    // patient_alias fallback for legacy encounter matching.
+    let patient_alias: String = conn
+        .query_row(
+            "SELECT alias FROM patients WHERE id = ?1",
+            params![patient_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::invalid(format!("patient {patient_id} not found")))?;
+
+    // Collect encounter IDs linked by patient_id OR matching the current alias
+    // (legacy fallback for encounters created before ADR-0005 Commit 2).
+    let encounter_ids: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM encounters WHERE patient_id = ?1 OR patient_alias = ?2",
+        )?;
+        stmt.query_map(params![patient_id, patient_alias], |r| r.get(0))?
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+
+    let encounters_destroyed = encounter_ids.len() as i64;
+
+    for enc_id in &encounter_ids {
+        crate::encounters::delete_encounter_row(&mut conn, enc_id, &provider_id, "patient_request")?;
+    }
+
+    // Delete the patient row + audit + destruction_log in one transaction.
+    {
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM patients WHERE id = ?1", params![patient_id])?;
+        patient_audit::append(&tx, &patient_id, &provider_id, "patient_records_destroyed")?;
+        crate::destruction_log::append(
+            &tx,
+            &provider_id,
+            "patient",
+            &patient_id,
+            &patient_alias,
+            "patient_request",
+            encounters_destroyed,
+        )?;
+        tx.commit()?;
+    }
+
+    Ok(json!({ "encounters_destroyed": encounters_destroyed }))
 }
 
 #[cfg(test)]

@@ -477,6 +477,7 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
         created_at,
         encounter["signed_at"].as_str(),
         encounter["signed_hash"].as_str(),
+        encounter["patient_id"].as_str(),
     )?;
     tx.commit()?;
     Ok(())
@@ -520,6 +521,7 @@ fn upsert_encounter_row(
     created_at: &str,
     signed_at: Option<&str>,
     signed_hash: Option<&str>,
+    patient_id: Option<&str>,
 ) -> Result<(), AppError> {
     let is_new_row = !conn
         .query_row(
@@ -531,14 +533,15 @@ fn upsert_encounter_row(
         .is_some();
     let rows_changed = conn.execute(
         "INSERT INTO encounters (id, provider_id, encounter_date, patient_alias, status, \
-         audio_path, created_at, signed_at, signed_hash) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+         audio_path, created_at, signed_at, signed_hash, patient_id) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
          ON CONFLICT(id) DO UPDATE SET \
          status = excluded.status, \
          patient_alias = excluded.patient_alias, \
          audio_path = excluded.audio_path, \
          signed_at = excluded.signed_at, \
-         signed_hash = excluded.signed_hash \
+         signed_hash = excluded.signed_hash, \
+         patient_id = excluded.patient_id \
          WHERE encounters.status != 'signed' \
             OR (excluded.status = encounters.status \
                 AND excluded.signed_at IS encounters.signed_at \
@@ -553,6 +556,7 @@ fn upsert_encounter_row(
             created_at,
             signed_at,
             signed_hash,
+            patient_id,
         ],
     )?;
     if rows_changed == 0 && !is_new_row {
@@ -585,6 +589,7 @@ mod tests {
                 provider_id    TEXT NOT NULL,
                 encounter_date TEXT NOT NULL,
                 patient_alias  TEXT,
+                patient_id     TEXT,
                 status         TEXT NOT NULL DEFAULT 'draft',
                 audio_path     TEXT,
                 created_at     TEXT NOT NULL,
@@ -801,6 +806,7 @@ mod tests {
             "2026-07-04T10:00:00Z",
             Some("2026-07-04T10:30:00Z"),
             Some("deadbeef"),
+            None,
         );
         assert!(result.is_ok(), "sign-off must succeed: {:?}", result.err());
         let status: String = conn
@@ -826,6 +832,7 @@ mod tests {
             "2026-07-04T10:00:00Z",
             Some("2026-07-04T10:30:00Z"),
             Some("deadbeef"),
+            None,
         );
         assert!(result.is_ok(), "alias-only edit must succeed: {:?}", result.err());
         let alias: String = conn
@@ -858,6 +865,7 @@ mod tests {
             "2026-07-04T10:00:00Z",
             Some("2026-07-04T99:99:99Z"), // different signed_at than stored
             Some("00000000"),             // different signed_hash than stored
+            None,
         );
         assert!(result.is_err(), "conflicting write to a signed row must be rejected");
         assert!(matches!(result.unwrap_err(), AppError::InvalidInput(_)));
@@ -888,6 +896,7 @@ mod tests {
             "draft", // <-- illegal demotion
             Some("/tmp/audio.wav"),
             "2026-07-04T10:00:00Z",
+            None,
             None,
             None,
         );

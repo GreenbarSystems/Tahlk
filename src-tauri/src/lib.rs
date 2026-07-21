@@ -17,7 +17,7 @@
 //!   - `lock`           — idle-lock PIN hash storage (OS keychain, never the SQLite kv table).
 //!   - `notes`         — Anthropic streaming note generation (BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
-//!   - `patients`       — patient roster CRUD.
+//!   - `patients`       — patient roster CRUD + cascade PHI destruction.
 //!   - `patient_audit`  — append-only audit log for patient roster CRUD.
 //!   - `time`           — server-side ISO-8601 UTC timestamps for audit rows.
 //!   - `hex`            — lowercase hex encode/decode (DEK blob, PIN hash format).
@@ -199,6 +199,7 @@ pub fn run() {
             patients::get_patient,
             patients::upsert_patient,
             patients::delete_patient,
+            patients::destroy_patient_records,
             patient_audit::patient_audit_list,
             lock::lock_pin_set,
             lock::lock_pin_verify,
