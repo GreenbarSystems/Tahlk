@@ -53,7 +53,18 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// Valid `action` values. Enforced at the Tauri command boundary so a
 /// compromised WebView can't stuff an arbitrary string into a compliance
 /// record.
-pub(crate) const VALID_ACTIONS: &[&str] = &["patient_created", "patient_updated", "patient_deleted"];
+/// `patient_records_destroyed` is written by `destroy_patient_records`
+/// (patients.rs) and was missing here, so the debug_assert below PANICKED
+/// mid-transaction in every debug build — including `cargo test`. It went
+/// unnoticed because no test exercises that command, and in release the
+/// assert compiles out and an off-allowlist action reaches the compliance
+/// record instead. (Audit H-2.)
+pub(crate) const VALID_ACTIONS: &[&str] = &[
+    "patient_created",
+    "patient_updated",
+    "patient_deleted",
+    "patient_records_destroyed",
+];
 
 /// Appends one audit row. Takes `&Connection` so callers can pass a
 /// `&Transaction` (which derefs to `Connection`) to make the write part of

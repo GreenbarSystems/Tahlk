@@ -142,23 +142,44 @@ pub(crate) fn retention_set_years(
             "retention_years must be between {MIN_RETENTION_YEARS} and {MAX_RETENTION_YEARS}"
         )));
     }
-    let conn = state.0.get()?;
-    let old: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_RETENTION_YEARS],
-            |r| r.get(0),
-        )
-        .ok();
-    let actor = crate::kv_ops::provider_id(&conn);
-    crate::kv_ops::upsert_json(&conn, KV_RETENTION_YEARS, &years.to_string())?;
-    crate::config_audit::append(
-        &conn,
-        "retention_years_changed",
-        old.as_deref(),
+    let mut conn = state.0.get()?;
+    set_policy_value(
+        &mut conn,
+        KV_RETENTION_YEARS,
         &years.to_string(),
-        &actor,
-    )?;
+        "retention_years_changed",
+    )
+}
+
+/// Write one policy value and its audit row as a single atomic unit.
+///
+/// Both settings this module owns gate PHI destruction, so "changed but not
+/// logged" is a state neither may enter. A bare pooled connection autocommits,
+/// so the original code made the change durable and only THEN attempted the
+/// audit append: if the append failed the setting had already moved, silently
+/// and permanently, while the caller was told the operation failed. For the
+/// litigation hold that means the provider believes records are preserved
+/// while the hold is actually off and destruction is permitted.
+///
+/// Takes `&mut Connection` rather than living inside the `#[tauri::command]`
+/// so the rollback is unit-testable without a Tauri State harness — the same
+/// split `patients` and `encounters` use.
+pub(crate) fn set_policy_value(
+    conn: &mut Connection,
+    key: &str,
+    new_value: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    let tx = conn.transaction()?;
+    let old: Option<String> = tx
+        .query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let actor = crate::kv_ops::provider_id(&tx);
+    crate::kv_ops::upsert_json(&tx, key, new_value)?;
+    crate::config_audit::append(&tx, action, old.as_deref(), new_value, &actor)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -177,25 +198,17 @@ pub(crate) fn retention_hold_set(
     state: State<'_, DbState>,
     active: bool,
 ) -> Result<(), AppError> {
-    let conn = state.0.get()?;
-    let old: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_LITIGATION_HOLD],
-            |r| r.get(0),
-        )
-        .ok();
-    let actor = crate::kv_ops::provider_id(&conn);
-    let new_value = if active { "true" } else { "false" };
-    crate::kv_ops::upsert_json(&conn, KV_LITIGATION_HOLD, new_value)?;
-    crate::config_audit::append(
-        &conn,
+    let mut conn = state.0.get()?;
+    // The more dangerous of the two: under the old non-atomic code a failed
+    // audit append left the hold LIFTED while the UI reported failure — the
+    // provider believes records are preserved, the trail shows no change was
+    // ever made, and retention_destroy_eligible will now run.
+    set_policy_value(
+        &mut conn,
+        KV_LITIGATION_HOLD,
+        if active { "true" } else { "false" },
         "litigation_hold_changed",
-        old.as_deref(),
-        new_value,
-        &actor,
-    )?;
-    Ok(())
+    )
 }
 
 /// List signed encounters whose `encounter_date` predates the retention cutoff.
@@ -434,5 +447,100 @@ mod tests {
     fn a_missing_window_row_uses_the_default() {
         let conn = kv_db();
         assert_eq!(retention_years(&conn), DEFAULT_RETENTION_YEARS);
+    }
+
+    // ── Policy write / audit atomicity (H-4) ────────────────────────────
+    //
+    // A bare pooled connection autocommits, so the original code made the
+    // setting durable and only THEN appended the audit row. A failed append
+    // left the value changed with no record while the caller saw an error.
+
+    fn policy_db() -> Connection {
+        let conn = kv_db();
+        crate::config_audit::init_schema(&conn).unwrap();
+        conn
+    }
+
+    fn hold_value(conn: &Connection) -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![KV_LITIGATION_HOLD],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn audit_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM config_audit", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_policy_change_and_its_audit_row_land_together() {
+        let mut conn = policy_db();
+        set_policy_value(&mut conn, KV_LITIGATION_HOLD, "true", "litigation_hold_changed").unwrap();
+
+        assert_eq!(hold_value(&conn).as_deref(), Some("true"));
+        assert_eq!(audit_count(&conn), 1);
+
+        // The transition is recorded, not just the new state.
+        let (old, new): (Option<String>, String) = conn
+            .query_row(
+                "SELECT old_value, new_value FROM config_audit ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(old, None, "first-ever change has no prior value");
+        assert_eq!(new, "true");
+    }
+
+    #[test]
+    fn a_failed_audit_append_rolls_the_policy_change_back() {
+        // The regression. Drop config_audit so the append fails AFTER the kv
+        // write inside the same transaction; the hold must not move.
+        let mut conn = policy_db();
+        set_policy_value(&mut conn, KV_LITIGATION_HOLD, "true", "litigation_hold_changed").unwrap();
+        assert_eq!(hold_value(&conn).as_deref(), Some("true"), "precondition: hold on");
+
+        conn.execute_batch("DROP TABLE config_audit;").unwrap();
+
+        let err = set_policy_value(
+            &mut conn,
+            KV_LITIGATION_HOLD,
+            "false",
+            "litigation_hold_changed",
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::Storage(_) | AppError::Internal(_)));
+
+        assert_eq!(
+            hold_value(&conn).as_deref(),
+            Some("true"),
+            "a litigation hold must not be lifted by an operation that reported failure"
+        );
+    }
+
+    #[test]
+    fn a_failed_audit_append_rolls_the_retention_window_back_too() {
+        let mut conn = policy_db();
+        set_policy_value(&mut conn, KV_RETENTION_YEARS, "10", "retention_years_changed").unwrap();
+        assert_eq!(retention_years(&conn), 10);
+
+        conn.execute_batch("DROP TABLE config_audit;").unwrap();
+
+        assert!(set_policy_value(
+            &mut conn,
+            KV_RETENTION_YEARS,
+            "1",
+            "retention_years_changed"
+        )
+        .is_err());
+        assert_eq!(
+            retention_years(&conn),
+            10,
+            "an unlogged shortening of the retention window would silently expand what is destroyable"
+        );
     }
 }
