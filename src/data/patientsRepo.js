@@ -21,7 +21,13 @@ export const patientsRepo = {
   // destruction_log), removes the patient roster row, and cleans up audio
   // files. Returns { encounters_destroyed: number }. Actor identity and audio
   // cleanup are handled server-side.
-  destroyRecords:    id => invoke('destroy_patient_records', { patientId: id }),
+  // `expectedCount` is the number the provider was shown by countEncounters.
+  // Rust refuses if the set has changed since, so an encounter created (or an
+  // alias edited to match) between the preview and the confirmation cannot be
+  // destroyed without having appeared in what the provider agreed to. Pass -1
+  // to opt out where no preview was shown.
+  destroyRecords: (id, expectedCount) =>
+    invoke('destroy_patient_records', { patientId: id, expectedCount }),
   // Returns the number of encounters that WOULD be destroyed by destroyRecords.
   // Call this to show the provider a count before they confirm the irreversible action.
   countEncounters:   id => invoke('count_patient_encounters', { patientId: id }),

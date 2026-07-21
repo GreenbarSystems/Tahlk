@@ -324,7 +324,10 @@ export function wirePatientsView(rerender) {
         if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Destroying…'; }
         if (cancelBtn) cancelBtn.disabled = true;
         try {
-          const { encounters_destroyed } = await patientsRepo.destroyRecords(patientId);
+          // `count` is what this panel displayed to the provider. Rust
+          // refuses if the linked set has changed since, so nothing is
+          // destroyed that was not in the summary they confirmed.
+          const { encounters_destroyed } = await patientsRepo.destroyRecords(patientId, count);
           toast(
             `All records for ${alias} permanently destroyed` +
             ` (${encounters_destroyed} encounter${encounters_destroyed !== 1 ? 's' : ''}).`

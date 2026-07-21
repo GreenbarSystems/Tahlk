@@ -191,6 +191,7 @@ pub(crate) async fn destroy_patient_records(
     app: AppHandle,
     state: State<'_, DbState>,
     patient_id: String,
+    expected_count: i64,
 ) -> Result<Value, AppError> {
     let mut conn = state.0.get()?;
 
@@ -205,30 +206,52 @@ pub(crate) async fn destroy_patient_records(
     let provider_id = crate::kv_ops::provider_id(&conn);
 
     // Read alias first — existence guard and legacy encounter-match fallback.
-    let patient_alias: String = conn
-        .query_row(
-            "SELECT alias FROM patients WHERE id = ?1",
-            params![patient_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| AppError::invalid(format!("patient {patient_id} not found")))?;
+    let patient_alias = patient_alias_of(&conn, &patient_id)?;
 
     // Collect encounter IDs linked by patient_id OR matching the current alias
     // (legacy fallback for encounters created before ADR-0005 Commit 2).
     // Done before the outer transaction so the collection query is outside the
     // write path (consistent snapshot; no dirty reads from partial deletes).
-    let encounter_ids: Vec<String> = {
+    //
+    // `alias_matched` is tracked separately because alias matching is the
+    // dangerous half: aliases are de-identified display labels, so two distinct
+    // patients sharing "J.D." is likely rather than hypothetical, and
+    // destroying one would take the other's encounters with it. Those ids are
+    // recorded in destruction_log under their own legal_basis so a collision
+    // leaves evidence instead of vanishing into an aggregate count.
+    let mut encounter_ids: Vec<String> = Vec::new();
+    let mut alias_matched: Vec<String> = Vec::new();
+    {
         let mut stmt = conn.prepare(
-            "SELECT id FROM encounters WHERE patient_id = ?1 OR patient_alias = ?2",
+            "SELECT id, patient_id IS ?1 FROM encounters \
+             WHERE patient_id = ?1 OR patient_alias = ?2",
         )?;
-        let ids: Vec<String> = stmt.query_map(params![patient_id, patient_alias], |r| r.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        ids
-    };
+        let rows = stmt.query_map(params![patient_id, patient_alias], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+        })?;
+        for row in rows.flatten() {
+            let (id, by_patient_id) = row;
+            if !by_patient_id {
+                alias_matched.push(id.clone());
+            }
+            encounter_ids.push(id);
+        }
+    }
 
     let encounters_destroyed = encounter_ids.len() as i64;
+
+    // Refuse if the set changed since the provider was shown a count. The
+    // preview and the destruction were two independent reads with no barrier
+    // between them, so an encounter created (or an alias edited to match) in
+    // the interval was destroyed without ever appearing in the confirmation
+    // the provider agreed to. `-1` opts out, for callers with no preview.
+    if expected_count >= 0 && expected_count != encounters_destroyed {
+        return Err(AppError::precondition(format!(
+            "This patient's records changed since you were shown the summary \
+             ({expected_count} encounters then, {encounters_destroyed} now). \
+             Nothing was destroyed — review the updated list and try again."
+        )));
+    }
 
     // Single outer transaction — all encounter deletions, the patient-row
     // removal, audit, and destruction_log entry are one atomic unit.
@@ -248,6 +271,20 @@ pub(crate) async fn destroy_patient_records(
             "patient_request",
             encounters_destroyed,
         )?;
+        // Evidence any encounter swept in by alias rather than by patient_id.
+        // If two patients shared this alias, the other patient's records were
+        // just destroyed too, and the aggregate row above would not show it.
+        for enc_id in &alias_matched {
+            crate::destruction_log::append(
+                &tx,
+                &provider_id,
+                "encounter",
+                enc_id,
+                &patient_alias,
+                "patient_request_alias_match",
+                0,
+            )?;
+        }
         tx.commit()?;
     }
     drop(conn); // release DB connection before the async .await calls below
@@ -267,26 +304,43 @@ pub(crate) async fn destroy_patient_records(
 /// legacy rows). Used to preview the impact of `destroy_patient_records` so
 /// the provider knows how many records will be permanently destroyed before
 /// committing to the irreversible action.
+///
+/// The returned number is passed back to `destroy_patient_records` as
+/// `expected_count`, which refuses if the set has changed since — see there.
 #[tauri::command]
 pub(crate) fn count_patient_encounters(
     state: State<DbState>,
     patient_id: String,
 ) -> Result<i64, AppError> {
     let conn = state.0.get()?;
-    let patient_alias: String = conn
-        .query_row(
-            "SELECT alias FROM patients WHERE id = ?1",
-            params![patient_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_default();
+    count_linked_encounters(&conn, &patient_id)
+}
+
+/// Shared by the preview and the destruction itself, so the two can never
+/// disagree about what "linked to this patient" means.
+///
+/// A missing patient is an error rather than an empty alias. The previous
+/// `.unwrap_or_default()` turned a deleted or mistyped patient id into
+/// `alias = ""`, which then matched every encounter whose `patient_alias` was
+/// empty — counting, and on the destroy path DESTROYING, unrelated records.
+fn count_linked_encounters(conn: &Connection, patient_id: &str) -> Result<i64, AppError> {
+    let alias = patient_alias_of(conn, patient_id)?;
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM encounters WHERE patient_id = ?1 OR patient_alias = ?2",
-        params![patient_id, patient_alias],
+        params![patient_id, alias],
         |r| r.get(0),
     )?;
     Ok(count)
+}
+
+fn patient_alias_of(conn: &Connection, patient_id: &str) -> Result<String, AppError> {
+    conn.query_row(
+        "SELECT alias FROM patients WHERE id = ?1",
+        params![patient_id],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| AppError::invalid(format!("patient {patient_id} not found")))
 }
 
 #[cfg(test)]
@@ -332,6 +386,80 @@ mod tests {
             params![if active { "true" } else { "false" }],
         )
         .unwrap();
+    }
+
+    // ── Linked-encounter counting (destroy preview) ─────────────────────
+
+    fn with_encounters(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE encounters (
+                 id             TEXT PRIMARY KEY,
+                 provider_id    TEXT NOT NULL,
+                 encounter_date TEXT NOT NULL,
+                 patient_alias  TEXT,
+                 patient_id     TEXT,
+                 status         TEXT NOT NULL DEFAULT 'draft',
+                 created_at     TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    }
+
+    fn add_encounter(conn: &Connection, id: &str, patient_id: Option<&str>, alias: Option<&str>) {
+        conn.execute(
+            "INSERT INTO encounters (id, provider_id, encounter_date, patient_alias, patient_id, created_at) \
+             VALUES (?1, 'p', '2026-07-04', ?2, ?3, '2026-07-04T00:00:00Z')",
+            params![id, alias, patient_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_missing_patient_is_an_error_not_an_empty_alias_match() {
+        // `.unwrap_or_default()` turned a deleted or mistyped id into
+        // alias = "", which then matched every encounter with an empty
+        // patient_alias — counting, and on the destroy path DESTROYING,
+        // completely unrelated records.
+        let conn = fresh_db();
+        with_encounters(&conn);
+        add_encounter(&conn, "enc-unrelated", None, Some(""));
+
+        let err = count_linked_encounters(&conn, "pt-does-not-exist").unwrap_err();
+        assert!(format!("{err}").contains("not found"));
+    }
+
+    #[test]
+    fn counting_matches_by_patient_id_and_by_legacy_alias() {
+        let mut conn = fresh_db();
+        upsert_patient_conn(&mut conn, &sample("pt-1", "J.D."), "Dr. Chen").unwrap();
+        with_encounters(&conn);
+        add_encounter(&conn, "enc-linked", Some("pt-1"), None);
+        add_encounter(&conn, "enc-legacy", None, Some("J.D."));
+        add_encounter(&conn, "enc-other", None, Some("A.B."));
+
+        assert_eq!(count_linked_encounters(&conn, "pt-1").unwrap(), 2);
+    }
+
+    #[test]
+    fn an_alias_collision_sweeps_another_patients_encounter() {
+        // Documents the hazard rather than pretending it is fixed: aliases are
+        // de-identified display labels, so two patients sharing "J.D." is
+        // likely. Destroying one takes the other's legacy-linked encounters.
+        // destroy_patient_records now writes a per-encounter
+        // `patient_request_alias_match` destruction_log row for exactly these,
+        // so the collision leaves evidence instead of vanishing into a count.
+        let mut conn = fresh_db();
+        upsert_patient_conn(&mut conn, &sample("pt-1", "J.D."), "Dr. Chen").unwrap();
+        upsert_patient_conn(&mut conn, &sample("pt-2", "J.D."), "Dr. Chen").unwrap();
+        with_encounters(&conn);
+        add_encounter(&conn, "enc-of-pt2", None, Some("J.D."));
+
+        assert_eq!(
+            count_linked_encounters(&conn, "pt-1").unwrap(),
+            1,
+            "an alias-only match against another patient's encounter still counts — \
+             the preview must not under-report what would be destroyed"
+        );
     }
 
     #[test]
