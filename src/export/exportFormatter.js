@@ -60,7 +60,16 @@ async function clearIfStillPending(text) {
   } catch { /* clipboard unavailable — nothing to clear */ }
 }
 
-export async function copyToClipboard(text, encounterId, format) {
+// Copy sensitive text with the auto-clear guarantee, without assuming the
+// text is a clinical note.
+//
+// Split out of copyToClipboard because recovery codes need exactly this
+// protection and none of the note-export bookkeeping: a recovery code is a
+// full account-recovery credential for an encrypted PHI database, and
+// authScreen.js was calling clipboardWriteText directly, so it sat on the OS
+// clipboard indefinitely while a copied note — strictly less powerful — was
+// wiped after 90 seconds.
+export async function copySensitiveToClipboard(text) {
   await clipboardWriteText(text);
   _pendingClipboardText = text;
 
@@ -69,7 +78,10 @@ export async function copyToClipboard(text, encounterId, format) {
     await clearIfStillPending(text);
     if (_pendingClipboardText === text) _pendingClipboardText = null;
   }, CLIPBOARD_CLEAR_MS);
+}
 
+export async function copyToClipboard(text, encounterId, format) {
+  await copySensitiveToClipboard(text);
   await logNoteExported(encounterId, format, 'clipboard');
   emit('scribe:note_exported', { encounterId, format });
 }

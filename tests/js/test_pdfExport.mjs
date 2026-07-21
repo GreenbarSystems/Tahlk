@@ -31,6 +31,19 @@ globalThis.window.atob = globalThis.window.atob || globalThis.atob;
 globalThis.window.btoa = globalThis.window.btoa || globalThis.btoa;
 globalThis.window.console = globalThis.window.console || globalThis.console;
 
+// toBase64 now encodes via FileReader.readAsDataURL instead of a synchronous
+// char-by-char btoa loop — the same change recorder.js made after that loop
+// was found to freeze the UI on long recordings. Node has no DOM File API, so
+// supply the two primitives it reaches for. Mirrors the fakes in
+// test_recorder_stopTimeout.mjs.
+globalThis.Blob = globalThis.Blob || class {
+  constructor(parts) { this.parts = parts; }
+};
+globalThis.FileReader = globalThis.FileReader || class {
+  readAsDataURL() { queueMicrotask(() => this.onload?.()); }
+  get result() { return 'data:application/pdf;base64,JVBERi0x'; }
+};
+
 const { buildPdf, saveToPdf, exportFilenamePdf, archivePdfHook, setArchivePdfHook } =
   await import('../../src/export/pdfExport.js');
 

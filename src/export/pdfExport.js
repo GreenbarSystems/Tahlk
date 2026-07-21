@@ -118,11 +118,23 @@ export function buildPdf(note, encounter) {
 
 // Encode an ArrayBuffer/Uint8Array as base64 for the Rust boundary. jsPDF gives
 // us binary; the Tauri command decodes it back to raw bytes and writes them.
+//
+// FileReader.readAsDataURL rather than a char-by-char btoa loop. recorder.js
+// already removed exactly this loop for exactly this reason — its comment
+// records that "the previous char-by-char btoa loop froze the UI" — but the
+// second copy here was never updated. A long multi-page note builds a string
+// one character at a time on the main thread; readAsDataURL does the encoding
+// natively and asynchronously.
 function toBase64(buf) {
-  const bytes = new Uint8Array(buf);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result; // "data:...;base64,XXXX"
+      resolve(result.slice(result.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error || new Error('base64 encode failed'));
+    reader.readAsDataURL(new Blob([buf]));
+  });
 }
 
 // Build the PDF and save it via the native Save-As dialog. After a successful
@@ -131,7 +143,7 @@ function toBase64(buf) {
 export async function saveToPdf(note, encounter) {
   const buf = buildPdf(note, encounter);
   await invoke('export_note_pdf_to_file', {
-    dataBase64: toBase64(buf),
+    dataBase64: await toBase64(buf),
     suggestedName: exportFilenamePdf(encounter),
   });
 

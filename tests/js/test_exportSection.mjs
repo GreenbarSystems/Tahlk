@@ -53,6 +53,18 @@ globalThis.window.atob = globalThis.window.atob || globalThis.atob;
 globalThis.window.btoa = globalThis.window.btoa || globalThis.btoa;
 globalThis.window.console = globalThis.window.console || globalThis.console;
 
+// pdfExport's toBase64 encodes via FileReader.readAsDataURL rather than a
+// synchronous btoa loop (which froze the UI on long notes). Node has no DOM
+// File API — supply the two primitives it needs. Same fakes as
+// test_pdfExport.mjs.
+globalThis.Blob = globalThis.Blob || class {
+  constructor(parts) { this.parts = parts; }
+};
+globalThis.FileReader = globalThis.FileReader || class {
+  readAsDataURL() { queueMicrotask(() => this.onload?.()); }
+  get result() { return 'data:application/pdf;base64,JVBERi0x'; }
+};
+
 // ── Mock Tauri runtime ───────────────────────────────────────────────────
 let invokeResponders = {};
 let clipboardWriteImpl = null; // null => falls through to "Clipboard unavailable" throw

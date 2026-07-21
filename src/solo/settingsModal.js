@@ -430,6 +430,27 @@ function renderDestructionLogTable(rows) {
   </tr>${body}</table></div>`;
 }
 
+// Quote a CSV cell, neutralising spreadsheet formula injection.
+//
+// Quote-doubling alone only makes the file parse correctly; it does nothing
+// about Excel, LibreOffice and Sheets treating a leading =, +, - or @ as the
+// start of a formula. provider_id and patient_alias are provider-entered free
+// text, so a value like `=HYPERLINK("http://evil","click")` executes when the
+// compliance export is opened — and this is the destruction log, the file an
+// auditor is most likely to open. Prefixing an apostrophe forces the cell to
+// text in every major spreadsheet without altering the value a CSV parser
+// reads back after unquoting... except the apostrophe itself, which is why it
+// is applied only to cells that would otherwise be interpreted.
+//
+// Tab and carriage return are included because both can lead a formula once a
+// spreadsheet trims leading whitespace.
+function csvCell(v) {
+  const s = String(v ?? '');
+  const needsGuard = /^[=+\-@\t\r]/.test(s);
+  const guarded = needsGuard ? `'${s}` : s;
+  return `"${guarded.replace(/"/g, '""')}"`;
+}
+
 function destructionLogToCsv(rows) {
   const header = 'date,provider_id,entity_type,entity_id,patient_alias,legal_basis,records_scrubbed';
   const body = rows.map(r => [
@@ -440,7 +461,7 @@ function destructionLogToCsv(rows) {
     r.patient_alias || '',
     r.legal_basis,
     r.records_scrubbed,
-  ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  ].map(csvCell).join(',')).join('\n');
   return `${header}\n${body}`;
 }
 

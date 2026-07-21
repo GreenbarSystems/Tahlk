@@ -21,7 +21,12 @@ import { kvGet } from '../core/storageBackend.js';
 import { keys } from '../data/keys.js';
 import { userMessage } from '../platform/appError.js';
 import { escapeHtml } from '../utils/format.js';
-import { clipboardWriteText } from '../platform/tauri.js';
+import { invoke } from '../platform/tauri.js';
+// A recovery code is a full account-recovery credential for an encrypted PHI
+// database, so it gets at least the protection a copied note already had:
+// the timed clipboard auto-clear, and a save dialog the provider chooses
+// rather than a silent write to the OS Downloads folder.
+import { copySensitiveToClipboard } from '../export/exportFormatter.js';
 
 const BASE_LOCKOUT_MS = 30_000;
 const ATTEMPTS_BEFORE_LOCKOUT = 5;
@@ -497,7 +502,7 @@ function runRecoveryCodeScreen(appEl, codes, onComplete) {
 
     appEl.querySelector('#auth-code-copy').addEventListener('click', async () => {
       try {
-        await clipboardWriteText(code);
+        await copySensitiveToClipboard(code);
       } catch {
         errorEl.textContent = 'Could not copy — select the code above and copy it manually.';
         errorEl.hidden = false;
@@ -505,7 +510,7 @@ function runRecoveryCodeScreen(appEl, codes, onComplete) {
       markSaved();
     });
 
-    appEl.querySelector('#auth-code-dl').addEventListener('click', () => {
+    appEl.querySelector('#auth-code-dl').addEventListener('click', async () => {
       const text = [
         `Tahlk Recovery Code ${idx + 1} of ${codes.length}`,
         '',
@@ -514,13 +519,21 @@ function runRecoveryCodeScreen(appEl, codes, onComplete) {
         'Keep this code somewhere safe. Any one of your three codes recovers access',
         'to your Tahlk records if you forget your password.',
       ].join('\n');
-      const blob = new Blob([text], { type: 'text/plain' });
-      const a = Object.assign(document.createElement('a'), {
-        href: URL.createObjectURL(blob),
-        download: `tahlk-recovery-code-${idx + 1}.txt`,
-      });
-      a.click();
-      URL.revokeObjectURL(a.href);
+      // Native Save-As via Rust, not a Blob + <a download>. The old path wrote
+      // an account-recovery credential straight into the OS Downloads folder
+      // with no prompt — a location that is often synced to cloud storage and
+      // is the first place anyone with the device would look. Every other
+      // export in the app already goes through this dialog.
+      try {
+        await invoke('export_note_to_file', {
+          content: text,
+          suggestedName: `tahlk-recovery-code-${idx + 1}.txt`,
+        });
+      } catch {
+        errorEl.textContent = 'Could not save — copy the code above instead.';
+        errorEl.hidden = false;
+        return;
+      }
       markSaved();
     });
 
@@ -760,12 +773,12 @@ function renderRegenCodesStep(card, modal, codes) {
     }
 
     card.querySelector('#auth-regen-copy').addEventListener('click', async () => {
-      try { await clipboardWriteText(code); }
+      try { await copySensitiveToClipboard(code); }
       catch { errEl.textContent = 'Could not copy — select the code above and copy manually.'; errEl.hidden = false; }
       markSaved();
     });
 
-    card.querySelector('#auth-regen-dl').addEventListener('click', () => {
+    card.querySelector('#auth-regen-dl').addEventListener('click', async () => {
       const text = [
         `Tahlk Recovery Code ${idx + 1} of ${codes.length}`,
         '',
@@ -773,13 +786,17 @@ function renderRegenCodesStep(card, modal, codes) {
         '',
         'Any one of your three codes recovers access to your Tahlk records.',
       ].join('\n');
-      const blob = new Blob([text], { type: 'text/plain' });
-      const a = Object.assign(document.createElement('a'), {
-        href: URL.createObjectURL(blob),
-        download: `tahlk-recovery-code-${idx + 1}.txt`,
-      });
-      a.click();
-      URL.revokeObjectURL(a.href);
+      // Native Save-As, same reasoning as the first-run path above.
+      try {
+        await invoke('export_note_to_file', {
+          content: text,
+          suggestedName: `tahlk-recovery-code-${idx + 1}.txt`,
+        });
+      } catch {
+        errEl.textContent = 'Could not save — copy the code above instead.';
+        errEl.hidden = false;
+        return;
+      }
       markSaved();
     });
 
