@@ -74,6 +74,17 @@ pub(crate) fn load_or_generate_dek() -> Result<String, AppError> {
     Ok(hex)
 }
 
+/// True when a DEK is present in the OS keychain.
+///
+/// Deliberately does NOT generate one, unlike `load_or_generate_dek` — this is
+/// an existence probe used to decide whether protected data exists, and a
+/// probe that creates what it is looking for would be worse than useless.
+pub(crate) fn dek_entry_exists() -> bool {
+    keyring_entry()
+        .and_then(|e| e.get_password().map_err(AppError::internal_from))
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

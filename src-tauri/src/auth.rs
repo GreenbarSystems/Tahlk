@@ -930,10 +930,7 @@ pub(crate) fn auth_generate_recovery_codes(
 /// For the "forgot password AND no recovery codes" scenario only.
 ///
 /// Requires `credential` to be either the current master password or a valid
-/// recovery code (audit finding C4). Without this check, any JS code in a
-/// compromised WebView could call this command and silently destroy all PHI.
-/// When the wraps database does not yet exist (fresh install, nothing
-/// protected yet), the credential check is skipped.
+/// recovery code (audit finding C4).
 ///
 /// If the provider has forgotten both their password and all recovery codes,
 /// they cannot use this in-app path. They must manually delete the app data
@@ -947,20 +944,79 @@ pub(crate) fn auth_nuke_and_reinstall(app: AppHandle, credential: String) -> Res
     let wraps = data_dir.join("tahlk_auth.db");
     let main_db = data_dir.join("tahlk.db");
 
-    // Verify the credential before destroying anything. Try password first
-    // (common case), then recovery code (forgot-password flow). Both calls
-    // perform AES-GCM decryption against the wraps DB — if both fail, reject.
-    if wraps.exists() {
-        let pass_ok = unlock_with_password(&credential, &wraps).is_ok();
-        let code_ok = !pass_ok && unlock_with_recovery_code(&credential, &wraps).is_ok();
-        if !pass_ok && !code_ok {
+    match nuke_authorization(
+        wraps.exists(),
+        main_db.exists(),
+        crate::db_key::dek_entry_exists(),
+    ) {
+        // Verify before destroying anything. Password first (common case),
+        // then recovery code. Both perform AES-GCM decryption against the
+        // wraps DB — if both fail, reject.
+        NukeAuthorization::VerifyCredential => {
+            let pass_ok = unlock_with_password(&credential, &wraps).is_ok();
+            let code_ok = !pass_ok && unlock_with_recovery_code(&credential, &wraps).is_ok();
+            if !pass_ok && !code_ok {
+                return Err(AppError::invalid(
+                    "invalid credential — provide your current password or a valid recovery code to confirm",
+                ));
+            }
+        }
+        NukeAuthorization::Refuse => {
             return Err(AppError::invalid(
-                "invalid credential — provide your current password or a valid recovery code to confirm",
+                "this device holds patient data that predates password setup, so there is no \
+                 credential to verify against — Tahlk will not destroy it from inside the app. \
+                 Remove the application data folder using your operating system's file manager \
+                 if you intend to erase it.",
             ));
         }
+        NukeAuthorization::AllowUnauthenticated => {}
     }
 
     nuke_and_reinstall(&wraps, &main_db)
+}
+
+/// What the nuke command is permitted to do, given what exists on disk.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NukeAuthorization {
+    /// Auth is configured — the caller must prove they hold the credential.
+    VerifyCredential,
+    /// Protected data exists but there is no credential to check it against.
+    Refuse,
+    /// Genuinely nothing to destroy; let a fresh install reset itself.
+    AllowUnauthenticated,
+}
+
+/// Decide whether an unauthenticated nuke may proceed.
+///
+/// The original guard skipped verification whenever the wraps DB was absent,
+/// on the premise that "no wraps DB" means "nothing protected yet". That
+/// premise is false, and falsely in the worst direction:
+///
+///   * Tahlk 0.1.1 shipped before ADR-0004 introduced auth. Every install
+///     predating it has a fully populated, PHI-bearing `tahlk.db` and no
+///     `tahlk_auth.db` at all — so the entire pre-upgrade installed base could
+///     be wiped by `auth_nuke_and_reinstall("")` from a compromised WebView,
+///     which is exactly the scenario C4's credential check was added to close.
+///   * The same holds for any install where the user has not yet finished
+///     first-open setup but the legacy keychain-DEK path has already opened a
+///     database.
+///
+/// So absence of the wraps DB is not evidence of absence of data. The main DB
+/// and the keychain DEK are both checked, and either one present means refuse
+/// rather than bypass. Pure function so the policy is testable without a Tauri
+/// harness or a real filesystem.
+pub(crate) fn nuke_authorization(
+    wraps_exists: bool,
+    main_db_exists: bool,
+    keychain_dek_exists: bool,
+) -> NukeAuthorization {
+    if wraps_exists {
+        return NukeAuthorization::VerifyCredential;
+    }
+    if main_db_exists || keychain_dek_exists {
+        return NukeAuthorization::Refuse;
+    }
+    NukeAuthorization::AllowUnauthenticated
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1383,6 +1439,54 @@ mod tests {
     }
 
     // ── Migration ────────────────────────────────────────────────────────────
+
+    // ── Nuke authorization (H-13) ───────────────────────────────────────
+
+    #[test]
+    fn a_configured_install_must_prove_the_credential() {
+        assert_eq!(
+            nuke_authorization(true, true, false),
+            NukeAuthorization::VerifyCredential
+        );
+        // Even with no main DB — the wraps DB alone means auth is configured.
+        assert_eq!(
+            nuke_authorization(true, false, false),
+            NukeAuthorization::VerifyCredential
+        );
+    }
+
+    #[test]
+    fn a_pre_auth_install_holding_patient_data_is_refused_not_bypassed() {
+        // The regression. Tahlk 0.1.1 shipped before auth existed, so every
+        // install predating it has a PHI-bearing tahlk.db and NO wraps DB.
+        // The old guard read that as "nothing protected" and destroyed it
+        // without any credential.
+        assert_eq!(
+            nuke_authorization(false, true, false),
+            NukeAuthorization::Refuse,
+            "a database with no credential to check against must not be destroyable in-app"
+        );
+        // Same conclusion from the keychain DEK alone: the main DB may have
+        // been moved or renamed, but a DEK means a database existed.
+        assert_eq!(
+            nuke_authorization(false, false, true),
+            NukeAuthorization::Refuse
+        );
+        assert_eq!(
+            nuke_authorization(false, true, true),
+            NukeAuthorization::Refuse
+        );
+    }
+
+    #[test]
+    fn a_genuinely_empty_device_may_reset_itself() {
+        // The only case the unauthenticated path is for: nothing exists, so
+        // there is nothing to protect and a fresh install can clear itself.
+        assert_eq!(
+            nuke_authorization(false, false, false),
+            NukeAuthorization::AllowUnauthenticated
+        );
+    }
 
     #[test]
     fn migrate_from_plaintext_dek_roundtrips() {
