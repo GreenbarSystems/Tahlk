@@ -5,7 +5,7 @@
 the `tahlk-sync` Group-tier backend — are explicitly out of scope; that
 service is frozen per [ADR 0001](../adr/0001-freeze-group-tier-and-sync.md)
 and has zero validated demand or production deployment as of this writing).
-**As of commit:** `c9007ad`
+**As of commit:** `abc176c`
 **Prior source material this assessment consolidates:**
 - `tahlk-security-audit.md` — the original numbered finding set (C1–C2, H1–H6,
   M1–M10, L1–L5), referenced throughout the codebase (e.g. `notes.rs:334,336`,
@@ -361,8 +361,10 @@ displayed.
 **Status: substantially remediated.** The three gaps first documented in
 the `c3e9383` revision of this document (no record-access logging, no
 integrity protection on the JS-side trail, silent truncation) have been
-fixed in code. One related item, real `currentUser()` identity wiring, is a
-separate open item — see the note at the end of this section.
+fixed in code. Two forgery vectors in the Tauri invoke surface — `audit_append`
+and `note_history_append` — have been closed in Commits A and B
+(`829b689`, `abc176c`). One related item, real `currentUser()` identity
+wiring, remains a separate open item — see the end of this section.
 
 **Current state, two independent trails, both now tamper-evident:**
 - `note_history.rs` — DB-backed, SHA-256 hash-chained (`prev_hash`/
@@ -424,6 +426,32 @@ behavior on a durable-write failure) and `tests/js/test_recordAccess.mjs`
 against the real implementation to confirm the tests actually fail when the
 underlying protection is removed, not just when run against already-correct
 code.
+
+**audit_append forgery vector — closed (Commit A `829b689`).** Previously,
+`audit_append` was exposed as a Tauri invoke command (`generate_handler!`),
+letting the WebView call it with any actor, timestamp, or action string —
+forging compliance records in the tamper-evident `note_audit` table. The
+command has been removed from the invoke handler. It is replaced by five
+narrow server-side commands (`audit_log_record_viewed`, `audit_log_note_edited`,
+`audit_log_note_signed`, `audit_log_audio_deleted`, `audit_log_note_exported`)
+that derive actor identity server-side from the KV-stored provider profile
+(`note_provider_v1::profile`) and timestamp from `crate::time::utc_now_iso()`.
+No JS caller can supply actor or timestamp for a new audit row on the Tauri
+path. A non-Tauri fallback (dev/test KV path) remains in `auditLog.js` for
+the web-preview environment where Tauri is absent.
+
+**note_history_append forgery vector — closed (Commit B `abc176c`).** Previously,
+`note_history_append` was exposed as a Tauri invoke command with an open
+`entry: object` parameter, letting the WebView inject arbitrary history rows
+with any actor, timestamp, or action value — including forging a signed-note
+attestation. The command has been removed from the invoke handler. It is
+replaced by: (a) `history_note_generated` — actor fixed server-side to
+`"AI (Tahlk)"`; (b) `history_note_edited` — actor derived server-side from the
+KV provider profile; (c) the `signed` entry is now written atomically inside
+`encounters::mark_signed` via `server_sign_history`, collocating the attestation
+record and the encounter status flip in a single Rust transaction. JS passes
+`action='signed'` to `appendHistoryEntry` on Tauri now throws immediately rather
+than silently routing through any open channel.
 
 **Remaining open item (not part of this remediation):** `currentUser()`
 (`src/core/capabilities.js`) still defaults to `null` outside of a real
@@ -518,6 +546,18 @@ obligation by promptly disclosing anything discovered about the software
 itself, and to independently evaluate its own notification duties as a
 business associate where that role applies (e.g., the Anthropic-relay flow in
 Flow D, or a future managed-key proxy).
+
+**Audit-trail forgery vectors — closed (relevant to breach notification).**
+Two Tauri invoke commands (`audit_append`, `note_history_append`) previously
+exposed an open write surface into the tamper-evident audit trails. A
+compromised WebView could have used them to inject false records — including
+forging a signed-note attestation or suppressing a `record_viewed` entry —
+which could have masked unauthorized access to PHI or a falsified clinical
+record, making breach discovery and notification harder. Both vectors were
+closed in Commits A and B (`829b689`, `abc176c`); see §4 for the full
+technical detail. This is recorded in §6 because it directly affects the
+reliability of the evidence trail used to determine whether a reportable
+breach has occurred.
 
 **Remediation shipped:** the above is now formalized as a standalone
 [incident-response runbook](./incident-response-runbook.md) — intake
@@ -664,3 +704,15 @@ This document should be re-reviewed:
   moved into **attorney drafting the week of 2026-07-13**; neither is executed
   with any practice yet. Updated: §2 top-of-table Flow D row, §2 Flow D
   "Current real-world status" and "Action items" bodies.
+- `829b689` (Commit A) — closed the `audit_append` forgery vector: removed
+  the open `audit_append` command from the Tauri invoke handler; replaced with
+  five narrow server-side commands whose actor and timestamp are derived
+  server-side, not supplied by the WebView. §4 updated to document this fix
+  and its relevance to audit-trail integrity.
+- `abc176c` (Commit B) — closed the `note_history_append` forgery vector:
+  removed the open `note_history_append` command from the Tauri invoke handler;
+  replaced with narrow server-side commands for `generated`/`edited` entries and
+  moved the `signed` history entry into `encounters::mark_signed` as an atomic
+  Rust transaction. §4 and §6 updated to document both fixes and the
+  breach-notification relevance of reliable audit-trail evidence. Updated
+  "As of commit" to `abc176c`.
