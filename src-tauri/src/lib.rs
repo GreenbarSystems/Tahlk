@@ -35,6 +35,7 @@ mod auth;
 mod baa;
 mod db;
 mod db_key;
+mod destruction_log;
 mod encounters;
 mod errors;
 mod export;
@@ -221,6 +222,7 @@ pub fn run() {
             auth::auth_change_password,
             auth::auth_generate_recovery_codes,
             auth::auth_nuke_and_reinstall,
+            destruction_log::destruction_log_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

@@ -445,6 +445,7 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     note_audit::migrate_from_kv(&mut conn)?;
     patient_audit::init_schema(&conn)?;
     llm_audit::init_schema(&conn)?;
+    destruction_log::init_schema(&conn)?;
     drop(conn);
 
     Ok(pool)

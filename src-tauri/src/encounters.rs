@@ -13,6 +13,14 @@ use crate::db::{encounter_row_to_json, ENCOUNTER_COLS};
 use crate::errors::AppError;
 use crate::DbState;
 
+/// SHA-256 hex digest of `input` — used to blind encounter_id in note_audit
+/// rows after PHI destruction so the orphaned ID cannot be treated as a
+/// CCPA "unique identifier" at rest.
+fn sha256_hex(input: &str) -> String {
+    let d = ring::digest::digest(&ring::digest::SHA256, input.as_bytes());
+    crate::hex::to_hex(d.as_ref())
+}
+
 /// Reject an upsert that would mutate a signed encounter in any way other
 /// than a `patient_alias` typo fix.
 ///
@@ -207,13 +215,20 @@ pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> R
 /// hard-deleted while its history rows remain (orphaned but still
 /// verifiable) — this command is simply the first thing to actually
 /// exercise that path. The JS caller appends a final `encounter_deleted`
-/// entry to note_audit after this returns, so the trail itself records
-/// the deletion.
+/// Permanently destroys an encounter: removes its note/transcript content,
+/// scrubs PHI from the note_audit chain (tombstone + encounter_id blinding),
+/// hard-deletes note_history, and logs the act to the append-only
+/// destruction_log. Audio cleanup is best-effort after the SQL commit.
 #[tauri::command]
-pub(crate) async fn delete_encounter(app: AppHandle, state: State<'_, DbState>, id: String) -> Result<(), AppError> {
+pub(crate) async fn delete_encounter(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    id: String,
+    provider_id: String,
+) -> Result<(), AppError> {
     {
         let mut conn = state.0.get()?;
-        delete_encounter_row(&mut conn, &id)?;
+        delete_encounter_row(&mut conn, &id, &provider_id, "provider_request")?;
         // conn dropped here, before the .await below — no DB lock held
         // across await, same discipline notes.rs's read_api_key uses.
     }
@@ -231,11 +246,38 @@ pub(crate) async fn delete_encounter(app: AppHandle, state: State<'_, DbState>, 
     Ok(())
 }
 
-/// Transactional core of `delete_encounter` — takes any `&mut Connection` so
-/// tests can drive it against an in-memory fixture without a Tauri State
-/// harness (same pattern as `mark_signed`/`upsert_encounter_row`).
-fn delete_encounter_row(conn: &mut Connection, id: &str) -> Result<(), AppError> {
+/// Transactional core of encounter destruction.
+///
+/// Beyond the existing KV + encounters-row deletion, this now:
+///   1. Scrubs `note_audit.entry_json` with a tombstone (chain structure kept).
+///   2. Blinds `note_audit.encounter_id` (SHA-256, non-reversible) so the
+///      orphaned ID is not a CCPA "unique identifier" at rest.
+///   3. Hard-deletes `note_history` rows (no PHI; version scaffolding only).
+///   4. Appends to the append-only `destruction_log`.
+///
+/// All writes are inside one transaction — either everything succeeds or
+/// nothing is committed. Takes `provider_id` and `reason` so callers (the
+/// Tauri command and the Commit-2 patient cascade) can record the actor and
+/// legal basis accurately.
+pub(crate) fn delete_encounter_row(
+    conn: &mut Connection,
+    id: &str,
+    provider_id: &str,
+    reason: &str,
+) -> Result<(), AppError> {
     let tx = conn.transaction()?;
+
+    // Read patient_alias before deletion — needed for the destruction log and
+    // also serves as the authoritative "not found" guard (fail before any write).
+    let patient_alias: String = tx
+        .query_row(
+            "SELECT COALESCE(patient_alias, '') FROM encounters WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::invalid(format!("encounter {id} not found")))?;
+
     // note_content_v1::<id> / note_content_v1::transcript::<id> are the only
     // KV rows holding this encounter's actual note text/transcript — kept in
     // sync with data/keys.js's noteContent/noteTranscript key formats by
@@ -247,10 +289,58 @@ fn delete_encounter_row(conn: &mut Connection, id: &str) -> Result<(), AppError>
             format!("note_content_v1::transcript::{id}"),
         ],
     )?;
-    let n = tx.execute("DELETE FROM encounters WHERE id = ?1", params![id])?;
-    if n == 0 {
-        return Err(AppError::invalid(format!("encounter {id} not found")));
-    }
+    tx.execute("DELETE FROM encounters WHERE id = ?1", params![id])?;
+
+    // Count note_audit rows before scrubbing so the destruction log reflects
+    // how many PHI-bearing entries were actually touched.
+    let audit_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM note_audit WHERE encounter_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    // Replace note_audit.entry_json with a tombstone. The chain structure
+    // (seq, prev_hash, entry_hash) is intentionally preserved — the audit
+    // trail stays tamper-evident even after the PHI content is wiped.
+    let now = crate::time::utc_now_iso();
+    let tombstone = json!({
+        "destroyed": true,
+        "destroyed_at": now,
+        "legal_basis": reason,
+    })
+    .to_string();
+    tx.execute(
+        "UPDATE note_audit SET entry_json = ?1 WHERE encounter_id = ?2",
+        params![tombstone, id],
+    )?;
+
+    // Blind the encounter_id column (SHA-256 of id+timestamp, non-reversible)
+    // so the orphaned identifier cannot be used to re-link rows to a deleted
+    // subject — satisfying CCPA's "unique identifier" disposal requirement.
+    let blinded = sha256_hex(&format!("{id}{now}"));
+    tx.execute(
+        "UPDATE note_audit SET encounter_id = ?1 WHERE encounter_id = ?2",
+        params![blinded, id],
+    )?;
+
+    // Hard-delete note_history — contains only hashes and action metadata,
+    // no PHI. Removing it keeps the DB clean; the destruction_log records
+    // that this history existed and was destroyed.
+    tx.execute("DELETE FROM note_history WHERE encounter_id = ?1", params![id])?;
+
+    // Append to the append-only destruction log (HIPAA PHI disposal record).
+    crate::destruction_log::append(
+        &tx,
+        provider_id,
+        "encounter",
+        id,
+        &patient_alias,
+        reason,
+        audit_count,
+    )?;
+
     tx.commit()?;
     Ok(())
 }
@@ -508,6 +598,10 @@ mod tests {
             );",
         )
         .unwrap();
+        // These tables are touched by delete_encounter_row (scrub + log).
+        crate::note_audit::init_schema(&conn).unwrap();
+        crate::note_history::init_schema(&conn).unwrap();
+        crate::destruction_log::init_schema(&conn).unwrap();
         conn
     }
 
@@ -1062,7 +1156,7 @@ mod tests {
         // An unrelated row must survive.
         seed_kv(&conn, "note_settings_v1::onboarded", "true");
 
-        delete_encounter_row(&mut conn, "enc-1").unwrap();
+        delete_encounter_row(&mut conn, "enc-1", "test-provider", "provider_request").unwrap();
 
         assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
         assert_eq!(kv_count(&conn), 1, "only the unrelated row should remain");
@@ -1078,7 +1172,7 @@ mod tests {
     #[test]
     fn delete_encounter_row_reports_missing_row() {
         let mut conn = fresh_db();
-        let err = delete_encounter_row(&mut conn, "ghost").unwrap_err();
+        let err = delete_encounter_row(&mut conn, "ghost", "test-provider", "provider_request").unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
         assert!(format!("{err}").contains("not found"));
     }
@@ -1090,7 +1184,7 @@ mod tests {
         // encounters-row miss must also undo it.
         let mut conn = fresh_db();
         seed_kv(&conn, "note_content_v1::ghost", "\"orphaned content\"");
-        assert!(delete_encounter_row(&mut conn, "ghost").is_err());
+        assert!(delete_encounter_row(&mut conn, "ghost", "test-provider", "provider_request").is_err());
         assert_eq!(kv_count(&conn), 1, "the transaction must roll back, not partially apply");
     }
 
@@ -1101,7 +1195,7 @@ mod tests {
         // guard mutation, not deletion).
         let mut conn = fresh_db();
         insert_signed(&conn);
-        delete_encounter_row(&mut conn, "enc-1").unwrap();
+        delete_encounter_row(&mut conn, "enc-1", "test-provider", "provider_request").unwrap();
         assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
     }
 
@@ -1113,7 +1207,7 @@ mod tests {
         seed_kv(&conn, "note_content_v1::enc-1", "\"a\"");
         seed_kv(&conn, "note_content_v1::enc-2", "\"b\"");
 
-        delete_encounter_row(&mut conn, "enc-1").unwrap();
+        delete_encounter_row(&mut conn, "enc-1", "test-provider", "provider_request").unwrap();
 
         assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
         assert!(get_encounter_conn(&conn, "enc-2").unwrap().is_some());

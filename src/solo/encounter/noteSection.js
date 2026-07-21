@@ -292,35 +292,31 @@ export function wireNoteSection(ctx) {
     toast(removed ? 'Audio deleted from device.' : 'Audio was already gone.');
   });
 
-  // Permanently delete the whole encounter (audit finding: no capability
-  // exists to delete a signed note, transcript, or entire encounter record).
-  // Available regardless of status — a signed note must be deletable too,
-  // since that's the exact case the finding names. The audit trail
-  // (note_history/note_audit/llm_audit) is deliberately preserved by the
-  // Rust command; this appends a final 'encounter_deleted' entry to that
-  // same trail so it records who deleted the record and when, even though
-  // the clinical content itself is now gone.
-  document.getElementById('btn-delete-encounter')?.addEventListener('click', async () => {
+  // Permanently destroy the whole encounter. The Rust command scrubs PHI
+  // from note_audit (tombstone + encounter_id blinding), hard-deletes
+  // note_history, and records the act in the append-only destruction_log.
+  // llm_audit rows (metadata only, no PHI) are retained. No separate
+  // appendAudit call is needed — the destruction_log is the disposal record.
+  document.getElementById(‘btn-delete-encounter’)?.addEventListener(‘click’, async () => {
     const id = ctx.currentEncounter.id;
+    const isSigned = ctx.currentEncounter.status === ‘signed’;
     const ok = await confirmModal({
-      title: 'Delete encounter',
-      message: 'This permanently deletes this encounter’s note, transcript, and record. This cannot be undone.',
-      confirmLabel: 'Delete',
-      confirmClass: 'btn-danger',
+      title: ‘Delete encounter’,
+      message: isSigned
+        ? ‘This is a signed clinical record. Destruction is permanent, irreversible, and will be logged.’
+        : ‘This permanently destroys this encounter’s note, transcript, and record. This cannot be undone.’,
+      confirmLabel: ‘Delete’,
+      confirmClass: ‘btn-danger’,
     });
     if (!ok) return;
-    const deleteBtn = document.getElementById('btn-delete-encounter');
+    const deleteBtn = document.getElementById(‘btn-delete-encounter’);
     if (deleteBtn) deleteBtn.disabled = true;
     try {
       await encountersRepo.delete(id);
-      await appendAudit(keys.noteAudit(id), 'encounter_deleted', {
-        encounterId: id,
-        status: ctx.currentEncounter.status,
-      });
-      toast('Encounter deleted.');
+      toast(‘Encounter deleted.’);
       await ctx.closePanel();
     } catch (e) {
-      toast(`Delete failed: ${userMessage(e, 'unknown error')}`);
+      toast(`Delete failed: ${userMessage(e, ‘unknown error’)}`);
       if (deleteBtn) deleteBtn.disabled = false;
     }
   });
