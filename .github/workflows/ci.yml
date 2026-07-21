@@ -134,3 +134,24 @@ jobs:
           touch src-tauri/resources/ggml-base.en.bin
 
       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+
+      # `cargo test` needs a Secret Service provider. auth::set_password writes
+      # the password hash to the OS keychain (auth.rs), secrets stores the
+      # Anthropic key there, and lock stores the idle-lock PIN — all via the
+      # `keyring` crate, which errors at `Entry::new` on a headless runner with
+      # no D-Bus session. gnome-keyring supplies one for the duration of the
+      # test run; nothing is persisted beyond the job.
+      #
+      # This is why the suite could not previously run here. It is worth the
+      # setup: the tests it unblocks cover DEK wrapping, recovery codes,
+      # signed-row immutability and the litigation hold — the controls that
+      # protect PHI at rest. `cargo check` alone compiles them and runs none.
+      - name: Install keyring backend for tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+
+      - name: Run Rust tests
+        run: |
+          dbus-run-session -- sh -c '
+            echo "" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --manifest-path src-tauri/Cargo.toml --locked
+          '
