@@ -41,11 +41,6 @@
 //! itself — no salt needed given 120-bit entropy). `ciphertext_hex` is
 //! `hex(nonce[12] ‖ AES-256-GCM(kek, dek_bytes[32]) ‖ tag[16])`.
 //!
-//! ## Feature flag
-//!
-//! `AUTH_V1_ENABLED` gates whether the app enforces auth at startup.
-//! Flag is now `true` (Stage 4): JS screens wired, `db.rs` opens the database
-//! via `open_database_with_dek` after the password is verified here.
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -59,9 +54,6 @@ use tauri::{AppHandle, Manager};
 use crate::errors::AppError;
 use crate::hex::{from_hex, to_hex};
 use crate::time::utc_now_iso;
-
-/// Feature flag for ADR 0004.
-pub(crate) const AUTH_V1_ENABLED: bool = true;
 
 /// OS keychain item name for the PBKDF2 password hash.
 /// Stored format: `"<iterations>:<salt_hex>:<hash_hex>"` (matches `lock.rs`).
@@ -742,19 +734,11 @@ pub(crate) fn reset_password_with_recovery_code(
 // Tauri commands
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns whether ADR 0004 auth enforcement is enabled in this build.
-/// When false, all other auth commands error and the JS startup flow skips
-/// the auth gate entirely — existing behavior is preserved.
-#[tauri::command]
-pub(crate) fn auth_is_enabled() -> bool {
-    AUTH_V1_ENABLED
-}
-
-/// Returns true only when `AUTH_V1_ENABLED` and auth has been configured.
-/// When false, the JS startup flow skips the password screen entirely.
+/// Returns true only when auth has been configured (password set on this device).
+/// When false, the JS startup flow runs the first-open setup instead.
 #[tauri::command]
 pub(crate) fn auth_is_configured() -> bool {
-    AUTH_V1_ENABLED && is_auth_configured()
+    is_auth_configured()
 }
 
 /// First-open or post-nuke setup: sets the master password and returns the
@@ -764,9 +748,6 @@ pub(crate) fn auth_is_configured() -> bool {
 /// `tahlk_auth.db` becomes the only route to the database key.
 #[tauri::command]
 pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<String>, AppError> {
-    if !AUTH_V1_ENABLED {
-        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
-    }
     let dek_hex = crate::db_key::load_or_generate_dek()?;
     let dek_vec =
         from_hex(&dek_hex).ok_or_else(|| AppError::internal_from("DEK hex malformed"))?;
@@ -793,9 +774,6 @@ pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<
 /// commands become available for the session.
 #[tauri::command]
 pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(), AppError> {
-    if !AUTH_V1_ENABLED {
-        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
-    }
     let path = wraps_db_path(&app)?;
     let dek = unlock_with_password(&password, &path)?;
     let hex_key = to_hex(&dek);
@@ -834,9 +812,6 @@ pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(
 /// `auth_change_password`.
 #[tauri::command]
 pub(crate) fn auth_unlock_recovery(app: AppHandle, code: String) -> Result<(), AppError> {
-    if !AUTH_V1_ENABLED {
-        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
-    }
     let path = wraps_db_path(&app)?;
     let _dek = unlock_with_recovery_code(&code, &path)?;
     Ok(())
@@ -850,9 +825,6 @@ pub(crate) fn auth_change_password(
     old_password: String,
     new_password: String,
 ) -> Result<(), AppError> {
-    if !AUTH_V1_ENABLED {
-        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
-    }
     let path = wraps_db_path(&app)?;
     change_password(&old_password, &new_password, &path)
 }
@@ -866,9 +838,6 @@ pub(crate) fn auth_reset_with_recovery_code(
     code: String,
     new_password: String,
 ) -> Result<Vec<String>, AppError> {
-    if !AUTH_V1_ENABLED {
-        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
-    }
     let path = wraps_db_path(&app)?;
     let codes = reset_password_with_recovery_code(&code, &new_password, &path)?;
     Ok(codes.iter().map(|c| c.display()).collect())
@@ -881,9 +850,6 @@ pub(crate) fn auth_generate_recovery_codes(
     app: AppHandle,
     password: String,
 ) -> Result<Vec<String>, AppError> {
-    if !AUTH_V1_ENABLED {
-        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
-    }
     let path = wraps_db_path(&app)?;
     let codes = generate_new_recovery_codes(&password, &path)?;
     Ok(codes.iter().map(|c| c.display()).collect())
@@ -893,9 +859,6 @@ pub(crate) fn auth_generate_recovery_codes(
 /// For the "forgot password AND no recovery codes" scenario only.
 #[tauri::command]
 pub(crate) fn auth_nuke_and_reinstall(app: AppHandle) -> Result<(), AppError> {
-    if !AUTH_V1_ENABLED {
-        return Err(AppError::invalid("auth_v1 is not enabled in this build"));
-    }
     let data_dir = app
         .path()
         .app_data_dir()

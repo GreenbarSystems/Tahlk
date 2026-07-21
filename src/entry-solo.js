@@ -73,20 +73,17 @@ async function bootstrap() {
   startIdleWatcher(() => showLockScreen(() => {}));
   await telemetry.init();   // opt-in gated; subscribes to the bus, records nothing unless enabled
 
-  const authEnabled = await authRepo.isEnabled();
-  if (authEnabled) {
-    const authConfigured = await authRepo.isConfigured();
-    const app = document.getElementById('app');
-    if (!authConfigured) {
-      // If the user already has data (i.e. they onboarded before auth existed),
-      // show a one-time explainer before dropping them into the password-setup flow.
-      if (isOnboarded()) {
-        await new Promise(resolve => showMigrationInterstitial(app, resolve));
-      }
-      await runFirstOpenAuth(app, () => {});
-    } else {
-      await new Promise(resolve => showSignInScreen(resolve));
+  const authConfigured = await authRepo.isConfigured();
+  const app = document.getElementById('app');
+  if (!authConfigured) {
+    // If the user already has data (i.e. they onboarded before auth existed),
+    // show a one-time explainer before dropping them into the password-setup flow.
+    if (isOnboarded()) {
+      await new Promise(resolve => showMigrationInterstitial(app, resolve));
     }
+    await runFirstOpenAuth(app, () => {});
+  } else {
+    await new Promise(resolve => showSignInScreen(resolve));
   }
 
   if (!isOnboarded()) {

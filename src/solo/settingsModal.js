@@ -53,8 +53,6 @@ export async function renderSettings() {
   const pinSet = await lockRepo.isPinSet().catch(() => false);
   const lockOn = isLockEnabled();
   const lockTimeout = getLockTimeoutMinutes();
-  const authEnabled = await authRepo.isEnabled().catch(() => false);
-
   return `
     <div class="settings-page">
       <h2 class="settings-title">Settings</h2>
@@ -118,7 +116,6 @@ export async function renderSettings() {
         <p class="settings-desc">Default: ${DEFAULT_TIMEOUT_MINUTES} minutes.</p>
       </section>
 
-      ${authEnabled ? `
       <section class="settings-section">
         <h3>Account security</h3>
         <p class="settings-desc">
@@ -161,7 +158,6 @@ export async function renderSettings() {
           </button>
         </div>
       </section>
-      ` : ''}
 
       <section class="settings-section">
         <h3>AI note generation</h3>

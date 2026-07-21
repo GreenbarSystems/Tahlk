@@ -103,14 +103,13 @@ pub fn run() {
                 default_hook(info);
             }));
 
-            // When ADR 0004 auth is active AND already configured, the keychain
-            // DEK entry has been removed (by auth_set_password) and the DB can
-            // only be opened with the DEK unwrapped from the user's password.
-            // Defer opening to auth_unlock_password, which runs after the JS
-            // auth screen collects the password. When auth is not yet configured
-            // (first ever launch) or the flag is off, fall through to the
-            // existing keychain path so the app still works on those launches.
-            if !auth::AUTH_V1_ENABLED || !auth::is_auth_configured() {
+            // When auth is already configured the keychain DEK entry has been
+            // removed (by auth_set_password) and the DB can only be opened with
+            // the DEK unwrapped from the user's password. Defer opening to
+            // auth_unlock_password, which runs after the JS auth screen collects
+            // the password. On a fresh install (not yet configured), fall through
+            // to the keychain path so the first-open setup flow works.
+            if !auth::is_auth_configured() {
                 // Fail-closed on any DB open error — including keychain unreachable
                 // (M1) or wrong-key (tampered / corrupted DEK). We would rather
                 // refuse to launch than silently fall back to an unencrypted DB and
@@ -214,7 +213,6 @@ pub fn run() {
             notes::generate_note,
             export::export_note_to_file,
             export::export_note_pdf_to_file,
-            auth::auth_is_enabled,
             auth::auth_is_configured,
             auth::auth_set_password,
             auth::auth_reset_with_recovery_code,

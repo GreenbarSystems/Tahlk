@@ -6,12 +6,7 @@
 import { invoke } from '../platform/tauri.js';
 
 export const authRepo = {
-  // Returns AUTH_V1_ENABLED. When false, all other commands error and the
-  // JS startup flow skips auth entirely (preserving existing behavior).
-  isEnabled: () => invoke('auth_is_enabled'),
-
-  // Returns AUTH_V1_ENABLED && is_auth_configured(). True only when a
-  // password has been set AND the flag is on.
+  // True only when a password has been set on this device.
   isConfigured: () => invoke('auth_is_configured'),
 
   // First-open: set master password, wrap DEK, write auth_dek_wraps.
