@@ -296,26 +296,26 @@ export function wireNoteSection(ctx) {
   // note_history, and records the act in the append-only destruction_log.
   // llm_audit rows (metadata only, no PHI) are retained. No separate
   // appendAudit call is needed — the destruction_log is the disposal record.
-  document.getElementById(‘btn-delete-encounter’)?.addEventListener(‘click’, async () => {
+  document.getElementById('btn-delete-encounter')?.addEventListener('click', async () => {
     const id = ctx.currentEncounter.id;
-    const isSigned = ctx.currentEncounter.status === ‘signed’;
+    const isSigned = ctx.currentEncounter.status === 'signed';
     const ok = await confirmModal({
-      title: ‘Delete encounter’,
+      title: 'Delete encounter',
       message: isSigned
-        ? ‘This is a signed clinical record. Destruction is permanent, irreversible, and will be logged.’
-        : ‘This permanently destroys this encounter’s note, transcript, and record. This cannot be undone.’,
-      confirmLabel: ‘Delete’,
-      confirmClass: ‘btn-danger’,
+        ? 'This is a signed clinical record. Destruction is permanent, irreversible, and will be logged.'
+        : "This permanently destroys this encounter's note, transcript, and record. This cannot be undone.",
+      confirmLabel: 'Delete',
+      confirmClass: 'btn-danger',
     });
     if (!ok) return;
-    const deleteBtn = document.getElementById(‘btn-delete-encounter’);
+    const deleteBtn = document.getElementById('btn-delete-encounter');
     if (deleteBtn) deleteBtn.disabled = true;
     try {
       await encountersRepo.delete(id);
-      toast(‘Encounter deleted.’);
+      toast('Encounter deleted.');
       await ctx.closePanel();
     } catch (e) {
-      toast(`Delete failed: ${userMessage(e, ‘unknown error’)}`);
+      toast(`Delete failed: ${userMessage(e, 'unknown error')}`);
       if (deleteBtn) deleteBtn.disabled = false;
     }
   });
