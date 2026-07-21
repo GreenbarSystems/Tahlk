@@ -187,14 +187,10 @@ pub(crate) fn delete_patient(state: State<DbState>, id: String) -> Result<(), Ap
 }
 
 pub(crate) fn delete_patient_conn(conn: &mut Connection, id: &str, provider_id: &str) -> Result<(), AppError> {
-    // C5: block deletions when a litigation hold is active. The hold flag lives
-    // in the same DB (kv table), so the check uses the same connection — no
-    // extra round-trip required. Fail-open on DB error (see retention.rs doc).
-    if retention::litigation_hold_active(conn) {
-        return Err(AppError::invalid(
-            "litigation hold is active — patient records cannot be deleted until the hold is lifted",
-        ));
-    }
+    // C5: block deletions when a litigation hold is active. Needed explicitly
+    // here because a roster delete removes only the patients row — it never
+    // reaches delete_encounter_in_tx, where the shared guard lives.
+    retention::litigation_hold_check(conn, "patient records")?;
     let tx = conn.transaction()?;
     let n = tx.execute("DELETE FROM patients WHERE id = ?1", params![id])?;
     if n == 0 {
@@ -228,6 +224,13 @@ pub(crate) async fn destroy_patient_records(
     patient_id: String,
 ) -> Result<Value, AppError> {
     let mut conn = state.0.get()?;
+
+    // Explicit hold check, in addition to the one inside delete_encounter_in_tx.
+    // Not redundant: a patient with zero linked encounters never enters the
+    // cascade loop, so the inner guard would never fire, and the raw
+    // `DELETE FROM patients` below would destroy the roster row under an active
+    // hold. Checking here also fails before any work rather than mid-cascade.
+    retention::litigation_hold_check(&conn, "patient records")?;
 
     // Derive actor server-side — WebView cannot supply or forge provider_id.
     let provider_id = provider_id_from_kv(&conn);
@@ -341,11 +344,58 @@ mod tests {
                 source_id  TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE kv (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )
         .unwrap();
         patient_audit::init_schema(&conn).unwrap();
         conn
+    }
+
+    // The litigation-hold flag lives in kv. delete_patient_conn reads it and
+    // fails CLOSED, so the table must exist for the delete path to work at all
+    // — absence is indistinguishable from an unreadable hold, which is exactly
+    // the state the guard is meant to refuse.
+    fn set_hold(conn: &Connection, active: bool) {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value, updated_at) \
+             VALUES ('note_settings_v1::litigation_hold', ?1, 0)",
+            params![if active { "true" } else { "false" }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn litigation_hold_blocks_roster_deletion() {
+        // delete_patient_conn removes only the patients row — it never reaches
+        // delete_encounter_in_tx, so it needs its own guard.
+        let mut conn = fresh_db();
+        upsert_patient_conn(&mut conn, &sample("pt-1", "A. Nonymous"), "Dr. Chen").unwrap();
+        set_hold(&conn, true);
+
+        let err = delete_patient_conn(&mut conn, "pt-1", "Dr. Chen").unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(format!("{err}").contains("litigation hold"));
+        assert!(
+            get_patient_conn(&conn, "pt-1").unwrap().is_some(),
+            "a blocked delete must leave the roster row intact"
+        );
+    }
+
+    #[test]
+    fn roster_deletion_proceeds_once_the_hold_is_lifted() {
+        let mut conn = fresh_db();
+        upsert_patient_conn(&mut conn, &sample("pt-1", "A. Nonymous"), "Dr. Chen").unwrap();
+        set_hold(&conn, true);
+        assert!(delete_patient_conn(&mut conn, "pt-1", "Dr. Chen").is_err());
+
+        set_hold(&conn, false);
+        delete_patient_conn(&mut conn, "pt-1", "Dr. Chen").unwrap();
+        assert!(get_patient_conn(&conn, "pt-1").unwrap().is_none());
     }
 
     fn sample(id: &str, alias: &str) -> Value {

@@ -274,6 +274,14 @@ pub(crate) fn delete_encounter_in_tx(
     provider_id: &str,
     reason: &str,
 ) -> Result<(), AppError> {
+    // Litigation hold is enforced HERE, on the inner function, not on the
+    // wrappers. Every destruction path in the app funnels through this call —
+    // delete_encounter_row, destroy_patient_records' cascade, and
+    // retention_destroy_eligible's batch — so a new caller cannot forget it.
+    // The original C5 fix guarded only the two wrappers and missed
+    // destroy_patient_records, which reaches this function directly.
+    retention::litigation_hold_check(conn, "encounter records")?;
+
     // Read patient_alias before deletion — needed for the destruction log and
     // also serves as the authoritative "not found" guard (fail before any write).
     let patient_alias: String = conn
@@ -362,11 +370,8 @@ pub(crate) fn delete_encounter_row(
     provider_id: &str,
     reason: &str,
 ) -> Result<(), AppError> {
-    if retention::litigation_hold_active(conn) {
-        return Err(AppError::invalid(
-            "litigation hold is active — encounter records cannot be deleted until the hold is lifted",
-        ));
-    }
+    // No hold check here — delete_encounter_in_tx enforces it for every caller,
+    // and doing it twice would only risk the two copies drifting apart.
     let tx = conn.transaction()?;
     delete_encounter_in_tx(&tx, id, provider_id, reason)?;
     tx.commit()?;
@@ -1204,6 +1209,104 @@ mod tests {
     fn get_encounter_conn(conn: &Connection, id: &str) -> Result<Option<Value>, AppError> {
         let sql = format!("SELECT {ENCOUNTER_COLS} FROM encounters WHERE id = ?1");
         Ok(conn.query_row(&sql, params![id], encounter_row_to_json).optional()?)
+    }
+
+    // ── Litigation hold ─────────────────────────────────────────────────
+    //
+    // The C5 fix originally guarded the two outer wrappers (delete_encounter_row,
+    // delete_patient_conn) and missed destroy_patient_records, which reaches
+    // delete_encounter_in_tx directly — so the app's most destructive command
+    // ran freely under an active hold. The guard now lives on the inner
+    // function, which is what these tests pin. No test covered the hold at all
+    // before this; it was one of eleven controls shipped untested.
+
+    fn set_hold(conn: &Connection, active: bool) {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value, updated_at) \
+             VALUES ('note_settings_v1::litigation_hold', ?1, 0)",
+            params![if active { "true" } else { "false" }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn litigation_hold_blocks_the_inner_cascade_helper() {
+        // The regression that mattered: destroy_patient_records and
+        // retention_destroy_eligible both call this directly, bypassing every
+        // wrapper. If the guard is not HERE, neither is covered.
+        let conn = fresh_db();
+        insert_row(&conn, "enc-1", "signed", "2026-07-04");
+        set_hold(&conn, true);
+
+        let err = delete_encounter_in_tx(&conn, "enc-1", "test-provider", "patient_request")
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(format!("{err}").contains("litigation hold"));
+        assert!(
+            get_encounter_conn(&conn, "enc-1").unwrap().is_some(),
+            "a blocked destruction must leave the record intact"
+        );
+    }
+
+    #[test]
+    fn litigation_hold_blocks_single_encounter_deletion() {
+        let mut conn = fresh_db();
+        insert_row(&conn, "enc-1", "signed", "2026-07-04");
+        seed_kv(&conn, "note_content_v1::enc-1", "\"the note text\"");
+        set_hold(&conn, true);
+
+        let err = delete_encounter_row(&mut conn, "enc-1", "test-provider", "provider_request")
+            .unwrap_err();
+        assert!(format!("{err}").contains("litigation hold"));
+        assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_some());
+        assert_eq!(
+            kv_count(&conn),
+            2,
+            "note content and the hold flag must both survive a blocked delete"
+        );
+    }
+
+    #[test]
+    fn deletion_proceeds_when_the_hold_is_lifted_or_absent() {
+        // Absent flag.
+        let mut conn = fresh_db();
+        insert_row(&conn, "enc-1", "draft", "2026-07-04");
+        delete_encounter_row(&mut conn, "enc-1", "test-provider", "provider_request").unwrap();
+        assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
+
+        // Explicitly lifted.
+        let mut conn = fresh_db();
+        insert_row(&conn, "enc-2", "draft", "2026-07-04");
+        set_hold(&conn, false);
+        delete_encounter_row(&mut conn, "enc-2", "test-provider", "provider_request").unwrap();
+        assert!(get_encounter_conn(&conn, "enc-2").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unreadable_hold_state_blocks_deletion_rather_than_permitting_it() {
+        // Fail-closed. The original helper flattened any read error to `false`,
+        // so a transient DB fault silently PERMITTED destruction under a hold.
+        // A blocked deletion is retryable; a spoliated record is not.
+        let conn = fresh_db();
+        insert_row(&conn, "enc-1", "signed", "2026-07-04");
+        conn.execute_batch("DROP TABLE kv;").unwrap();
+
+        let err = delete_encounter_in_tx(&conn, "enc-1", "test-provider", "provider_request")
+            .unwrap_err();
+        assert!(matches!(err, AppError::Storage(_)));
+        // Assert on the message, not just the variant. Dropping kv also breaks
+        // the later `DELETE FROM kv` inside this function, which yields a
+        // Storage error too — so a variant-only check would pass even with the
+        // guard removed, proving nothing. This pins that the refusal came from
+        // the hold reader, before any destructive statement ran.
+        assert!(
+            format!("{err}").contains("could not determine litigation-hold state"),
+            "refusal must come from the hold guard, not an incidental later failure: {err}"
+        );
+        assert!(
+            get_encounter_conn(&conn, "enc-1").unwrap().is_some(),
+            "the record must survive when hold state cannot be determined"
+        );
     }
 
     #[test]

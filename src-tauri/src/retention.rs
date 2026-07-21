@@ -24,22 +24,50 @@ use tauri::{AppHandle, State};
 use crate::errors::AppError;
 use crate::DbState;
 
-/// True when a litigation hold is active and all record deletions must be
-/// blocked. Called from `delete_encounter_row` and `delete_patient_conn` (C5).
+/// Whether a litigation hold is currently active.
 ///
-/// Returns `false` on any read error — a transient DB fault should not
-/// accidentally block all deletions (fail-open is the lower-risk choice here).
-pub(crate) fn litigation_hold_active(conn: &Connection) -> bool {
-    let row: Option<String> = conn
+/// Fails CLOSED: a read error propagates instead of being flattened to
+/// `false`. This reverses the original decision, which returned `false` on any
+/// DB fault so a transient error could not block deletions. That reasoning is
+/// right for an availability-sensitive check and wrong for this one — a hold is
+/// a legal preservation obligation, and destroying records under one is
+/// spoliation. A blocked deletion is recoverable by retrying; a spoliated
+/// record is not. When the hold state cannot be determined, callers must
+/// refuse to destroy.
+pub(crate) fn litigation_hold_is_active(conn: &Connection) -> Result<bool, AppError> {
+    let raw: Option<String> = conn
         .query_row(
             "SELECT value FROM kv WHERE key = ?1",
             params![KV_LITIGATION_HOLD],
             |r| r.get(0),
         )
         .optional()
-        .ok()
-        .flatten();
-    row.as_deref() == Some("true")
+        .map_err(|e| {
+            AppError::Storage(format!(
+                "could not determine litigation-hold state, refusing to destroy records: {e}"
+            ))
+        })?;
+    Ok(raw.as_deref() == Some("true"))
+}
+
+/// Guard for every PHI-destruction path: returns `Err` when a hold is active
+/// (or cannot be read). `subject` names what is being destroyed and is
+/// interpolated into the message the provider sees, e.g. "encounter records".
+///
+/// Lives here, but is invoked from inside `encounters::delete_encounter_in_tx`
+/// rather than at each call site. The original C5 fix guarded the two outer
+/// wrappers (`delete_encounter_row`, `delete_patient_conn`) and missed
+/// `destroy_patient_records`, which reaches the inner function directly — so
+/// the app's most destructive command ran freely under an active hold. Putting
+/// the check on the inner function makes it structurally impossible for a new
+/// caller to skip it.
+pub(crate) fn litigation_hold_check(conn: &Connection, subject: &str) -> Result<(), AppError> {
+    if litigation_hold_is_active(conn)? {
+        return Err(AppError::invalid(format!(
+            "litigation hold is active — {subject} cannot be deleted until the hold is lifted"
+        )));
+    }
+    Ok(())
 }
 
 fn provider_id_from_kv(conn: &Connection) -> String {
@@ -128,14 +156,7 @@ pub(crate) fn retention_set_years(
 #[tauri::command]
 pub(crate) fn retention_hold_get(state: State<'_, DbState>) -> Result<bool, AppError> {
     let conn = state.0.get()?;
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_LITIGATION_HOLD],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(raw.as_deref() == Some("true"))
+    litigation_hold_is_active(&conn)
 }
 
 /// Set or clear the litigation hold. While active, `retention_list_candidates`
@@ -182,14 +203,10 @@ pub(crate) fn retention_list_candidates(
 ) -> Result<Vec<Value>, AppError> {
     let conn = state.0.get()?;
 
-    let hold: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_LITIGATION_HOLD],
-            |r| r.get(0),
-        )
-        .ok();
-    if hold.as_deref() == Some("true") {
+    // Listing, not destroying — a hold means "nothing is eligible", not an
+    // error. Still routed through the fail-closed reader so an unreadable hold
+    // state surfaces rather than silently presenting records as purgeable.
+    if litigation_hold_is_active(&conn)? {
         return Ok(vec![]);
     }
 
@@ -250,14 +267,9 @@ pub(crate) async fn retention_destroy_eligible(
 ) -> Result<Value, AppError> {
     let mut conn = state.0.get()?;
 
-    let hold: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            params![KV_LITIGATION_HOLD],
-            |r| r.get(0),
-        )
-        .ok();
-    if hold.as_deref() == Some("true") {
+    // Checked up front for a clearer message than the per-encounter guard
+    // inside delete_encounter_in_tx would give, and to fail before any work.
+    if litigation_hold_is_active(&conn)? {
         return Err(AppError::invalid(
             "litigation hold is active — retention-based destruction is blocked",
         ));
