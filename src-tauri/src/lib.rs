@@ -19,6 +19,7 @@
 //!   - `export`        — data-location lookup + save-as export.
 //!   - `patients`       — patient roster CRUD + cascade PHI destruction.
 //!   - `patient_audit`  — append-only audit log for patient roster CRUD.
+//!   - `retention`      — HIPAA record-retention window + litigation hold + expiration enforcement.
 //!   - `time`           — server-side ISO-8601 UTC timestamps for audit rows.
 //!   - `hex`            — lowercase hex encode/decode (DEK blob, PIN hash format).
 //!   - `keychain`       — shared OS-keychain entry construction (item names stay per-module).
@@ -53,6 +54,7 @@ mod notes;
 mod patient_audit;
 mod patients;
 mod perms;
+mod retention;
 mod secrets;
 mod whisper;
 
@@ -224,6 +226,12 @@ pub fn run() {
             auth::auth_generate_recovery_codes,
             auth::auth_nuke_and_reinstall,
             destruction_log::destruction_log_list,
+            retention::retention_get_years,
+            retention::retention_set_years,
+            retention::retention_hold_get,
+            retention::retention_hold_set,
+            retention::retention_list_candidates,
+            retention::retention_destroy_eligible,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

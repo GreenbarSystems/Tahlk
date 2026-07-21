@@ -9,6 +9,7 @@ import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
+import { retentionRepo } from '../data/retentionRepo.js';
 import { verifyAllChains } from '../domain/historyChain.js';
 import { checkLlmAuditDrift, describeDrift } from '../domain/llmAuditDrift.js';
 import { iconCheck } from './icons.js';
@@ -53,6 +54,8 @@ export async function renderSettings() {
   const pinSet = await lockRepo.isPinSet().catch(() => false);
   const lockOn = isLockEnabled();
   const lockTimeout = getLockTimeoutMinutes();
+  const retentionYears = await retentionRepo.getYears().catch(() => 7);
+  const retentionHold = await retentionRepo.getHold().catch(() => false);
   return `
     <div class="settings-page">
       <h2 class="settings-title">Settings</h2>
@@ -207,6 +210,33 @@ export async function renderSettings() {
           <input type="radio" name="s-audio-retention" value="delete_on_sign" ${retention === 'delete_on_sign' ? 'checked' : ''} />
           <span><strong>Delete after signing</strong> — remove the audio recording as soon as you sign each note.</span>
         </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Privacy &amp; data retention</h3>
+        <p class="settings-desc">
+          HIPAA requires covered entities to retain records for at least 6 years; many state laws require
+          7 or 10. Set your practice's retention window here. Tahlk can identify encounter records that have
+          aged past that window so you can permanently destroy them. A <strong>litigation hold</strong>
+          suspends all retention-based deletion when legal matters require preserving records beyond the
+          normal window.
+        </p>
+        <div class="field-row">
+          <label for="s-retention-years">Keep records for at least</label>
+          <select id="s-retention-years">
+            ${[5, 6, 7, 10, 15].map(y =>
+              `<option value="${y}" ${retentionYears === y ? 'selected' : ''}>${y} year${y === 7 ? ' (default)' : ''}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <label class="diag-toggle">
+          <input type="checkbox" id="s-retention-hold" ${retentionHold ? 'checked' : ''} />
+          <span>Litigation hold — suspend all retention-based deletion</span>
+        </label>
+        <button class="btn btn-secondary" id="s-retention-check" style="margin-top:12px">
+          Check for records due for deletion
+        </button>
+        <div id="s-retention-result" class="settings-desc" style="margin-top:8px"></div>
       </section>
 
       <section class="settings-section settings-section--muted">
@@ -556,6 +586,73 @@ export function wireSettings() {
         toast(`Could not update retention: ${userMessage(err, 'unknown error')}`);
       }
     });
+  });
+
+  // Privacy & data retention.
+  document.getElementById('s-retention-years')?.addEventListener('change', async e => {
+    const years = Number(e.target.value);
+    try {
+      await retentionRepo.setYears(years);
+      toast(`Retention window set to ${years} years.`);
+    } catch (err) {
+      toast(`Could not update retention window: ${userMessage(err, 'unknown error')}`);
+    }
+  });
+
+  document.getElementById('s-retention-hold')?.addEventListener('change', async e => {
+    const active = !!e.target.checked;
+    try {
+      await retentionRepo.setHold(active);
+      toast(active
+        ? 'Litigation hold active — retention-based deletion suspended.'
+        : 'Litigation hold cleared.');
+    } catch (err) {
+      e.target.checked = !active;
+      toast(`Could not update hold: ${userMessage(err, 'unknown error')}`);
+    }
+  });
+
+  wireAsyncActionButton({
+    id: 's-retention-check',
+    resultId: 's-retention-result',
+    busyLabel: 'Checking…',
+    idleLabel: 'Check for records due for deletion',
+    failPrefix: 'Could not check retention',
+    run: async resultEl => {
+      const today = new Date().toISOString().slice(0, 10);
+      const candidates = await retentionRepo.listCandidates(today);
+      if (!resultEl) return;
+      if (candidates.length === 0) {
+        resultEl.textContent = 'No records are past their retention window.';
+        return;
+      }
+      const n = candidates.length;
+      resultEl.innerHTML = `
+        <strong>${n} encounter record${n === 1 ? '' : 's'} ${n === 1 ? 'is' : 'are'} past the retention window.</strong>
+        <br>Oldest: ${escapeHtml(candidates[0].encounter_date)}
+        ${candidates[0].patient_alias ? ` — ${escapeHtml(candidates[0].patient_alias)}` : ''}.
+        <br><button class="btn btn-danger btn-sm" id="s-retention-destroy" style="margin-top:8px">
+          Permanently delete ${n} record${n === 1 ? '' : 's'}…
+        </button>
+      `;
+      document.getElementById('s-retention-destroy')?.addEventListener('click', async () => {
+        const confirmed = confirm(
+          `Permanently delete ${n} encounter record${n === 1 ? '' : 's'} past the retention window?\n\n` +
+          `This is irreversible and will be logged to the destruction log.`
+        );
+        if (!confirmed) return;
+        const btn = document.getElementById('s-retention-destroy');
+        if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+        try {
+          const { destroyed } = await retentionRepo.destroyEligible(today);
+          if (resultEl) resultEl.textContent = `${destroyed} record${destroyed === 1 ? '' : 's'} permanently deleted.`;
+          toast(`${destroyed} record${destroyed === 1 ? '' : 's'} deleted.`);
+        } catch (err) {
+          if (btn) { btn.disabled = false; btn.textContent = `Permanently delete ${n} record${n === 1 ? '' : 's'}…`; }
+          toast(`Deletion failed: ${userMessage(err, 'unknown error')}`);
+        }
+      });
+    },
   });
 
   // Screen Lock. Setting/changing a PIN and removing it both flip several

@@ -22,6 +22,7 @@ import { renderEncounterPanel, wireEncounterPanel } from './solo/encounter/index
 import { renderSettings, wireSettings } from './solo/settingsModal.js';
 import { renderTemplatesView } from './solo/templatesView.js';
 import { renderPatientsView, wirePatientsView } from './solo/patientsView.js';
+import { retentionRepo } from './data/retentionRepo.js';
 
 let _currentTab = 'sessions';
 let _openEncounter = null;
@@ -96,6 +97,40 @@ async function bootstrap() {
   }
 
   renderApp();
+  // Non-blocking launch check: if records are past the retention window, surface
+  // a dismissible banner pointing the provider to Settings. Runs after renderApp()
+  // so the DOM is ready and never delays the auth or onboarding flow.
+  checkRetentionOnLaunch();
+}
+
+async function checkRetentionOnLaunch() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const candidates = await retentionRepo.listCandidates(today);
+    if (!candidates || candidates.length === 0) return;
+    const notice = document.getElementById('retention-notice');
+    if (!notice) return;
+    const n = candidates.length;
+    notice.innerHTML = `
+      <span class="retention-notice__msg">
+        ${n} encounter record${n === 1 ? '' : 's'} ${n === 1 ? 'has' : 'have'} passed your
+        retention window.
+        <a href="#" id="retention-notice-link">Review in Settings →</a>
+      </span>
+      <button class="retention-notice__dismiss" id="retention-notice-dismiss" aria-label="Dismiss">×</button>
+    `;
+    notice.hidden = false;
+    document.getElementById('retention-notice-link')?.addEventListener('click', e => {
+      e.preventDefault();
+      _currentTab = 'settings';
+      renderApp();
+    });
+    document.getElementById('retention-notice-dismiss')?.addEventListener('click', () => {
+      notice.hidden = true;
+    });
+  } catch {
+    // Non-critical — never block launch on a retention check failure.
+  }
 }
 
 async function renderApp() {
@@ -103,6 +138,7 @@ async function renderApp() {
 
   root.innerHTML = `
     ${renderHeader(_currentTab)}
+    <div id="retention-notice" hidden class="retention-notice"></div>
     <main class="app-main" id="main-content"></main>
     <div class="toast" id="toast"><span id="toast-msg"></span></div>
   `;
