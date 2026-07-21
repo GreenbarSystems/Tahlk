@@ -32,13 +32,32 @@ export function createModal({
   backdrop.appendChild(card);
 
   let closed = false;
+  let _triggerEl = null;
 
-  // A single document-level keydown listener: Escape requests close, everything
-  // else is forwarded to the caller (e.g. confirmModal maps Enter to confirm).
+  function getFocusable() {
+    return [...card.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )].filter(el => !el.disabled && !el.hidden);
+  }
+
+  // A single document-level keydown listener: Escape requests close, Tab is
+  // trapped inside the card, everything else is forwarded to the caller.
   const onKey = e => {
     if (closeOnEscape && e.key === 'Escape') {
       e.preventDefault?.();
       onRequestClose?.('escape');
+      return;
+    }
+    if (e.key === 'Tab') {
+      const focusable = getFocusable();
+      if (!focusable.length) { e.preventDefault(); return; }
+      const first = focusable[0];
+      const last  = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+      } else {
+        if (document.activeElement === last)  { e.preventDefault(); first.focus(); }
+      }
       return;
     }
     onKeyDown?.(e);
@@ -50,9 +69,12 @@ export function createModal({
   };
 
   function open() {
+    _triggerEl = document.activeElement;
     document.addEventListener('keydown', onKey);
     backdrop.addEventListener('click', onBackdropClick);
     document.body.appendChild(backdrop);
+    const focusable = getFocusable();
+    if (focusable.length) focusable[0].focus();
     return { backdrop, card };
   }
 
@@ -61,6 +83,7 @@ export function createModal({
     closed = true;
     document.removeEventListener('keydown', onKey);
     backdrop.remove();
+    _triggerEl?.focus();
   }
 
   return { backdrop, card, open, close };

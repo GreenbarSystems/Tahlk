@@ -34,6 +34,7 @@ mod audio;
 mod audio_crypto;
 mod auth;
 mod baa;
+mod config_audit;
 mod db;
 mod db_key;
 mod destruction_log;

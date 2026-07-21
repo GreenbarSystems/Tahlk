@@ -140,10 +140,10 @@ pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Resu
 pub(crate) fn mark_encounter_signed(
     state: State<DbState>,
     id: String,
-    signed_at: String,
     signed_hash: String,
 ) -> Result<(), AppError> {
     let mut conn = state.0.get()?;
+    let signed_at = crate::time::utc_now_iso();
     mark_signed(&mut conn, &id, &signed_at, &signed_hash)
 }
 

@@ -27,6 +27,7 @@ export function wireNoteSection(ctx) {
   let _saveTimer;
   let _chunkBuf = '';
   let _chunkRaf = 0;
+  let _generating = false;
 
   function _setIndicator(state) {
     const el = document.getElementById('note-save-indicator');
@@ -76,8 +77,18 @@ export function wireNoteSection(ctx) {
   // is set the same way either way, so the auto-chain reads as one continuous
   // "Transcribing… → Writing note…" flow).
   async function generateNow(_opts = {}) {
+    if (_generating) return false;
+    _generating = true;
+    const btn = document.getElementById('btn-generate');
+    if (btn) btn.disabled = true;
+    clearTimeout(_saveTimer);
+    _pendingNote = null;
     const transcript = ctx.currentTranscript();
-    if (!transcript.trim()) return false;
+    if (!transcript.trim()) {
+      _generating = false;
+      if (btn) btn.disabled = false;
+      return false;
+    }
     const templateId = document.getElementById('template-select')?.value || 'soap-generic';
     setStatus('Writing note…');
     const noteArea = document.getElementById('note-area');
@@ -166,6 +177,9 @@ export function wireNoteSection(ctx) {
         toast(userMessage(err, 'Note generation failed.'));
       }
       return false;
+    } finally {
+      _generating = false;
+      if (btn) btn.disabled = false;
     }
   }
 

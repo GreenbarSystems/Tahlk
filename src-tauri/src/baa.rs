@@ -62,7 +62,7 @@ pub(crate) const BAA_ACK_KEY: &str = "note_settings_v1::baa_ack";
 /// either once the managed-key proxy lands, or sooner if beta scope changes.
 /// This is a single choke-point flag, not a deletion: re-enabling is a
 /// one-line change plus restoring the onboarding step (see the ADR).
-pub(crate) const GATE_ENABLED: bool = false;
+pub(crate) const GATE_ENABLED: bool = true;
 
 /// Attestation schema version. Bumping this forces the user through the
 /// modal again on next launch. Keep the JS `BAA_ATTESTATION_VERSION`

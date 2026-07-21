@@ -9,7 +9,6 @@ import { computeNoteHash } from '../utils/contentHash.js';
 import { appendHistoryEntry, loadHistory, invalidateHistoryCache } from '../domain/historyChain.js';
 import { encountersRepo } from '../data/encountersRepo.js';
 import { keys } from '../data/keys.js';
-import { nowISO } from '../utils/format.js';
 
 // loadHistory is re-exported so existing consumers keep their import surface.
 export { loadHistory };
@@ -44,7 +43,7 @@ export async function saveDraftEdited(encounterId, noteContent, transcript) {
 export async function signNote(encounterId, noteContent, transcript, providerName) {
   const contentHash = await computeNoteHash({ transcript, noteContent, signedBy: providerName, encounterId });
 
-  await encountersRepo.markSigned(encounterId, nowISO(), contentHash);
+  await encountersRepo.markSigned(encounterId, contentHash);
   invalidateHistoryCache(encounterId);
 
   await logNoteSigned(encounterId, contentHash);

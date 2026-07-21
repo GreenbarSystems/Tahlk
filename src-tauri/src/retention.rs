@@ -104,7 +104,23 @@ pub(crate) fn retention_set_years(
         )));
     }
     let conn = state.0.get()?;
-    crate::kv_ops::upsert_json(&conn, KV_RETENTION_YEARS, &years.to_string())
+    let old: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![KV_RETENTION_YEARS],
+            |r| r.get(0),
+        )
+        .ok();
+    let actor = provider_id_from_kv(&conn);
+    crate::kv_ops::upsert_json(&conn, KV_RETENTION_YEARS, &years.to_string())?;
+    crate::config_audit::append(
+        &conn,
+        "retention_years_changed",
+        old.as_deref(),
+        &years.to_string(),
+        &actor,
+    )?;
+    Ok(())
 }
 
 /// Read the litigation-hold flag. When `true`, no records are eligible for
@@ -130,11 +146,24 @@ pub(crate) fn retention_hold_set(
     active: bool,
 ) -> Result<(), AppError> {
     let conn = state.0.get()?;
-    crate::kv_ops::upsert_json(
+    let old: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![KV_LITIGATION_HOLD],
+            |r| r.get(0),
+        )
+        .ok();
+    let actor = provider_id_from_kv(&conn);
+    let new_value = if active { "true" } else { "false" };
+    crate::kv_ops::upsert_json(&conn, KV_LITIGATION_HOLD, new_value)?;
+    crate::config_audit::append(
         &conn,
-        KV_LITIGATION_HOLD,
-        if active { "true" } else { "false" },
-    )
+        "litigation_hold_changed",
+        old.as_deref(),
+        new_value,
+        &actor,
+    )?;
+    Ok(())
 }
 
 /// List signed encounters whose `encounter_date` predates the retention cutoff.

@@ -19,8 +19,8 @@ export const encountersRepo = {
   get:   id           => invoke('get_encounter', { id }),
   stats: today        => invoke('encounter_stats', { today }),
   save:  encounter    => invoke('upsert_encounter', { encounter }),
-  markSigned: (id, signedAt, signedHash) =>
-    invoke('mark_encounter_signed', { id, signedAt, signedHash }),
+  markSigned: (id, signedHash) =>
+    invoke('mark_encounter_signed', { id, signedHash }),
   // Permanently destroys the encounter: removes the encounters row, note/
   // transcript KV content, and audio. Scrubs PHI from note_audit (tombstone
   // + encounter_id blinding), hard-deletes note_history, and appends to the
