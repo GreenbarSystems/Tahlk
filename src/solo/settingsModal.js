@@ -1,5 +1,6 @@
 // Settings modal — provider profile, API key, Whisper model management.
 
+import { invoke } from '../platform/tauri.js';
 import { kvGet, kvSet, kvEnsure } from '../core/storageBackend.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { baaRepo } from '../data/baa.js';
@@ -317,6 +318,20 @@ export async function renderSettings() {
           <button class="btn btn-secondary" id="s-check-drift">Check AI performance</button>
           <div id="s-check-drift-result" class="settings-desc"></div>
         </section>
+
+        <section class="settings-section">
+          <h3>Destruction log</h3>
+          <p class="settings-desc">
+            A permanent, append-only record of every PHI deletion — required by HIPAA §164.530(j).
+            Includes patient-record cascades, individual encounter deletes, and retention-based
+            purges. This log cannot be cleared or modified.
+          </p>
+          <div class="diag-actions">
+            <button class="btn btn-secondary btn-sm" id="s-destlog-load">View log</button>
+            <button class="btn btn-secondary btn-sm" id="s-destlog-export" hidden>Export CSV</button>
+          </div>
+          <div id="s-destlog-result" style="margin-top:8px"></div>
+        </section>
       </details>
     </div>
   `;
@@ -397,6 +412,35 @@ function wireAsyncActionButton({ id, resultId, busyLabel, idleLabel, failPrefix,
       btn.textContent = idleLabel;
     }
   });
+}
+
+function renderDestructionLogTable(rows) {
+  const header = `<tr>
+    <th>Date</th><th>Provider</th><th>Type</th><th>Patient</th><th>Basis</th><th>Records</th>
+  </tr>`;
+  const body = rows.map(r => `<tr>
+    <td>${escapeHtml(r.created_at.slice(0, 10))}</td>
+    <td>${escapeHtml(r.provider_id)}</td>
+    <td>${escapeHtml(r.entity_type)}</td>
+    <td>${escapeHtml(r.patient_alias || r.entity_id)}</td>
+    <td>${escapeHtml(r.legal_basis)}</td>
+    <td>${Number(r.records_scrubbed)}</td>
+  </tr>`).join('');
+  return `<div class="destlog-table-wrap"><table class="destlog-table">${header}${body}</table></div>`;
+}
+
+function destructionLogToCsv(rows) {
+  const header = 'date,provider_id,entity_type,entity_id,patient_alias,legal_basis,records_scrubbed';
+  const body = rows.map(r => [
+    r.created_at.slice(0, 10),
+    r.provider_id,
+    r.entity_type,
+    r.entity_id,
+    r.patient_alias || '',
+    r.legal_basis,
+    r.records_scrubbed,
+  ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  return `${header}\n${body}`;
 }
 
 const STRENGTH_LABELS = ['', 'Weak', 'Fair', 'Good', 'Strong'];
@@ -767,6 +811,44 @@ export function wireSettings() {
         toast('AI performance check flagged something — see Settings.', 6000);
       }
     },
+  });
+
+  // Destruction log — lazy-loaded on demand; never blocks settings render.
+  let _destructionLogRows = null;
+
+  document.getElementById('s-destlog-load')?.addEventListener('click', async () => {
+    const loadBtn   = document.getElementById('s-destlog-load');
+    const exportBtn = document.getElementById('s-destlog-export');
+    const resultEl  = document.getElementById('s-destlog-result');
+    if (loadBtn) { loadBtn.disabled = true; loadBtn.textContent = 'Loading…'; }
+    try {
+      _destructionLogRows = await invoke('destruction_log_list', { limit: 200 });
+      if (resultEl) {
+        if (_destructionLogRows.length === 0) {
+          resultEl.textContent = 'No destruction events recorded yet.';
+          if (exportBtn) exportBtn.hidden = true;
+        } else {
+          resultEl.innerHTML = renderDestructionLogTable(_destructionLogRows);
+          if (exportBtn) exportBtn.hidden = false;
+        }
+      }
+    } catch (err) {
+      toast(`Could not load destruction log: ${userMessage(err, 'unknown error')}`);
+    } finally {
+      if (loadBtn) { loadBtn.disabled = false; loadBtn.textContent = 'Refresh'; }
+    }
+  });
+
+  document.getElementById('s-destlog-export')?.addEventListener('click', () => {
+    if (!_destructionLogRows || _destructionLogRows.length === 0) return;
+    const csv  = destructionLogToCsv(_destructionLogRows);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `destruction-log-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   });
 }
 

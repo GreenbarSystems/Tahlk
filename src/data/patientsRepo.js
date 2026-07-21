@@ -35,5 +35,8 @@ export const patientsRepo = {
   // destruction_log), then removes the patient roster row. Returns
   // { encounters_destroyed: number }. Audio cleanup is the caller's responsibility
   // — audio files live outside the DB and must be removed separately.
-  destroyRecords: id    => invoke('destroy_patient_records', { patientId: id, providerId: currentProviderId() }),
+  destroyRecords:    id => invoke('destroy_patient_records', { patientId: id, providerId: currentProviderId() }),
+  // Returns the number of encounters that WOULD be destroyed by destroyRecords.
+  // Call this to show the provider a count before they confirm the irreversible action.
+  countEncounters:   id => invoke('count_patient_encounters', { patientId: id }),
 };

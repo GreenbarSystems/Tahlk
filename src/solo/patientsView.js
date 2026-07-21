@@ -5,6 +5,7 @@
 
 import { patientsRepo } from '../data/patientsRepo.js';
 import { genId, nowISO, displayDateShort, escapeHtml, toast } from '../utils/format.js';
+import { userMessage } from '../platform/appError.js';
 import { confirmModal } from './confirmModal.js';
 import { iconSearch } from './icons.js';
 import { openImportModal } from './patientsImport.js';
@@ -94,7 +95,9 @@ function renderPatientRow(p) {
         <button class="btn btn-ghost btn-sm patient-edit" data-patient-id="${id}"
                 aria-label="Edit ${alias}">Edit</button>
         <button class="btn btn-ghost btn-sm btn-danger patient-delete" data-patient-id="${id}"
-                aria-label="Delete ${alias}">Delete</button>
+                aria-label="Delete ${alias} from roster">Delete</button>
+        <button class="btn btn-ghost btn-sm btn-danger patient-destroy" data-patient-id="${id}"
+                aria-label="Destroy all records for ${alias}">Destroy records</button>
       </div>
     </li>
   `;
@@ -238,18 +241,101 @@ export function wirePatientsView(rerender) {
     btn.addEventListener('click', async () => {
       const ok = await confirmModal({
         title: 'Delete patient',
-        message: 'This permanently removes the patient from the roster. Continue?',
+        message: 'This removes the patient from the roster only — encounter records are kept. Continue?',
         confirmLabel: 'Delete',
         confirmClass: 'btn-danger',
       });
       if (!ok) return;
       try {
         await patientsRepo.delete(btn.dataset.patientId);
-        toast('Patient deleted.');
+        toast('Patient deleted from roster.');
         rerender();
       } catch {
         toast('Could not delete patient.');
       }
+    });
+  });
+
+  // "Destroy records" opens an inline pre-confirmation panel showing the
+  // encounter count, requiring an explicit checkbox before the irreversible
+  // PHI cascade is allowed to proceed.
+  document.querySelectorAll('.patient-destroy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const patientId = btn.dataset.patientId;
+      const row = btn.closest('.patient-row');
+      if (!row) return;
+
+      // Only one panel open per row at a time.
+      if (row.querySelector('.patient-destroy-panel')) return;
+
+      btn.disabled = true;
+      let count = 0;
+      try {
+        count = await patientsRepo.countEncounters(patientId);
+      } catch {
+        btn.disabled = false;
+        toast('Could not load encounter count.');
+        return;
+      }
+      btn.disabled = false;
+
+      const alias = row.querySelector('.patient-alias')?.textContent?.trim() || 'this patient';
+      const checkId  = `destroy-confirm-${patientId}`;
+      const submitId = `destroy-submit-${patientId}`;
+      const cancelId = `destroy-cancel-${patientId}`;
+      const countLabel = count === 0
+        ? 'any linked'
+        : `<strong>${count}</strong>`;
+
+      const panel = document.createElement('div');
+      panel.className = 'patient-destroy-panel';
+      panel.innerHTML = `
+        <p class="patient-destroy-panel__title">
+          Permanently destroy all records for <strong>${escapeHtml(alias)}</strong>
+        </p>
+        <p class="patient-destroy-panel__detail">
+          This will destroy ${countLabel} encounter record${count !== 1 ? 's' : ''}
+          — notes, transcripts, and audit logs — and remove the patient from the roster.
+          Every destruction is logged. <strong>This cannot be undone.</strong>
+        </p>
+        <label class="patient-destroy-panel__check">
+          <input type="checkbox" id="${checkId}" />
+          I understand this permanently destroys all records and cannot be undone.
+        </label>
+        <div class="patient-destroy-panel__actions">
+          <button class="btn btn-danger btn-sm" id="${submitId}" disabled>
+            Destroy all records
+          </button>
+          <button class="btn btn-ghost btn-sm" id="${cancelId}">Cancel</button>
+        </div>
+      `;
+      row.appendChild(panel);
+
+      document.getElementById(checkId)?.addEventListener('change', e => {
+        const submitBtn = document.getElementById(submitId);
+        if (submitBtn) submitBtn.disabled = !e.target.checked;
+      });
+
+      document.getElementById(cancelId)?.addEventListener('click', () => panel.remove());
+
+      document.getElementById(submitId)?.addEventListener('click', async () => {
+        const submitBtn = document.getElementById(submitId);
+        const cancelBtn = document.getElementById(cancelId);
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Destroying…'; }
+        if (cancelBtn) cancelBtn.disabled = true;
+        try {
+          const { encounters_destroyed } = await patientsRepo.destroyRecords(patientId);
+          toast(
+            `All records for ${alias} permanently destroyed` +
+            ` (${encounters_destroyed} encounter${encounters_destroyed !== 1 ? 's' : ''}).`
+          );
+          rerender();
+        } catch (err) {
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Destroy all records'; }
+          if (cancelBtn) cancelBtn.disabled = false;
+          toast(`Could not destroy records: ${userMessage(err, 'unknown error')}`);
+        }
+      });
     });
   });
 }

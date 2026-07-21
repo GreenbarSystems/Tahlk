@@ -244,6 +244,32 @@ pub(crate) fn destroy_patient_records(
     Ok(json!({ "encounters_destroyed": encounters_destroyed }))
 }
 
+/// Count encounters linked to a patient (by patient_id or matching alias for
+/// legacy rows). Used to preview the impact of `destroy_patient_records` so
+/// the provider knows how many records will be permanently destroyed before
+/// committing to the irreversible action.
+#[tauri::command]
+pub(crate) fn count_patient_encounters(
+    state: State<DbState>,
+    patient_id: String,
+) -> Result<i64, AppError> {
+    let conn = state.0.get()?;
+    let patient_alias: String = conn
+        .query_row(
+            "SELECT alias FROM patients WHERE id = ?1",
+            params![patient_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM encounters WHERE patient_id = ?1 OR patient_alias = ?2",
+        params![patient_id, patient_alias],
+        |r| r.get(0),
+    )?;
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     //! CRUD coverage driven against a raw in-memory SQLite fixture (no Tauri

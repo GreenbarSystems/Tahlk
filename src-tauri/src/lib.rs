@@ -202,6 +202,7 @@ pub fn run() {
             patients::upsert_patient,
             patients::delete_patient,
             patients::destroy_patient_records,
+            patients::count_patient_encounters,
             patient_audit::patient_audit_list,
             lock::lock_pin_set,
             lock::lock_pin_verify,
