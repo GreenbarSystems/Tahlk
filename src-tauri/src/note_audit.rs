@@ -241,7 +241,55 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              ON note_audit (encounter_id, seq);
          CREATE INDEX IF NOT EXISTS note_audit_live_idx
              ON note_audit (encounter_id, archived, seq);",
-    )
+    )?;
+
+    // `scrubbed` marks a row whose entry_json was replaced by a destruction
+    // tombstone. The chain columns (prev_hash, entry_hash) are deliberately
+    // preserved by that scrub, but the CONTENT they hash over is gone, so a
+    // verifier recomputing the hash from entry_json will never match. Without
+    // this flag a lawful scrub and a malicious rewrite produce the identical
+    // verdict — which is the opposite of tamper-evident.
+    let has_scrubbed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('note_audit') WHERE name = 'scrubbed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_scrubbed == 0 {
+        conn.execute_batch(
+            "ALTER TABLE note_audit ADD COLUMN scrubbed INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        // Backfill rows scrubbed before this column existed. The tombstone
+        // written by delete_encounter_in_tx is the only thing that puts
+        // `"destroyed":true` into entry_json. Matched textually rather than
+        // with json_extract so this does not depend on the JSON1 extension.
+        conn.execute_batch(
+            "UPDATE note_audit SET scrubbed = 1 \
+             WHERE scrubbed = 0 AND entry_json LIKE '%\"destroyed\":true%';",
+        )?;
+    }
+    Ok(())
+}
+
+/// Distinct encounter ids present in the audit table.
+///
+/// Needed because destruction BLINDS `encounter_id` to `sha256(id + now)`:
+/// the rows are retained as required, but `audit_list` needs an id to query
+/// by and nothing records the mapping. Without an enumerator those rows are
+/// preserved and simultaneously unreachable, which is not a retained audit
+/// trail in any sense an auditor would accept. Mirrors
+/// `note_history_list_encounter_ids`.
+#[tauri::command]
+pub(crate) fn note_audit_list_encounter_ids(
+    state: State<DbState>,
+) -> Result<Vec<String>, AppError> {
+    let conn = state.0.get()?;
+    let mut stmt = conn.prepare("SELECT DISTINCT encounter_id FROM note_audit ORDER BY encounter_id")?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 // One-shot migration of note_audit_v1::<id> / note_audit_archive_v1::<id>
@@ -371,13 +419,41 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
 
 fn entries_from(conn: &Connection, encounter_id: &str, archived: bool) -> Result<Vec<Value>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT entry_json FROM note_audit WHERE encounter_id = ?1 AND archived = ?2 ORDER BY seq",
+        "SELECT entry_json, prev_hash, entry_hash, scrubbed FROM note_audit \
+         WHERE encounter_id = ?1 AND archived = ?2 ORDER BY seq",
     )?;
-    let rows = stmt.query_map(params![encounter_id, archived as i64], |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map(params![encounter_id, archived as i64], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)? != 0,
+        ))
+    })?;
     let mut out = Vec::new();
     for row in rows {
-        let json_str = row?;
-        out.push(serde_json::from_str(&json_str).map_err(AppError::internal_from)?);
+        let (json_str, prev_hash, entry_hash, scrubbed) = row?;
+        let mut entry: Value = serde_json::from_str(&json_str).map_err(AppError::internal_from)?;
+        // A scrubbed row's entry_json is the destruction tombstone, which
+        // carries none of the chain fields — they survive only in the columns.
+        // Re-attach them from there so the chain remains walkable across a
+        // destruction, and flag the row so a verifier knows the CONTENT hash
+        // is unreproducible by design rather than by tampering.
+        //
+        // Only for scrubbed rows: an intact row's entry_json already contains
+        // exactly these values, and overwriting them from the columns would
+        // silently paper over any historical drift instead of surfacing it.
+        if scrubbed {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("prevHash".into(), match prev_hash {
+                    Some(h) => json!(h),
+                    None => Value::Null,
+                });
+                obj.insert("entryHash".into(), json!(entry_hash));
+                obj.insert("scrubbed".into(), json!(true));
+            }
+        }
+        out.push(entry);
     }
     Ok(out)
 }
@@ -532,6 +608,105 @@ mod tests {
     ) -> Result<i64, AppError> {
         let entry_json = json!({"action": "note_saved", "prevHash": prev_hash, "entryHash": entry_hash}).to_string();
         append_audit_row(conn, encounter_id, prev_hash, entry_hash, &entry_json, evicted_count)
+    }
+
+    // ── Scrubbed-row read shape (H-8) ───────────────────────────────────
+
+    fn scrub(conn: &Connection, encounter_id: &str) {
+        conn.execute(
+            "UPDATE note_audit SET entry_json = ?1, scrubbed = 1 WHERE encounter_id = ?2",
+            params![
+                r#"{"destroyed":true,"destroyed_at":"2026-07-21T00:00:00Z","legal_basis":"provider_request"}"#,
+                encounter_id
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_scrubbed_row_still_exposes_its_chain_fields() {
+        // The tombstone carries no prevHash/entryHash, so without re-attaching
+        // them from the columns a verifier sees "missing entryHash" and calls
+        // the whole chain broken.
+        let mut conn = fresh_db();
+        append(&mut conn, "enc-1", None, "hash-a", 0).unwrap();
+        append(&mut conn, "enc-1", Some("hash-a"), "hash-b", 0).unwrap();
+        scrub(&conn, "enc-1");
+
+        let rows = entries_from(&conn, "enc-1", false).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["entryHash"], "hash-a");
+        assert_eq!(rows[0]["prevHash"], Value::Null);
+        assert_eq!(rows[1]["entryHash"], "hash-b");
+        assert_eq!(rows[1]["prevHash"], "hash-a");
+        assert_eq!(rows[0]["scrubbed"], true, "the row must declare itself scrubbed");
+        assert_eq!(rows[0]["destroyed"], true, "and keep the tombstone content");
+    }
+
+    #[test]
+    fn an_intact_row_is_returned_untouched() {
+        // Chain fields are re-attached ONLY for scrubbed rows: overwriting an
+        // intact row's values from the columns would paper over drift rather
+        // than surface it.
+        let mut conn = fresh_db();
+        append(&mut conn, "enc-1", None, "hash-a", 0).unwrap();
+
+        let rows = entries_from(&conn, "enc-1", false).unwrap();
+        assert!(rows[0].get("scrubbed").is_none(), "no scrubbed flag on intact rows");
+        assert_eq!(rows[0]["action"], "note_saved");
+    }
+
+    #[test]
+    fn rows_scrubbed_before_the_flag_existed_are_backfilled() {
+        // An install that destroyed an encounter under the previous build has
+        // tombstones with scrubbed = 0; they must not stay unverifiable.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE note_audit (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 encounter_id  TEXT NOT NULL,
+                 seq           INTEGER NOT NULL,
+                 archived      INTEGER NOT NULL DEFAULT 0,
+                 prev_hash     TEXT,
+                 entry_hash    TEXT NOT NULL,
+                 entry_json    TEXT NOT NULL,
+                 UNIQUE (encounter_id, seq)
+             );
+             INSERT INTO note_audit (encounter_id, seq, prev_hash, entry_hash, entry_json)
+             VALUES ('enc-old', 1, NULL, 'hash-a',
+                     '{\"destroyed\":true,\"destroyed_at\":\"x\",\"legal_basis\":\"provider_request\"}');",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let rows = entries_from(&conn, "enc-old", false).unwrap();
+        assert_eq!(rows[0]["scrubbed"], true, "legacy tombstones must be recognised");
+        assert_eq!(rows[0]["entryHash"], "hash-a");
+    }
+
+    #[test]
+    fn blinded_rows_remain_reachable_by_id_enumeration() {
+        // Destruction replaces encounter_id with sha256(id + now) and records
+        // the mapping nowhere, so an enumerator is the only way back to them.
+        let mut conn = fresh_db();
+        append(&mut conn, "enc-1", None, "hash-a", 0).unwrap();
+        append(&mut conn, "enc-2", None, "hash-x", 0).unwrap();
+        conn.execute(
+            "UPDATE note_audit SET encounter_id = 'blinded-abc' WHERE encounter_id = 'enc-1'",
+            [],
+        )
+        .unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT encounter_id FROM note_audit ORDER BY encounter_id")
+            .unwrap();
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(ids, vec!["blinded-abc".to_string(), "enc-2".to_string()]);
     }
 
     #[test]

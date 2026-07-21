@@ -31,7 +31,7 @@
 import { kvGet, kvSetAwait } from './storageBackend.js';
 import { currentUser } from './capabilities.js';
 import { nowISO } from '../utils/format.js';
-import { hashAuditEntry } from '../utils/contentHash.js';
+import { hashAuditEntry, verifyAuditChain } from '../utils/contentHash.js';
 import { invoke, isTauri } from '../platform/tauri.js';
 import { keys } from '../data/keys.js';
 
@@ -198,4 +198,36 @@ export async function logAudioDeleted(encounterId, removed, reason, error) {
 export async function logNoteExported(encounterId, format, method) {
   if (isTauri) return invoke('audit_log_note_exported', { encounterId, format, method });
   return appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method });
+}
+
+// Verify every record-access audit chain in the database.
+//
+// verifyAuditChain existed with ZERO call sites: the hash was computed on
+// every write and never checked on any read, so tampering with note_audit was
+// undetectable in practice regardless of how sound the construction was.
+// note_history had an equivalent sweep wired to Settings; this is its
+// counterpart for the access trail.
+//
+// Enumerates ids through note_audit_list_encounter_ids rather than the
+// encounters table, because destruction BLINDS encounter_id — rows for
+// destroyed encounters are retained under a hashed id and would otherwise be
+// unreachable, which is precisely the trail an auditor asks about.
+//
+// Archive and live rows are concatenated (archive is older) so the chain is
+// walked from genesis; verifying the live tail alone would trip the
+// "first chained entry has non-null prevHash" check after an eviction.
+export async function verifyAllAuditChains() {
+  if (!isTauri) return { ok: true, checked: 0, broken: [], results: [] };
+
+  const encounterIds = await invoke('note_audit_list_encounter_ids');
+  const results = [];
+  for (const encounterId of encounterIds) {
+    const archive = await invoke('audit_archive_list', { encounterId });
+    const live = await invoke('audit_list', { encounterId });
+    const verdict = await verifyAuditChain([...archive, ...live]);
+    results.push({ encounterId, ...verdict });
+  }
+
+  const broken = results.filter(r => !r.ok);
+  return { ok: broken.length === 0, checked: results.length, broken, results };
 }

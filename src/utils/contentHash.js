@@ -117,32 +117,53 @@ export async function hashAuditEntry(entry, prevHash) {
 // requires walking archive+live together, e.g. verifyAuditChain([...archive, ...live]).
 export async function verifyAuditChain(log, options = {}) {
   const allowPartial = options.allowPartial ?? false;
-  if (!Array.isArray(log) || !log.length) return { ok: true, legacySkipped: 0 };
+  if (!Array.isArray(log) || !log.length) return { ok: true, legacySkipped: 0, scrubbedSkipped: 0 };
   let prevHash = null;
   let chainStarted = false;
   let legacySkipped = 0;
+  // Rows whose content was lawfully destroyed and so cannot be content-
+  // verified. Reported so a caller can distinguish "fully verified" from
+  // "linkage verified, some content unverifiable by design".
+  let scrubbedSkipped = 0;
   for (let i = 0; i < log.length; i++) {
     const e = log[i];
     if (!e.entryHash) {
       if (chainStarted) {
-        return { ok: false, brokenAt: i, reason: 'missing entryHash after chain start', legacySkipped };
+        return { ok: false, brokenAt: i, reason: 'missing entryHash after chain start', legacySkipped, scrubbedSkipped };
       }
       legacySkipped++;
       continue;
     }
-    const expected = await hashAuditEntry(e, e.prevHash ?? null);
-    if (expected !== e.entryHash) {
-      return { ok: false, brokenAt: i, reason: 'entryHash mismatch', legacySkipped };
+    // A scrubbed row's entry_json is the destruction tombstone: the content
+    // the hash covers was lawfully wiped, so it CANNOT be recomputed and a
+    // mismatch here carries no information. Its chain fields survive in the
+    // DB columns and are re-attached on read, so linkage is still checked
+    // below — the row is an explicit, expected content discontinuity rather
+    // than a verification failure.
+    //
+    // Note the honest limit: an attacker with direct database access could
+    // set this flag to exempt a rewritten row from content verification. That
+    // is not a new weakness — the same access already permits recomputing the
+    // whole chain, since entryHash is a plain SHA-256 over public fields with
+    // no signing key. This chain detects accidental corruption and casual
+    // tampering, not a deliberate rewrite by someone holding the DEK.
+    if (e.scrubbed) {
+      scrubbedSkipped++;
+    } else {
+      const expected = await hashAuditEntry(e, e.prevHash ?? null);
+      if (expected !== e.entryHash) {
+        return { ok: false, brokenAt: i, reason: 'entryHash mismatch', legacySkipped, scrubbedSkipped };
+      }
     }
     if (chainStarted) {
       if ((e.prevHash ?? null) !== prevHash) {
-        return { ok: false, brokenAt: i, reason: 'prevHash does not chain to prior entry', legacySkipped };
+        return { ok: false, brokenAt: i, reason: 'prevHash does not chain to prior entry', legacySkipped, scrubbedSkipped };
       }
     } else if ((e.prevHash ?? null) !== null && !allowPartial) {
-      return { ok: false, brokenAt: i, reason: 'first chained entry has non-null prevHash', legacySkipped };
+      return { ok: false, brokenAt: i, reason: 'first chained entry has non-null prevHash', legacySkipped, scrubbedSkipped };
     }
     chainStarted = true;
     prevHash = e.entryHash;
   }
-  return { ok: true, legacySkipped };
+  return { ok: true, legacySkipped, scrubbedSkipped };
 }

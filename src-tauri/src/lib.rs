@@ -247,6 +247,7 @@ pub fn run() {
             destruction_log::destruction_log_list,
             destruction_log::destruction_log_note_exported,
             config_audit::config_audit_list,
+            note_audit::note_audit_list_encounter_ids,
             retention::retention_get_years,
             retention::retention_set_years,
             retention::retention_hold_get,

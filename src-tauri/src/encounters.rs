@@ -320,9 +320,16 @@ pub(crate) fn delete_encounter_in_tx(
         )
         .unwrap_or(0);
 
-    // Replace note_audit.entry_json with a tombstone. The chain structure
-    // (seq, prev_hash, entry_hash) is intentionally preserved — the audit
-    // trail stays tamper-evident even after the PHI content is wiped.
+    // Replace note_audit.entry_json with a tombstone and FLAG the row as
+    // scrubbed. The chain columns (seq, prev_hash, entry_hash) are preserved
+    // so the chain stays walkable across a destruction, but the content those
+    // hashes cover is now gone — a verifier recomputing from entry_json can
+    // never match. Without the flag a lawful scrub and a malicious rewrite
+    // produce the identical "entryHash mismatch" verdict, which is the
+    // opposite of the tamper-evidence this scrub claims to preserve.
+    // `entry_hash` remains meaningful evidence: it still attests what the
+    // original content hashed to, so a copy recovered from backup can be
+    // checked against it.
     let now = crate::time::utc_now_iso();
     let tombstone = json!({
         "destroyed": true,
@@ -331,7 +338,7 @@ pub(crate) fn delete_encounter_in_tx(
     })
     .to_string();
     conn.execute(
-        "UPDATE note_audit SET entry_json = ?1 WHERE encounter_id = ?2",
+        "UPDATE note_audit SET entry_json = ?1, scrubbed = 1 WHERE encounter_id = ?2",
         params![tombstone, id],
     )?;
 
