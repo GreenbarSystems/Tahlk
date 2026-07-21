@@ -57,6 +57,7 @@ mod patients;
 mod perms;
 mod retention;
 mod secrets;
+mod throttle;
 mod whisper;
 
 /// Shared SQLite pool state. Every #[tauri::command] that touches the DB

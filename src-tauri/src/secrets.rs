@@ -132,10 +132,39 @@ pub(crate) fn is_secret_key(key: &str) -> bool {
     KEYCHAIN_ONLY_KEYS.contains(&key)
 }
 
+/// Legacy KV prefixes that the relational audit/history tables were migrated
+/// out of, blocked on the WRITE path only.
+///
+/// `note_audit::migrate_from_kv` and `note_history::migrate_from_kv` run on
+/// every launch and ingest whatever they find under these prefixes, accepting
+/// the caller's `prevHash`/`entryHash` verbatim, for any encounter that has no
+/// rows yet. Since the prefixes were never guarded, a compromised WebView
+/// could `kv_set` a forged array under `note_audit_v1::<any-id>` and have the
+/// next launch import it as genuine migrated history — manufacturing
+/// `record_viewed` / `note_signed` entries attributed to the provider. That
+/// goes around the whole point of the narrow server-side append commands,
+/// which derive actor and timestamp precisely so the trail cannot be forged
+/// from JS.
+///
+/// Safe to block: on the Tauri path both modules branch on `isTauri` and use
+/// the relational commands, so nothing live writes these keys. The
+/// localStorage dev/preview backend uses them but never goes through `kv_set`.
+/// Reads stay open, and the migrations' own cleanup DELETEs use `kv_ops`
+/// directly rather than the guarded command, so an in-progress migration is
+/// unaffected.
+const LEGACY_MIGRATION_PREFIXES: &[&str] = &[
+    "note_audit_v1::",
+    "note_audit_archive_v1::",
+    "note_history_v1::",
+];
+
 /// True when `key` must not be written through the generic `kv_set`/`kv_remove`
-/// commands (covers both keychain-only AND write-only-protected keys).
+/// commands (covers keychain-only, write-only-protected, and legacy-migration
+/// keys).
 pub(crate) fn is_write_protected(key: &str) -> bool {
-    is_secret_key(key) || WRITE_ONLY_PROTECTED_KEYS.contains(&key)
+    is_secret_key(key)
+        || WRITE_ONLY_PROTECTED_KEYS.contains(&key)
+        || LEGACY_MIGRATION_PREFIXES.iter().any(|p| key.starts_with(p))
 }
 
 /// Reject writes (set / remove) to any guarded key. Used in `kv_set` and
@@ -390,6 +419,38 @@ mod tests {
             ],
             "WRITE_ONLY_PROTECTED_KEYS changed — review carefully and update this pin."
         );
+    }
+
+    // A forged blob under a legacy migration prefix is imported as genuine
+    // history on the next launch, so the write path must be closed even
+    // though nothing live writes these keys any more.
+    #[test]
+    fn legacy_migration_prefixes_are_write_blocked_but_readable() {
+        for key in [
+            "note_audit_v1::enc-forged",
+            "note_audit_archive_v1::enc-forged",
+            "note_history_v1::enc-forged",
+        ] {
+            assert!(
+                guard_write_key(key).is_err(),
+                "{key} must not be writable — migrate_from_kv would ingest it as genuine"
+            );
+            assert!(guard_key(key).is_ok(), "{key} must stay readable");
+        }
+    }
+
+    #[test]
+    fn the_prefix_block_does_not_catch_unrelated_keys() {
+        // starts_with is blunt; make sure it only covers the intended
+        // namespaces and not, say, a future note_audit_settings key.
+        for key in [
+            "note_audit_summary_v1::x",
+            "note_history_settings_v1::x",
+            "note_content_v1::enc-1",
+            "note_settings_v1::onboarded",
+        ] {
+            assert!(guard_write_key(key).is_ok(), "{key} should remain writable");
+        }
     }
 
     // C-4: the retention window and litigation-hold flag gate PHI destruction.

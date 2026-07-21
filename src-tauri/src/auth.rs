@@ -465,6 +465,11 @@ fn wraps_db_path(app: &AppHandle) -> Result<std::path::PathBuf, AppError> {
 /// plaintext-key exposure the process did not already have.
 static SESSION_DEK_HEX: RwLock<Option<String>> = RwLock::new(None);
 
+/// Throttle scopes. Kept distinct so a lockout on the destructive path cannot
+/// lock a provider out of their own records, and vice versa.
+const THROTTLE_UNLOCK: &str = "auth_unlock";
+const THROTTLE_NUKE: &str = "auth_nuke";
+
 /// Record the unwrapped DEK for this session. Called from every path that
 /// legitimately obtains it: first-time setup, password unlock, recovery unlock,
 /// and password change.
@@ -834,7 +839,11 @@ pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<
 #[tauri::command]
 pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    let dek = unlock_with_password(&password, &path)?;
+    crate::throttle::check(THROTTLE_UNLOCK)?;
+    let dek = unlock_with_password(&password, &path).inspect_err(|_| {
+        crate::throttle::record_failure(THROTTLE_UNLOCK);
+    })?;
+    crate::throttle::record_success(THROTTLE_UNLOCK);
     let hex_key = to_hex(&dek);
     // Publish before the audio migration below, which calls audio_key().
     set_session_dek_hex(&hex_key);
@@ -883,7 +892,11 @@ pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(
 #[tauri::command]
 pub(crate) fn auth_unlock_recovery(app: AppHandle, code: String) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    let dek = unlock_with_recovery_code(&code, &path)?;
+    crate::throttle::check(THROTTLE_UNLOCK)?;
+    let dek = unlock_with_recovery_code(&code, &path).inspect_err(|_| {
+        crate::throttle::record_failure(THROTTLE_UNLOCK);
+    })?;
+    crate::throttle::record_success(THROTTLE_UNLOCK);
     set_session_dek_hex(&to_hex(&dek));
     Ok(())
 }
@@ -953,13 +966,22 @@ pub(crate) fn auth_nuke_and_reinstall(app: AppHandle, credential: String) -> Res
         // then recovery code. Both perform AES-GCM decryption against the
         // wraps DB — if both fail, reject.
         NukeAuthorization::VerifyCredential => {
+            // Throttled on its own scope: unlimited guesses against an
+            // irreversible destruction of every record on the device is the
+            // sharpest brute-force target in the app, and it must not share a
+            // counter with the ordinary unlock screen (locking one should not
+            // lock the other).
+            crate::throttle::check(THROTTLE_NUKE)?;
             let pass_ok = unlock_with_password(&credential, &wraps).is_ok();
             let code_ok = !pass_ok && unlock_with_recovery_code(&credential, &wraps).is_ok();
             if !pass_ok && !code_ok {
-                return Err(AppError::invalid(
-                    "invalid credential — provide your current password or a valid recovery code to confirm",
+                crate::throttle::record_failure(THROTTLE_NUKE);
+                return Err(AppError::precondition(
+                    "That is not your current password or a valid recovery code. \
+                     Confirm with one of them to erase this device.",
                 ));
             }
+            crate::throttle::record_success(THROTTLE_NUKE);
         }
         NukeAuthorization::Refuse => {
             return Err(AppError::invalid(

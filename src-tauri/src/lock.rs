@@ -40,10 +40,16 @@ const PBKDF2_ITERATIONS: u32 = 210_000;
 const SALT_LEN: usize = 16;
 const HASH_LEN: usize = 32;
 
-/// A PIN shorter than this is trivially guessable in a handful of tries by
-/// someone with physical access; longer than this is almost certainly a
-/// paste-in-the-wrong-field mistake, not a real PIN.
-const PIN_MIN_LEN: usize = 4;
+/// A PIN shorter than this is trivially guessable by someone with physical
+/// access; longer than the max is almost certainly a paste-in-the-wrong-field
+/// mistake, not a real PIN.
+///
+/// Raised from 4 to 6: a 4-digit numeric PIN is a 10^4 keyspace, small enough
+/// that even the new lockout only stretches an exhaustive search rather than
+/// preventing it. Six digits is 100x the work for one extra keypress. Applies
+/// to newly-set PINs only — `validate_pin` runs on set, not on verify, so an
+/// existing shorter PIN keeps working until the provider changes it.
+const PIN_MIN_LEN: usize = 6;
 const PIN_MAX_LEN: usize = 64;
 
 fn keyring_entry() -> Result<keyring::Entry, AppError> {
@@ -126,9 +132,21 @@ pub(crate) fn lock_pin_set(pin: String) -> Result<(), AppError> {
     set_pin(&pin)
 }
 
+/// Throttle scope for the idle-lock PIN. The sharpest case for rate limiting
+/// in the app: a 4-character numeric PIN is a 10^4 keyspace, which unlimited
+/// guessing exhausts in minutes.
+const THROTTLE_SCOPE: &str = "lock_pin";
+
 #[tauri::command]
 pub(crate) fn lock_pin_verify(pin: String) -> Result<bool, AppError> {
-    verify_pin(&pin)
+    crate::throttle::check(THROTTLE_SCOPE)?;
+    let ok = verify_pin(&pin)?;
+    if ok {
+        crate::throttle::record_success(THROTTLE_SCOPE);
+    } else {
+        crate::throttle::record_failure(THROTTLE_SCOPE);
+    }
+    Ok(ok)
 }
 
 #[tauri::command]
@@ -150,10 +168,20 @@ mod tests {
 
     #[test]
     fn validate_pin_enforces_length_bounds() {
-        assert!(validate_pin("123").is_err()); // 3 chars, below MIN
-        assert!(validate_pin("1234").is_ok()); // exactly MIN
-        assert!(validate_pin(&"1".repeat(PIN_MAX_LEN)).is_ok()); // exactly MAX
-        assert!(validate_pin(&"1".repeat(PIN_MAX_LEN + 1)).is_err()); // over MAX
+        // Derived from the constant rather than hardcoded, so a future change
+        // to PIN_MIN_LEN does not silently leave this test asserting the old
+        // boundary — which is exactly what happened when it moved 4 -> 6.
+        assert!(validate_pin(&"1".repeat(PIN_MIN_LEN - 1)).is_err(), "below MIN");
+        assert!(validate_pin(&"1".repeat(PIN_MIN_LEN)).is_ok(), "exactly MIN");
+        assert!(validate_pin(&"1".repeat(PIN_MAX_LEN)).is_ok(), "exactly MAX");
+        assert!(validate_pin(&"1".repeat(PIN_MAX_LEN + 1)).is_err(), "over MAX");
+    }
+
+    #[test]
+    fn a_four_digit_pin_is_no_longer_accepted() {
+        // 10^4 is small enough that even the new lockout only stretches an
+        // exhaustive search rather than preventing it.
+        assert!(validate_pin("1234").is_err());
     }
 
     // hash_pin + pbkdf2::verify round-trip, independent of the OS keychain
