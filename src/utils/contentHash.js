@@ -88,10 +88,28 @@ export async function verifyHistoryChain(history) {
 // entryHash/prevHash themselves are excluded from the hashed payload (an
 // entry can't hash over its own output field), matching hashHistoryEntry's
 // convention of computing the hash before entryHash is attached.
+// Canonical JSON: object keys sorted at EVERY level, matching how Rust's
+// serde_json serializes a BTreeMap so the two sides agree byte for byte.
+//
+// Replaces `JSON.stringify(payload, Object.keys(payload).sort())`. That
+// array-replacer form applies its key list recursively to every nested object,
+// not just the top level — so any `details` value that was itself an object
+// had ITS keys stripped from the hashed payload, and two entries differing
+// only in a nested field hashed identically. Latent rather than live today,
+// since every call site passes scalars, but Rust's `extra_fields` is
+// `Vec<(String, Value)>` and accepts `Value::Object`, so the first structured
+// detail field would silently open the hole on both sides.
+function canonicalJson(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  const keys = Object.keys(v).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`;
+}
+
 export async function hashAuditEntry(entry, prevHash) {
   const { entryHash, prevHash: _ignoredPrevHash, ...rest } = entry || {};
   const payload = { ...rest, prevHash: prevHash || null };
-  return sha256Hex(JSON.stringify(payload, Object.keys(payload).sort()));
+  return sha256Hex(canonicalJson(payload));
 }
 
 // Same legacy-skip semantics as verifyHistoryChain: pre-hash-chaining

@@ -57,7 +57,14 @@ const STATUS_LABELS = {
   signed:          'Signed',
   exported:        'Exported',
 };
-export const statusLabel = status => STATUS_LABELS[status] || status;
+// Returns a fixed literal for every input. The `|| status` fall-through this
+// replaces echoed unrecognised input straight back — while the interpolation
+// build guard allowlists statusLabel as a sanitizer on the stated grounds that
+// it "returns a fixed literal per known status", and three sinks render its
+// result unescaped on that basis. Rust's status allowlist means an unknown
+// value should be unreachable, so this is defence in depth rather than a live
+// hole, but a sanitizer that is only conditionally a sanitizer is not one.
+export const statusLabel = status => STATUS_LABELS[status] || 'Unknown';
 
 let _toastTimer;
 let _toastHovered = false;
