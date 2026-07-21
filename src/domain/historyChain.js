@@ -1,9 +1,12 @@
 // Tamper-evident note history chain (domain logic, transport-agnostic).
 //
-// The chain is persisted in a proper SQLite table (`note_history`) via two
-// Tauri commands: `note_history_list` and `note_history_append`. The old
-// `note_history_v1::<id>` KV blob is migrated on first launch (Rust side,
-// idempotent) and no longer used.
+// The chain is persisted in a proper SQLite table (`note_history`) via Tauri
+// commands. `note_history_list` reads history. Appends use narrow server-side
+// commands (`history_note_generated`, `history_note_edited`) — the old open
+// `note_history_append` command has been removed from the invoke handler.
+// The `signed` entry is written inside `encounters::mark_signed` (Rust) so
+// the attestation record and the encounter status flip are atomic; JS callers
+// must NOT call appendHistoryEntry for the `signed` action on Tauri.
 //
 // This module owns three responsibilities that must stay collocated:
 //   1. Chain math — deriving prevHash and computing entryHash from the
@@ -44,45 +47,62 @@ export async function loadHistory(encounterId) {
   return _cache.get(encounterId).slice();
 }
 
-// Append one entry to an encounter's chain. The prevHash + entryHash are
-// derived here and passed to Rust as opaque data; Rust re-checks that our
-// prevHash matches the current tail inside its INSERT transaction, so two
-// panels racing an append can't produce a diverged chain.
+// Append one entry to an encounter's chain.
+//
+// On Tauri, dispatches to a narrow server-side command that derives actor
+// identity from the KV-stored provider profile and computes the chain hashes
+// server-side. The server returns the full persisted entry (including the
+// server-computed entryHash) so the local cache stays accurate.
+//
+// Only `generated` and `edited` are valid action values here. The `signed`
+// action is written atomically inside `encounters::mark_signed` on the Rust
+// side; JS callers must NOT pass action='signed' to this function on Tauri —
+// call `invalidateHistoryCache` after `markSigned` instead so the next
+// `loadHistory` reads the DB-written signed row.
 //
 // Fails closed: if the durable insert throws, the cache is NOT updated, so a
 // retry sees the true tail and derives the correct prevHash on the next try.
 export async function appendHistoryEntry(encounterId, { action, actor, contentHash, notes = '' }) {
-  // Prime the cache so we can derive prevHash without a round-trip when we
-  // already have it locally.
   if (!_cache.has(encounterId)) await loadHistory(encounterId);
-
   const tail = _cache.get(encounterId);
-  const prevHash = tail.length ? (tail[tail.length - 1].entryHash ?? null) : null;
-
-  const entry = { action, actor, timestamp: nowISO(), contentHash, notes, prevHash };
-  entry.entryHash = await hashHistoryEntry(entry, prevHash);
 
   if (isTauri) {
-    // Rust command re-verifies prevHash == current tail's entry_hash inside a
-    // transaction and rejects on mismatch, so the chain stays consistent even
-    // if two windows race.
-    await invoke('note_history_append', { encounterId, entry });
-  } else {
-    // Non-Tauri fallback: rewrite the whole KV blob (legacy semantics).
-    const persisted = tail.concat(entry);
-    await kvSetAwait(keys.noteHistory(encounterId), persisted);
+    let serverEntry;
+    if (action === 'generated') {
+      serverEntry = await invoke('history_note_generated', { encounterId, contentHash });
+    } else if (action === 'edited') {
+      serverEntry = await invoke('history_note_edited', { encounterId, contentHash });
+    } else {
+      throw new Error(`appendHistoryEntry: action '${action}' must go through a narrow server-side command`);
+    }
+    tail.push(serverEntry);
+    return serverEntry;
   }
 
-  // Only mutate the cache after a successful durable write.
+  // Non-Tauri fallback: compute hashes client-side and persist to KV.
+  const prevHash = tail.length ? (tail[tail.length - 1].entryHash ?? null) : null;
+  const entry = { action, actor, timestamp: nowISO(), contentHash, notes, prevHash };
+  entry.entryHash = await hashHistoryEntry(entry, prevHash);
+  const persisted = tail.concat(entry);
+  await kvSetAwait(keys.noteHistory(encounterId), persisted);
   tail.push(entry);
   return entry;
+}
+
+// Drop the cached history for an encounter so the next loadHistory() reads
+// from the DB. Call this after any server-side write that bypasses
+// appendHistoryEntry (currently: `mark_encounter_signed`, which atomically
+// appends the `signed` history row and flips the encounter status in one Rust
+// transaction).
+export function invalidateHistoryCache(encounterId) {
+  _cache.delete(encounterId);
 }
 
 // Read-only integrity sweep across every encounter that has note_history
 // rows — not just the one chain a panel happens to have loaded.
 //
-// Why this exists: `appendHistoryEntry` and the Rust `note_history_append`
-// transaction both validate the chain AT WRITE TIME (a diverged prevHash on
+// Why this exists: `appendHistoryEntry` and the narrow Rust commands it
+// dispatches to both validate the chain AT WRITE TIME (a diverged prevHash on
 // the next append surfaces immediately). But an encounter that never gets
 // a new entry — the common case, since most encounters are signed once and
 // never touched again — has no future write to trigger that check. If a

@@ -156,6 +156,12 @@ pub(crate) fn mark_signed(
     signed_hash: &str,
 ) -> Result<(), AppError> {
     let tx = conn.transaction()?;
+    // Append the `signed` history entry atomically with the encounter status
+    // flip so the attestation record and the status change can never diverge.
+    // Actor is derived server-side (KV provider profile) — cannot be forged
+    // by a compromised WebView. This closes the note_history_append forgery
+    // vector for the highest-risk action (provider attestation).
+    crate::note_history::server_sign_history(&tx, id, signed_hash)?;
     let n = tx.execute(
         "UPDATE encounters SET status = 'signed', signed_at = ?2, signed_hash = ?3 \
          WHERE id = ?1 AND status != 'signed'",

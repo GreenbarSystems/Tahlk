@@ -5,10 +5,19 @@
 //! transaction so two concurrent appends on the same encounter cannot collide
 //! on ordering (the old blob path had an O(n) read-modify-write per append).
 //!
-//! The entry_hash is treated as opaque data: the Rust side never re-computes
-//! or validates it. Chaining and verification stay in the JS domain layer
-//! (contentHash.js / historyChain.js), so this module is a dumb append-only
-//! log — any future actor field or notes change requires ZERO Rust change.
+//! For `generated` and `edited` entries the narrow server-side commands
+//! (`history_note_generated`, `history_note_edited`) derive actor, timestamp,
+//! and entryHash in Rust using the same sort-then-SHA-256 algorithm as
+//! `hashHistoryEntry` in contentHash.js. The `signed` entry is written inside
+//! `encounters::mark_signed` so the attestation record and the encounter
+//! status flip are atomic. `verifyHistoryChain` (JS) is unaffected because it
+//! re-derives each stored hash from the stored fields — the source of those
+//! fields moved server-side; the hash algorithm is unchanged.
+//!
+//! `content_hash` (the hash of the note text + transcript at sign time) is
+//! still supplied by JS because the note content lives in the KV store and
+//! is never sent to the Rust layer. All other fields — actor, timestamp,
+//! prevHash, entryHash — are derived server-side and cannot be forged.
 //!
 //! Migration from the legacy KV blob happens once in `db::open_database` and
 //! is idempotent (see `migrate_from_kv`).
@@ -232,7 +241,176 @@ pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> 
     Ok(rows)
 }
 
+// SHA-256 of `data` as a 64-char lowercase hex string.
+// Matches JS's sha256Hex in contentHash.js — same algorithm, same encoding —
+// so hashes computed here are identical to those verified by verifyHistoryChain.
+fn sha256_hex(data: &[u8]) -> String {
+    use ring::digest::{digest, SHA256};
+    let hash = digest(&SHA256, data);
+    hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// Read provider name from the KV-stored provider profile.
+// Used by the narrow commands below to derive `actor` server-side.
+fn provider_name_from_kv(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = 'note_provider_v1::profile'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
+    .unwrap_or_else(|| "provider".to_string())
+}
+
+/// Raw INSERT of one note_history row inside the caller's transaction.
+/// Does NOT open its own transaction — must be called from within an
+/// already-open transaction or a plain Connection (auto-commit).
+/// Factored out of `append_history_row` so `server_history_append` can reuse
+/// it inside a caller-supplied transaction without nesting BEGIN/COMMIT.
+fn insert_history_row(
+    conn: &Connection,
+    encounter_id: &str,
+    action: &str,
+    actor: &str,
+    timestamp: &str,
+    content_hash: &str,
+    notes: &str,
+    prev_hash: Option<&str>,
+    entry_hash: &str,
+) -> Result<i64, AppError> {
+    let next_seq: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM note_history WHERE encounter_id = ?1",
+        params![encounter_id],
+        |r| r.get(0),
+    )?;
+    let last_hash: Option<String> = conn
+        .query_row(
+            "SELECT entry_hash FROM note_history \
+             WHERE encounter_id = ?1 AND seq = ?2",
+            params![encounter_id, next_seq - 1],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if last_hash.as_deref() != prev_hash {
+        return Err(AppError::invalid(format!(
+            "prev_hash chain mismatch (expected {:?}, got {:?})",
+            last_hash, prev_hash
+        )));
+    }
+    conn.execute(
+        "INSERT INTO note_history \
+         (encounter_id, seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![encounter_id, next_seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash],
+    )?;
+    Ok(next_seq)
+}
+
+/// Derive actor + timestamp + entryHash server-side and persist one row.
+/// Runs inside whatever transaction the caller provides (`conn` may be a
+/// `Transaction<'_>` coerced to `&Connection` via Deref). Returns the full
+/// entry JSON (including entryHash) for the JS history cache.
+///
+/// Hash payload matches `hashHistoryEntry` in contentHash.js exactly:
+/// `BTreeMap` serializes keys alphabetically, matching
+/// `JSON.stringify(payload, Object.keys(payload).sort())`. Fields and their
+/// sorted order: action < actor < contentHash < notes < prevHash < timestamp.
+fn server_history_append(
+    conn: &Connection,
+    encounter_id: &str,
+    action: &str,
+    actor: &str,
+    content_hash: &str,
+    notes: &str,
+) -> Result<Value, AppError> {
+    let prev_hash: Option<String> = conn
+        .query_row(
+            "SELECT entry_hash FROM note_history \
+             WHERE encounter_id = ?1 ORDER BY seq DESC LIMIT 1",
+            params![encounter_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let timestamp = crate::time::utc_now_iso();
+
+    let mut payload: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    payload.insert("action".to_string(),      json!(action));
+    payload.insert("actor".to_string(),       json!(actor));
+    payload.insert("contentHash".to_string(), json!(content_hash));
+    payload.insert("notes".to_string(),       json!(notes));
+    payload.insert("prevHash".to_string(), match &prev_hash {
+        Some(h) => json!(h),
+        None    => Value::Null,
+    });
+    payload.insert("timestamp".to_string(), json!(timestamp));
+
+    let hash_json = serde_json::to_string(&payload).map_err(AppError::internal_from)?;
+    let entry_hash = sha256_hex(hash_json.as_bytes());
+
+    insert_history_row(
+        conn, encounter_id, action, actor, &timestamp,
+        content_hash, notes, prev_hash.as_deref(), &entry_hash,
+    )?;
+
+    payload.insert("entryHash".to_string(), json!(entry_hash));
+    Ok(serde_json::to_value(&payload).map_err(AppError::internal_from)?)
+}
+
+/// Append a `signed` history entry inside an already-open transaction.
+/// Called from `encounters::mark_signed` so the history write and the
+/// encounter status flip are atomic — a failure in either rolls back both.
+/// Actor is derived from the KV provider profile; cannot be forged by a
+/// compromised WebView.
+pub(crate) fn server_sign_history(
+    conn: &Connection,
+    encounter_id: &str,
+    content_hash: &str,
+) -> Result<(), AppError> {
+    let actor = provider_name_from_kv(conn);
+    let notes = format!("Attested by {}", actor);
+    server_history_append(conn, encounter_id, "signed", &actor, content_hash, &notes)?;
+    Ok(())
+}
+
+/// Append a `generated` history entry with actor hardcoded to `"AI (Tahlk)"`.
+/// Returns the full entry JSON so JS can update its in-memory history cache
+/// with the correct server-computed entryHash.
 #[tauri::command]
+pub(crate) fn history_note_generated(
+    state: State<'_, DbState>,
+    encounter_id: String,
+    content_hash: String,
+) -> Result<Value, AppError> {
+    let mut conn = state.0.get()?;
+    let tx = conn.transaction()?;
+    let entry = server_history_append(&tx, &encounter_id, "generated", "AI (Tahlk)", &content_hash, "")?;
+    tx.commit()?;
+    Ok(entry)
+}
+
+/// Append an `edited` history entry with actor derived from the KV provider
+/// profile. Returns the full entry JSON so JS can update its history cache.
+#[tauri::command]
+pub(crate) fn history_note_edited(
+    state: State<'_, DbState>,
+    encounter_id: String,
+    content_hash: String,
+) -> Result<Value, AppError> {
+    let mut conn = state.0.get()?;
+    let tx = conn.transaction()?;
+    let actor = provider_name_from_kv(&tx);
+    let entry = server_history_append(&tx, &encounter_id, "edited", &actor, &content_hash, "")?;
+    tx.commit()?;
+    Ok(entry)
+}
+
+// Removed from the invoke handler — callers must use the narrow commands above
+// (history_note_generated, history_note_edited) or the mark_encounter_signed
+// path (for the signed entry) so actor identity is always derived server-side.
+#[allow(dead_code)]
 pub(crate) fn note_history_append(
     state: State<DbState>,
     encounter_id: String,
@@ -317,41 +495,29 @@ fn append_history_row(
     prev_hash: Option<&str>,
     entry_hash: &str,
 ) -> Result<i64, AppError> {
+    // Open a transaction for the race-safe seq/prev_hash check + INSERT.
+    // insert_history_row handles the actual check and write; the transaction
+    // wrapper here is what makes the check+insert atomic.
+    //
+    // Race-safety note: the prev_hash check does NOT by itself close the
+    // "two panels racing an append" hole. Both concurrent transactions can
+    // read the same last_hash before either has written (SQLite's default
+    // DEFERRED transaction takes no lock until the first write), so both
+    // can pass the check identically and then both attempt to INSERT the
+    // same (encounter_id, seq). The actual guarantee against a silent seq
+    // collision is the `UNIQUE (encounter_id, seq)` table constraint: the
+    // loser's INSERT fails with a constraint violation, surfaced as
+    // `AppError::Storage`. The prev_hash check instead catches a different,
+    // non-concurrent case: a caller whose local chain has genuinely diverged
+    // from what's committed (stale/cached view), correctly mapped to
+    // `AppError::InvalidInput`.
     let tx = conn.transaction()?;
-    let next_seq: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(seq), 0) + 1 FROM note_history WHERE encounter_id = ?1",
-        params![encounter_id],
-        |r| r.get(0),
-    )?;
-
-    // If the caller sent a prev_hash, it must match the last row's entry_hash
-    // for this encounter. This catches a diverged local chain (see the
-    // race-safety note on this function); the UNIQUE(encounter_id, seq)
-    // constraint below is what actually closes the concurrent-append race.
-    let last_hash: Option<String> = tx
-        .query_row(
-            "SELECT entry_hash FROM note_history \
-             WHERE encounter_id = ?1 AND seq = ?2",
-            params![encounter_id, next_seq - 1],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if last_hash.as_deref() != prev_hash {
-        return Err(AppError::invalid(format!(
-            "prev_hash chain mismatch (expected {:?}, got {:?})",
-            last_hash, prev_hash
-        )));
-    }
-
-    tx.execute(
-        "INSERT INTO note_history \
-         (encounter_id, seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-        params![encounter_id, next_seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash],
+    let seq = insert_history_row(
+        &tx, encounter_id, action, actor, timestamp,
+        content_hash, notes, prev_hash, entry_hash,
     )?;
     tx.commit()?;
-
-    Ok(next_seq)
+    Ok(seq)
 }
 
 #[cfg(test)]

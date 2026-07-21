@@ -6,7 +6,7 @@ import { kvGet, kvSetAwait } from '../core/storageBackend.js';
 import { logNoteEdited, logNoteSigned, logAudioDeleted } from '../core/auditLog.js';
 import { emit } from '../core/eventBus.js';
 import { computeNoteHash } from '../utils/contentHash.js';
-import { appendHistoryEntry, loadHistory } from '../domain/historyChain.js';
+import { appendHistoryEntry, loadHistory, invalidateHistoryCache } from '../domain/historyChain.js';
 import { encountersRepo } from '../data/encountersRepo.js';
 import { keys } from '../data/keys.js';
 import { nowISO } from '../utils/format.js';
@@ -36,21 +36,16 @@ export async function saveDraftEdited(encounterId, noteContent, transcript) {
   emit('scribe:draft_saved', { encounterId });
 }
 
-// Sign the note — chains a durable 'signed' entry, THEN flips the encounter via
-// a targeted update (markSigned can't clobber alias/audio the way a full upsert
-// would). The chain is persisted first so a failure never marks an unsigned
-// encounter as signed.
+// Sign the note — flips the encounter to signed via markSigned, which on the
+// Tauri path atomically appends the `signed` history row inside the same Rust
+// transaction. The JS side never calls appendHistoryEntry for the signed
+// action; it invalidates the history cache so the next loadHistory() reads
+// the DB-written row.
 export async function signNote(encounterId, noteContent, transcript, providerName) {
   const contentHash = await computeNoteHash({ transcript, noteContent, signedBy: providerName, encounterId });
 
-  await appendHistoryEntry(encounterId, {
-    action: 'signed',
-    actor: providerName || 'provider',
-    contentHash,
-    notes: `Attested by ${providerName || 'provider'}`,
-  });
-
   await encountersRepo.markSigned(encounterId, nowISO(), contentHash);
+  invalidateHistoryCache(encounterId);
 
   await logNoteSigned(encounterId, contentHash);
   emit('scribe:note_signed', { encounterId, hash: contentHash });
