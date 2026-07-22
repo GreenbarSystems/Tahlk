@@ -183,7 +183,11 @@ pub(crate) fn llm_audit_list(
     encounter_id: Option<String>,
     limit: Option<u32>,
 ) -> Result<Vec<Value>, AppError> {
-    let limit = limit.unwrap_or(100).min(500) as i64;
+    let limit = crate::db::clamp_list_limit_to(
+        limit.map(i64::from),
+        100,
+        crate::db::AUDIT_LIST_LIMIT_MAX,
+    );
     let conn = state.0.get()?;
     list_recent(&conn, encounter_id.as_deref(), limit)
 }
@@ -324,12 +328,24 @@ mod tests {
     }
 
     #[test]
-    fn list_command_clamp_caps_at_500() {
-        // The clamp lives in the command, not `list_recent`; assert the arith
-        // directly so the security-motivated 500 ceiling can't silently drift.
-        let clamp = |req: Option<u32>| req.unwrap_or(100).min(500) as i64;
+    fn list_command_clamp_caps_at_the_shared_audit_ceiling() {
+        // Calls the real helper. The previous version re-implemented the
+        // arithmetic inline, so it would have passed even if the production
+        // line drifted away from it — a test of its own copy, not of the code.
+        let clamp = |req: Option<u32>| {
+            crate::db::clamp_list_limit_to(
+                req.map(i64::from),
+                100,
+                crate::db::AUDIT_LIST_LIMIT_MAX,
+            )
+        };
         assert_eq!(clamp(None), 100, "default page size");
         assert_eq!(clamp(Some(50)), 50, "under-cap requests pass through");
-        assert_eq!(clamp(Some(10_000)), 500, "over-cap requests are clamped");
+        assert_eq!(
+            clamp(Some(10_000)),
+            crate::db::AUDIT_LIST_LIMIT_MAX,
+            "over-cap requests are clamped to the shared ceiling"
+        );
+        assert_eq!(clamp(Some(0)), 1, "the floor turns 0 into one row, not an empty result");
     }
 }

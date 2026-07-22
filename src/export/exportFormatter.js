@@ -20,7 +20,12 @@ export function toSimplePractice(note, encounter) {
   const date = displayDateShort(encounter.encounter_date || encounter.created_at);
   return [
     `Session Date: ${date}`,
-    encounter.patient_alias ? `Client: ${encounter.patient_alias}` : '',
+    // null, not '', so the filter below actually drops the line. It emitted
+    // '' — which the `!== null` filter never matched — so an encounter with
+    // no alias produced a stray blank line where "Client:" would have been.
+    // The two bare '' entries are deliberate spacing and must survive, which
+    // is why the filter tests for null rather than falsiness.
+    encounter.patient_alias ? `Client: ${encounter.patient_alias}` : null,
     '',
     note,
     '',

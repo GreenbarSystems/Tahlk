@@ -88,7 +88,7 @@ pub(crate) fn destruction_log_list(
     limit: Option<i64>,
 ) -> Result<Vec<Value>, AppError> {
     let conn = state.0.get()?;
-    let n = limit.unwrap_or(50).clamp(1, 500);
+    let n = crate::db::clamp_list_limit_to(limit, 50, crate::db::AUDIT_LIST_LIMIT_MAX);
     let mut stmt = conn.prepare(
         "SELECT id, created_at, provider_id, entity_type, entity_id, \
                 patient_alias, legal_basis, records_scrubbed \

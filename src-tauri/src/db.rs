@@ -88,6 +88,18 @@ pub(crate) fn patient_row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> 
 /// them, so either could drift silently.
 pub(crate) const LIST_LIMIT_MAX: i64 = 1000;
 
+/// Ceiling for the append-only audit tables (`destruction_log`, `llm_audit`).
+///
+/// Lower than `LIST_LIMIT_MAX` because these are compliance views rendered as
+/// tables, not paged record lists. Named here rather than left as a literal
+/// `500` in each module: `destruction_log` used `.clamp(1, 500)` while
+/// `llm_audit` used `.min(500)` — no floor at all, harmless only because its
+/// parameter is unsigned — and llm_audit's test re-implemented the arithmetic
+/// instead of calling the function, so it would have passed even if the
+/// production line drifted. Exactly the divergence `clamp_list_limit`'s own
+/// doc comment warns about two constants away.
+pub(crate) const AUDIT_LIST_LIMIT_MAX: i64 = 500;
+
 /// Clamp a caller-supplied `LIMIT` into `[1, LIST_LIMIT_MAX]`, applying
 /// `default` when the caller passed none.
 ///
@@ -96,7 +108,13 @@ pub(crate) const LIST_LIMIT_MAX: i64 = 1000;
 /// and fix. `default` is the caller's own policy and stays per-module; the
 /// ceiling is the security control and does not.
 pub(crate) fn clamp_list_limit(limit: Option<i64>, default: i64) -> i64 {
-    limit.unwrap_or(default).clamp(1, LIST_LIMIT_MAX)
+    clamp_list_limit_to(limit, default, LIST_LIMIT_MAX)
+}
+
+/// As `clamp_list_limit`, with an explicit ceiling for callers whose view has
+/// a tighter bound than the record lists (see `AUDIT_LIST_LIMIT_MAX`).
+pub(crate) fn clamp_list_limit_to(limit: Option<i64>, default: i64, max: i64) -> i64 {
+    limit.unwrap_or(default).clamp(1, max)
 }
 
 // Per-connection PRAGMAs. Applied by the pool's `KeyingCustomizer` on EVERY

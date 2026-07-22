@@ -51,13 +51,33 @@ beforeEach(() => {
   nextResult = { ok: null };
 });
 
-test('BAA_ATTESTATION_VERSION is a positive integer (must match Rust)', () => {
-  // The Rust constant `baa::ATTESTATION_VERSION` is currently 1. If this
-  // fails, either the Rust constant changed and JS did not follow, or vice
-  // versa — the two MUST bump together to force re-attestation cleanly.
-  assert.equal(typeof BAA_ATTESTATION_VERSION, 'number');
-  assert.ok(Number.isInteger(BAA_ATTESTATION_VERSION));
-  assert.ok(BAA_ATTESTATION_VERSION >= 1);
+test('BAA_ATTESTATION_VERSION matches the Rust constant', async () => {
+  // Reads baa.rs and compares. The previous version only asserted
+  // `typeof === 'number' && >= 1`, which is true of ANY plausible value — so
+  // if Rust bumped ATTESTATION_VERSION to 2 and JS stayed at 1 it passed,
+  // while every provider silently skipped re-attestation. Its comment claimed
+  // to catch exactly that drift, which made it worse than no test: a reader
+  // would believe the two were pinned together.
+  //
+  // The two MUST bump together. Rust treats a stored ack with a LOWER version
+  // than its own as un-acknowledged (baa.rs read_ack), so a JS value behind
+  // Rust's re-prompts everyone, and a JS value ahead writes acks Rust will
+  // reject on the next launch.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, resolve } = await import('node:path');
+
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(here, '../../src-tauri/src/baa.rs'), 'utf8');
+  const m = src.match(/ATTESTATION_VERSION:\s*u32\s*=\s*(\d+)\s*;/);
+  assert.ok(m, 'could not find ATTESTATION_VERSION in baa.rs — did it move or change shape?');
+
+  assert.equal(
+    BAA_ATTESTATION_VERSION,
+    Number(m[1]),
+    'src/data/baa.js and src-tauri/src/baa.rs disagree on the attestation version',
+  );
+  assert.ok(Number.isInteger(BAA_ATTESTATION_VERSION) && BAA_ATTESTATION_VERSION >= 1);
 });
 
 test('baaRepo.getStatus invokes baa_ack_status with no args', async () => {
