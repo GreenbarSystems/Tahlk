@@ -52,16 +52,22 @@ use crate::DbState;
 pub(crate) const BAA_ACK_KEY: &str = "note_settings_v1::baa_ack";
 
 /// Runtime toggle for gate ENFORCEMENT (storage, Settings UI, and this
-/// module's tests are unaffected either way). Set to `false` for the current
-/// beta phase — see ADR 0003 (`docs/adr/0003-disable-baa-gate-for-beta.md`):
-/// testers use synthetic/test data only until Tahlk's managed Anthropic key
-/// (with an org-level BAA) ships, so per-provider BYOK attestation is pure
-/// friction with no compliance benefit right now.
+/// module's tests are unaffected either way).
 ///
-/// MUST be flipped back to `true` before any real PHI reaches this build —
-/// either once the managed-key proxy lands, or sooner if beta scope changes.
-/// This is a single choke-point flag, not a deletion: re-enabling is a
-/// one-line change plus restoring the onboarding step (see the ADR).
+/// `true`: `require_ack` refuses note generation without a current ack. This
+/// is the only technical control stopping a transcript from reaching Anthropic
+/// with no recorded attestation that the account behind the key is BAA-covered.
+///
+/// ADR 0003 set it to `false` for a test-data-only beta and said re-enabling
+/// meant "a one-line change plus restoring the onboarding step". The flag was
+/// flipped without the step, so every new install completed setup into an app
+/// that refused to generate notes — the gate was satisfiable only via a
+/// checkbox in Settings whose own copy called it optional. Onboarding step 3
+/// now collects it, and `the_gate_is_enabled_in_shipped_builds` pins this
+/// constant so a future flip cannot pass silently.
+///
+/// Turning it off again is a compliance decision, not a code cleanup: update
+/// ADR 0003 and remove that pin test in the same commit.
 pub(crate) const GATE_ENABLED: bool = true;
 
 /// Attestation schema version. Bumping this forces the user through the
@@ -142,7 +148,7 @@ fn resolve_ack(stored: Option<BaaAck>, gate_enabled: bool) -> Result<BaaAck, App
 /// network I/O. Returns `AppError::BaaRequired` if the ack is missing or
 /// stale AND `GATE_ENABLED` is true, so the JS side can surface a specific
 /// "open BAA modal" CTA. See `GATE_ENABLED`'s doc comment for why this is
-/// currently non-blocking.
+/// enforced.
 pub(crate) fn require_ack(state: &State<DbState>) -> Result<BaaAck, AppError> {
     resolve_ack(read_ack(state)?, GATE_ENABLED)
 }
@@ -335,6 +341,28 @@ mod tests {
             provider_id: provider_id.into(),
             attestation_version: ATTESTATION_VERSION,
         }
+    }
+
+    // Every other test in this module passes `gate_enabled` explicitly, so
+    // none of them touches the constant — flipping GATE_ENABLED back to false
+    // left all 300+ tests green while disabling the only technical control
+    // preventing uncovered PHI egress to Anthropic. One character, no signal.
+    // This is the signal.
+    //
+    // assertions_on_constants is silenced because asserting on the constant IS
+    // the point — the lint assumes a constant assertion is a tautology, and
+    // here it is a deliberate pin against a one-character edit.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn the_gate_is_enabled_in_shipped_builds() {
+        assert!(
+            GATE_ENABLED,
+            "baa::GATE_ENABLED must stay true: it is the choke point require_ack \
+             uses to refuse note generation before any network I/O. Disabling it \
+             lets transcripts reach Anthropic with no recorded attestation that \
+             the account is BAA-covered. If this is being turned off deliberately, \
+             update docs/adr/0003 and remove this test in the same commit."
+        );
     }
 
     #[test]

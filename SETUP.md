@@ -103,14 +103,15 @@ generation until the provider confirms those agreements are in place.
 > managed-key proxy itself is still not built. Real-PHI use is therefore not
 > yet supported; the beta remains test-data-only.
 
-> **Currently non-blocking (ADR 0003).** For the current test-data-only beta,
-> `baa::GATE_ENABLED = false` — the gate below is fully implemented and
-> unit-tested but does not enforce today, so onboarding no longer collects
-> the attestation and a missing ack does not stop `generate_note`. See
-> [`docs/adr/0003-disable-baa-gate-for-beta.md`](docs/adr/0003-disable-baa-gate-for-beta.md)
-> for why, and the criteria for flipping it back on (shipping the managed-key
-> proxy, or beta scope expanding to real PHI before that). Everything
-> described below is how the gate behaves once `GATE_ENABLED` is `true`.
+> **Enforced.** `baa::GATE_ENABLED = true`, so a missing or stale ack stops
+> `generate_note` before any network I/O, and onboarding step 3 collects the
+> attestation. Everything described below is live behaviour.
+>
+> This supersedes [ADR 0003](docs/adr/0003-disable-baa-gate-for-beta.md), which
+> soft-disabled the gate for the test-data-only beta. Note the gate being on
+> does not by itself make real-PHI use supported — that still waits on ZDR
+> provisioning and the executed provider↔Greenbar agreements above. It means
+> transcripts cannot leave the device without a recorded attestation.
 
 **Where the gate lives.** The check runs in Rust (`src-tauri/src/baa.rs`)
 as the first statement of `generate_note`, before the API key is read and
@@ -137,15 +138,15 @@ row that holds the acknowledgment.
   closed (treated as un-acknowledged).
 
 **Where the provider sees it.**
-- **First-run onboarding** — when the gate is enforced, this is a required
-  step-3 checkbox alongside the API key, with the button inert until it's
-  checked. During the current beta this step is removed from onboarding
-  (ADR 0003); it returns when the gate is re-enabled.
+- **First-run onboarding** — a required step-3 checkbox alongside the API key.
+  Setup will not complete until it is checked, and nothing is written until
+  then, so a provider who declines is not left half-onboarded with a profile
+  and API key stored and no way to generate a note.
 - **Settings → Agreements (BAA & EULA)** — shows current status (Confirmed /
   Not confirmed), the timestamp and provider name, and a toggle to record or
-  clear it. Always available, regardless of `GATE_ENABLED` — a tester whose org
-  has accepted Greenbar's BAA + EULA can record it now for an accurate local
-  audit trail. When the gate is enforced, revocation takes effect immediately:
+  clear it. Always available — this is where a provider re-confirms after a
+  revocation, or after an `ATTESTATION_VERSION` bump invalidates prior acks.
+  Revocation takes effect immediately:
   the very next `generate_note` call from that device is rejected with error
   code `baa_required`.
 

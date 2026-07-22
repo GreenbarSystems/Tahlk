@@ -166,7 +166,11 @@ Under the **managed-key model** this product is built around, the compliance cha
 
 **Current implementation vs. the model.** The managed-key proxy (`MANAGED-KEY-PROXY-CONTRACT.md`, v1 draft) is **not built**. During the current test-data-only beta the transcript is sent using a provider-supplied Anthropic key entered in the app (bring-your-own-key) as a **transitional mechanism**, not the end-state. Real-PHI use is not supported until both BAAs above are executed and the managed proxy ships.
 
-**Beta gate status.** Per `docs/adr/0003-disable-baa-gate-for-beta.md` (merged), the confirmation gate described in §3.4 is currently **non-blocking** for the test-data-only beta — `baa::GATE_ENABLED = false`, so a missing confirmation does not stop note generation on test data. It re-enables (`GATE_ENABLED = true`) before real patient use. This document and `docs/security/hipaa-risk-assessment.md` must both be updated whenever that flag changes; do not rely on this section without checking the code state directly.
+**Gate status: ENFORCED (2026-07-21).** `baa::GATE_ENABLED = true`, so a missing or stale confirmation stops `generate_note` before any network I/O, and first-run onboarding collects the attestation as a required step. `docs/adr/0003-disable-baa-gate-for-beta.md` — which soft-disabled the gate for the test-data-only beta — is **superseded**; see its Supersession section for why it was re-enabled ahead of its own unfreeze criteria, and for the interval during which the flag was on while onboarding had not been restored.
+
+The flag is now pinned by `baa::the_gate_is_enabled_in_shipped_builds`, and the onboarding step and its copy by `tests/js/test_onboarding.mjs`, so a change in either direction fails CI rather than passing silently. That is what this paragraph's previous warning — "do not rely on this section without checking the code state directly" — was compensating for; the check is now automated, but the advice still holds for anything not covered by a pin.
+
+**This does not make real-PHI use supported.** ZDR provisioning on the Anthropic organisation is still pending and the provider↔Greenbar agreements are still unexecuted (§ above). The gate guarantees no transcript leaves the device without a recorded attestation; it does not make the downstream path covered.
 
 ---
 
