@@ -16,7 +16,6 @@ import { toast } from '../../utils/format.js';
 import { userMessage, fromInvoke } from '../../platform/appError.js';
 import { setStatus, clearStatus } from './template.js';
 import { confirmModal } from '../confirmModal.js';
-import { keys } from '../../data/keys.js';
 import { getTemplate } from '../../templates/templateLibrary.js';
 import { checkSectionCoverage, describeMissingSections } from '../../domain/sectionCoverage.js';
 import { checkNoteQuality, describeQualityIssues, qualityIssuesCallToAction } from '../../domain/noteQualityGate.js';

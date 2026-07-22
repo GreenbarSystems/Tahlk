@@ -105,8 +105,11 @@ async function bootstrap() {
 
 async function checkRetentionOnLaunch() {
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const candidates = await retentionRepo.listCandidates(today);
+    // No argument: the cutoff date is derived server-side so a caller cannot
+    // supply a future date and make live records look expired (finding H2).
+    // The `today` computed here was a leftover from before that change and
+    // was being passed to a command that ignores it.
+    const candidates = await retentionRepo.listCandidates();
     if (!candidates || candidates.length === 0) return;
     const notice = document.getElementById('retention-notice');
     if (!notice) return;

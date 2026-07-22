@@ -87,6 +87,14 @@ pub(crate) fn kv_remove(state: State<DbState>, key: String) -> Result<(), AppErr
     guard_write_key(&key)?;
     check_key_size(&key)?;
     let conn = state.0.get()?;
+    // C1 applied to deletion. kv_set refuses to OVERWRITE a signed encounter's
+    // note content so signed_hash stays verifiable — but kv_remove could
+    // DELETE it outright, which defeats the same guarantee more completely: a
+    // hash with nothing left to verify against is not an attestation. The
+    // asymmetry survived only because kvRemove has no live JS caller.
+    if let Some(enc_id) = note_content_encounter_id(&key) {
+        block_if_encounter_signed(&conn, enc_id)?;
+    }
     kv_ops::delete_by_key(&conn, &key)?;
     Ok(())
 }
@@ -194,6 +202,69 @@ mod tests {
     //! refactor that swaps the serializer stays covered by these tests.
 
     use super::*;
+    use rusqlite::Connection;
+
+    // ── Signed-content guard (C1, and its deletion counterpart) ─────────
+
+    fn db_with_encounter(status: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE encounters (
+                 id             TEXT PRIMARY KEY,
+                 provider_id    TEXT NOT NULL,
+                 encounter_date TEXT NOT NULL,
+                 status         TEXT NOT NULL,
+                 created_at     TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO encounters (id, provider_id, encounter_date, status, created_at) \
+             VALUES ('enc-1', 'p', '2026-07-04', ?1, '2026-07-04T00:00:00Z')",
+            rusqlite::params![status],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn note_content_keys_map_to_their_encounter() {
+        // The prefix stripping is subtle — the transcript variant carries TWO
+        // prefixes — and a miss here means the guard silently never fires.
+        assert_eq!(note_content_encounter_id("note_content_v1::enc-1"), Some("enc-1"));
+        assert_eq!(
+            note_content_encounter_id("note_content_v1::transcript::enc-1"),
+            Some("enc-1")
+        );
+        assert_eq!(note_content_encounter_id("note_settings_v1::onboarded"), None);
+        assert_eq!(note_content_encounter_id("note_content_v2::enc-1"), None);
+    }
+
+    #[test]
+    fn a_signed_encounters_content_cannot_be_deleted_or_overwritten() {
+        // kv_set already refused to OVERWRITE signed note content so
+        // signed_hash stays verifiable. kv_remove could DELETE it outright,
+        // which defeats the same guarantee more completely — a hash with
+        // nothing left to verify against is not an attestation.
+        let conn = db_with_encounter("signed");
+        let err = block_if_encounter_signed(&conn, "enc-1").unwrap_err();
+        assert!(matches!(err, AppError::PreconditionFailed(_)));
+        assert!(format!("{err}").to_lowercase().contains("signed"));
+    }
+
+    #[test]
+    fn a_draft_encounters_content_stays_editable() {
+        let conn = db_with_encounter("draft");
+        assert!(block_if_encounter_signed(&conn, "enc-1").is_ok());
+    }
+
+    #[test]
+    fn an_unknown_encounter_does_not_block() {
+        // Content for an encounter row that does not exist yet (or was
+        // deleted) must not be frozen — there is no attestation to protect.
+        let conn = db_with_encounter("draft");
+        assert!(block_if_encounter_signed(&conn, "enc-missing").is_ok());
+    }
 
     #[test]
     fn key_at_ceiling_is_accepted() {

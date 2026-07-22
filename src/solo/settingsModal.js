@@ -1,6 +1,6 @@
 // Settings modal — provider profile, API key, Whisper model management.
 
-import { kvGet, kvSet, kvSetCacheOnly, kvEnsure } from '../core/storageBackend.js';
+import { kvGet, kvSetCacheOnly, kvEnsure } from '../core/storageBackend.js';
 import { invoke } from '../platform/tauri.js';
 import { secretsRepo } from '../data/secretsRepo.js';
 import { baaRepo } from '../data/baa.js';

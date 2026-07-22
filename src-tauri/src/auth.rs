@@ -86,6 +86,13 @@ static COMMON_PASSWORDS: &str = include_str!("../assets/10k-most-common-password
 pub(crate) struct RecoveryCode(String);
 
 impl RecoveryCode {
+    /// The raw 25-character code, no separators.
+    ///
+    /// `#[cfg(test)]` because production never needs it: codes are shown via
+    /// `display()` and consumed via `parse_recovery_code`, which strips
+    /// separators itself. Gating it here removes the dead-code warning without
+    /// deleting a method twelve tests rely on.
+    #[cfg(test)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -491,24 +498,6 @@ pub(crate) fn is_auth_configured() -> bool {
         .is_ok()
 }
 
-/// Returns true if `path` already contains a `'password'` wrap row.
-///
-/// Used by `migrate_from_plaintext_dek` instead of `is_auth_configured()` so
-/// tests that pass a fresh temp DB are correctly seen as unconfigured even when
-/// the dev machine's OS keychain has a real app entry.
-fn wraps_db_has_password(path: &Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-    let Ok(conn) = open_wraps_db(path) else { return false };
-    conn.query_row(
-        "SELECT COUNT(*) FROM auth_dek_wraps WHERE wrap_type = 'password'",
-        [],
-        |r| r.get::<_, i64>(0),
-    )
-    .map(|n| n > 0)
-    .unwrap_or(false)
-}
 
 /// Set the master password for the first time (or after a full reset).
 ///
@@ -704,50 +693,21 @@ pub(crate) fn generate_new_recovery_codes(
     Ok([rc1, rc2, rc3])
 }
 
-/// Migrate from the legacy plaintext-DEK-in-keychain model to the wrapped-DEK
-/// model.
-///
-/// Decodes `plaintext_dek_hex`, calls `set_password` (which writes the wraps DB
-/// and the keychain hash), then deletes the old `db_encryption_key` keychain
-/// entry. Safe to call multiple times only if `is_auth_configured()` returns
-/// false (the guard at the top prevents a second migration overwriting an existing
-/// configuration).
-///
-/// If the old keychain delete fails the entry lingers, but no PHI is exposed:
-/// `db.rs` now sources the DEK from this module instead of `db_key`, so the
-/// orphaned entry is unreachable in the normal auth path.
-pub(crate) fn migrate_from_plaintext_dek(
-    plaintext_dek_hex: &str,
-    password: &str,
-    wraps_db_path: &Path,
-) -> Result<[RecoveryCode; 3], AppError> {
-    let dek_vec = from_hex(plaintext_dek_hex)
-        .ok_or_else(|| AppError::internal_from("plaintext DEK hex is malformed"))?;
-    if dek_vec.len() != DEK_BYTES {
-        return Err(AppError::internal_from(format!(
-            "plaintext DEK has wrong length: expected {DEK_BYTES} bytes, got {}",
-            dek_vec.len()
-        )));
-    }
-    let mut dek = [0u8; DEK_BYTES];
-    dek.copy_from_slice(&dek_vec);
-
-    if wraps_db_has_password(wraps_db_path) {
-        return Err(AppError::invalid(
-            "auth is already configured — use change_password to rotate the password",
-        ));
-    }
-
-    let codes = set_password(password, &dek, wraps_db_path)?;
-
-    // Best-effort: delete the old plaintext entry. Failure is logged but not
-    // fatal — the wrapped copy is what matters for forward security.
-    if let Ok(entry) = crate::keychain::entry(crate::db_key::KEYRING_USER) {
-        let _ = entry.delete_credential();
-    }
-
-    Ok(codes)
-}
+// `migrate_from_plaintext_dek` lived here and was removed as dead code.
+//
+// It was never wired in: absent from the generate_handler! list and never
+// called from lib.rs::setup. The legacy plaintext-DEK path needs no separate
+// migration because `auth_set_password` already IS one — it calls
+// load_or_generate_dek (picking up the existing keychain DEK), wraps that same
+// value under the new password, and deletes the old entry. An upgrading user
+// has a keychain DEK and no auth_password_hash, so is_auth_configured() is
+// false, lib.rs opens the DB through the keychain path, and first-open setup
+// performs the migration as a side effect of setting a password.
+//
+// Its only callers were its own tests, and its `wraps_db_has_password` helper
+// existed solely to make one of those tests pass on a dev machine whose
+// keychain already had a real entry. Keeping an unreachable branch that writes
+// key material is worse than deleting it.
 
 /// Permanent, irreversible reset: deletes the wraps DB, the password hash
 /// keychain item, the DEK keychain item, and the main encrypted database.
@@ -1111,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn crockford_decode_accepts_O_as_zero() {
+    fn crockford_decode_accepts_letter_o_as_zero() {
         // All-zeros data encodes to all '0' chars; substituting 'O' must decode identically.
         let data = [0u8; CODE_DATA_LEN];
         let mut encoded = crockford_encode(&data);
@@ -1510,55 +1470,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn migrate_from_plaintext_dek_roundtrips() {
-        let (_dir, path) = temp_wraps();
-        let dek = test_dek();
-        let dek_hex = to_hex(&dek);
-        let codes = migrate_from_plaintext_dek(&dek_hex, "Tr0ub4dor&3-Battery!", &path).unwrap();
-        assert_eq!(codes.len(), 3);
-        // Each code must unwrap the correct DEK.
-        for code in &codes {
-            let seed = parse_recovery_code(code.as_str()).unwrap();
-            let kek = derive_recovery_kek(&seed).unwrap();
-            // Find the matching row.
-            let conn = open_wraps_db(&path).unwrap();
-            let mut matched = false;
-            for rt in ["recovery_1", "recovery_2", "recovery_3"] {
-                let hex: Option<String> = conn
-                    .query_row(
-                        "SELECT ciphertext_hex FROM auth_dek_wraps WHERE wrap_type = ?1",
-                        params![rt],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .unwrap();
-                if let Some(h) = hex {
-                    if let Some(recovered) = from_hex(&h)
-                        .and_then(|w| unwrap_dek(&kek, &w).ok())
-                    {
-                        assert_eq!(recovered, dek);
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            assert!(matched, "recovery code should decode the migrated DEK");
-        }
-    }
-
-    #[test]
-    fn migrate_rejects_malformed_dek_hex() {
-        let (_dir, path) = temp_wraps();
-        assert!(migrate_from_plaintext_dek("not-hex!!!", "Tr0ub4dor&3!", &path).is_err());
-    }
-
-    #[test]
-    fn migrate_rejects_wrong_length_dek() {
-        let (_dir, path) = temp_wraps();
-        // 16 bytes (too short) hex-encoded.
-        assert!(migrate_from_plaintext_dek(&"ab".repeat(16), "Tr0ub4dor&3!", &path).is_err());
-    }
+    // The three migrate_from_plaintext_dek tests were removed with the
+    // function itself — see the note where it was defined. The behaviour they
+    // covered (an existing keychain DEK being wrapped under a new password,
+    // and the codes then unwrapping it) is exercised through the real path by
+    // `recovery_codes_each_unwrap_the_dek` and `set_password_writes_exactly_
+    // four_rows`, which drive `set_password` directly.
 
     // ── Change password (wrapped-layer) ─────────────────────────────────────
 
