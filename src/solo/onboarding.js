@@ -3,8 +3,9 @@
 import { kvGet, kvSet, kvSetCacheOnly } from '../core/storageBackend.js';
 import { invoke } from '../platform/tauri.js';
 import { secretsRepo } from '../data/secretsRepo.js';
+import { baaRepo } from '../data/baa.js';
 import { keys } from '../data/keys.js';
-import { toast, escapeHtml } from '../utils/format.js';
+import { toast, escapeHtml, nowISO } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { LOGO_SVG_LG } from './logoSvg.js';
@@ -80,6 +81,31 @@ export function renderOnboarding() {
             </div>
           </div>
 
+          <!-- Step 3: Agreements. Required, because baa::GATE_ENABLED is true
+               and generate_note refuses until an ack is stored. Collecting it
+               here is what makes the gate satisfiable: without this step a new
+               install hits a baa_required error on its first Generate with no
+               path forward except a checkbox buried in Settings.
+               (No backticks in here — this block sits inside a template
+               literal, and one would terminate the string.) -->
+          <div class="onboarding-step" id="step-agreements">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <h3>Agreements (BAA &amp; EULA)</h3>
+              <p class="step-desc">Using Tahlk with real patient information is covered by two agreements
+              between your organization and <strong>Greenbar Systems</strong>, the maker of Tahlk: a
+              <strong>Business Associate Agreement (BAA)</strong> setting out how protected health
+              information is handled under HIPAA, and an <strong>End User License Agreement (EULA)</strong>
+              covering your use of the app.</p>
+              <p class="step-desc">Confirm below once both are in place. Tahlk will not generate notes
+              until you do.</p>
+              <label class="baa-toggle">
+                <input type="checkbox" id="ob-baa" />
+                <span>My organization has accepted Greenbar Systems' BAA and EULA.</span>
+              </label>
+            </div>
+          </div>
+
         </div>
 
         <div class="onboarding-footer">
@@ -98,6 +124,15 @@ export async function wireOnboarding(onComplete) {
 
     const apiKey = document.getElementById('ob-apikey')?.value.trim();
     if (!apiKey) { toast('Anthropic API key is required.'); return; }
+
+    // Checked BEFORE anything is written, so a provider who has not confirmed
+    // the agreements is not left half-onboarded with a profile and API key
+    // stored and no way to generate a note.
+    const baaChecked = !!document.getElementById('ob-baa')?.checked;
+    if (!baaChecked) {
+      toast('Confirm the BAA and EULA to finish setup.');
+      return;
+    }
 
     // Use the dedicated set_provider_profile command (C3 fix). Generic kv_set
     // is write-blocked for this key; sync the in-memory cache afterwards so
@@ -122,9 +157,17 @@ export async function wireOnboarding(onComplete) {
       return;
     }
 
-    // BAA acknowledgment is not collected here during the current beta
-    // (ADR 0003 — test data only, Rust-side gate soft-disabled). Anyone with
-    // a real BAA already in place can still record it in Settings.
+    // Record the attestation LAST, so onboarding is only marked complete once
+    // every prerequisite for generating a note is actually in place. Failing
+    // here leaves the provider on this screen with a message rather than
+    // dropping them into an app that cannot do its job.
+    try {
+      await baaRepo.setAck({ acknowledgedAt: nowISO(), providerId: name });
+    } catch (e) {
+      toast(`Could not record your confirmation: ${userMessage(e, 'unknown error')}`);
+      return;
+    }
+
     kvSet(ONBOARDED_KEY, true);
 
     onComplete();

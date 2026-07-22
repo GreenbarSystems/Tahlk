@@ -186,7 +186,7 @@ export async function renderSettings() {
           and <strong>Greenbar Systems</strong>, the maker of Tahlk: a <strong>Business Associate Agreement
           (BAA)</strong> setting out how protected health information is handled under HIPAA, and an
           <strong>End User License Agreement (EULA)</strong> covering your use of the app. Confirm below
-          once both are in place. During the current beta (test data only), this is optional.
+          once both are in place. <strong>Tahlk will not generate notes while this is unconfirmed.</strong>
         </p>
         <div class="baa-status-row">
           <span class="baa-status-pill ${baaAcked ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}">

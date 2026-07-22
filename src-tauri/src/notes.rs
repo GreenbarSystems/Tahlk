@@ -14,11 +14,11 @@
 //! `llm_audit` table with metadata only (no transcript, no response text)
 //! so a compliance officer can trace who sent what model when.
 //!
-//! **Currently non-blocking (ADR 0003).** `baa::GATE_ENABLED` is `false` for
-//! the test-data-only beta, so `require_ack` no longer errors on a missing
-//! ack — see that flag's doc comment and
-//! `docs/adr/0003-disable-baa-gate-for-beta.md` before assuming this gate is
-//! actively enforced.
+//! **Enforced.** `baa::GATE_ENABLED` is `true`, so `require_ack` returns
+//! `AppError::BaaRequired` on a missing or stale ack, before any network I/O
+//! and before the API key is even read. Onboarding collects the ack (step 3),
+//! and `baa::the_gate_is_enabled_in_shipped_builds` pins the flag so it cannot
+//! be turned off without a deliberate test change.
 //!
 //! Error mapping (see `errors.rs`):
 //!   * BAA gate not acknowledged  → `AppError::BaaRequired`

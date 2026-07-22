@@ -1,6 +1,8 @@
 # ADR 0003 — Disable the BAA acknowledgment gate for the test-data-only beta
 
-- **Status:** Accepted — 2026-07-06
+- **Status:** **Superseded — 2026-07-21.** `baa::GATE_ENABLED` is `true` and
+  the onboarding step is restored. See "Supersession" at the foot of this file.
+- **Originally:** Accepted — 2026-07-06
 - **Deciders:** product owner + engineering
 
 ## Context
@@ -97,3 +99,45 @@ Neither change flips `GATE_ENABLED` on its own. Criterion #1 above still
 requires the managed-key proxy to ship; criterion #2 still requires an
 explicit scope change. This ADR remains in force until one of those two
 conditions is met.
+
+## Supersession — 2026-07-21
+
+`GATE_ENABLED` is now `true` and onboarding collects the attestation again.
+This ADR is superseded.
+
+**Note that neither unfreeze criterion above was met.** The managed-key proxy
+has not shipped, and beta scope has not formally expanded to real PHI. The gate
+was re-enabled on a different basis: a privacy code audit ranked the disabled
+gate as its highest-priority finding, and with the app moving toward real
+patient data the fail-closed posture was judged correct ahead of the criteria
+rather than because of them. Turning it on costs usability; leaving it off
+risks uncovered PHI egress. That trade was resolved in favour of the records.
+
+**What went wrong in between, recorded because it is the useful part.** The
+flag was flipped on 2026-07-21 (`a191edc`) WITHOUT the onboarding step this
+ADR explicitly required — "flip `GATE_ENABLED` back to `true` **and restore the
+onboarding step** immediately". The result: every new install completed setup,
+hit `baa_required` on its first Generate, and was directed to a Settings pane
+whose own copy called the confirmation "optional". The app was unusable for
+new users for the intervening period, and five documents plus a test still
+asserted the flag was `false`.
+
+The lesson is not "read the ADR" — it is that a flag with a documented
+companion change needs the companion enforced in code, not prose.
+`baa::the_gate_is_enabled_in_shipped_builds` now pins the constant, and
+`test_onboarding.mjs` pins the step and its copy. A future flip in either
+direction has to change a test that says why.
+
+**Still true from the original decision:** the gate being enforced does not
+make real-PHI use supported. ZDR provisioning on the Anthropic organisation is
+still pending, and the provider↔Greenbar BAA and EULA are still unexecuted. The
+gate ensures no transcript leaves the device without a recorded attestation; it
+does not make the downstream path covered. Those remain tracked in
+`MANAGED-KEY-ROLLOUT.md` and `docs/security/hipaa-risk-assessment.md` Flow D.
+
+**Attestation copy is provisional.** The onboarding and Settings text names the
+BAA and EULA in general terms because neither document is executed yet. When
+they are, replace the copy with wording that matches them and bump
+`baa::ATTESTATION_VERSION` (and `BAA_ATTESTATION_VERSION` in `src/data/baa.js`,
+which `test_baa.mjs` now checks for drift) so every provider re-confirms
+against the final text.
