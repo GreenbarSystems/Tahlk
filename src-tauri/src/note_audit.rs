@@ -145,7 +145,7 @@ pub(crate) fn audit_log_record_viewed(
     let mut extra = BTreeMap::new();
     extra.insert("encounterId".to_string(), json!(encounter_id));
     extra.insert("status".to_string(),      json!(status));
-    server_append(&mut *conn, &encounter_id, "record_viewed", extra)
+    server_append(&mut conn, &encounter_id, "record_viewed", extra)
 }
 
 /// Record that an encounter note was edited.
@@ -157,7 +157,7 @@ pub(crate) fn audit_log_note_edited(
     let mut conn = state.0.get()?;
     let mut extra = BTreeMap::new();
     extra.insert("encounterId".to_string(), json!(encounter_id));
-    server_append(&mut *conn, &encounter_id, "note_edited", extra)
+    server_append(&mut conn, &encounter_id, "note_edited", extra)
 }
 
 /// Record that an encounter note was signed.
@@ -171,7 +171,7 @@ pub(crate) fn audit_log_note_signed(
     let mut extra = BTreeMap::new();
     extra.insert("contentHash".to_string(), json!(content_hash));
     extra.insert("encounterId".to_string(), json!(encounter_id));
-    server_append(&mut *conn, &encounter_id, "note_signed", extra)
+    server_append(&mut conn, &encounter_id, "note_signed", extra)
 }
 
 /// Record the outcome of an audio purge.
@@ -192,7 +192,7 @@ pub(crate) fn audit_log_audio_deleted(
     });
     extra.insert("reason".to_string(),  json!(reason));
     extra.insert("removed".to_string(), json!(removed));
-    server_append(&mut *conn, &encounter_id, "audio_deleted", extra)
+    server_append(&mut conn, &encounter_id, "audio_deleted", extra)
 }
 
 /// Record that a note was exported (to a file or to the clipboard).
@@ -207,7 +207,7 @@ pub(crate) fn audit_log_note_exported(
     let mut extra = BTreeMap::new();
     extra.insert("format".to_string(), json!(format));
     extra.insert("method".to_string(), json!(method));
-    server_append(&mut *conn, &encounter_id, "note_exported", extra)
+    server_append(&mut conn, &encounter_id, "note_exported", extra)
 }
 
 const LEGACY_LIVE_PREFIX: &str = "note_audit_v1::";
@@ -480,7 +480,7 @@ pub(crate) fn audit_append(
     entry: Value,
     evicted_count: i64,
 ) -> Result<i64, AppError> {
-    if evicted_count < 0 || evicted_count > MAX_EVICT_PER_APPEND {
+    if !(0..=MAX_EVICT_PER_APPEND).contains(&evicted_count) {
         return Err(AppError::invalid("evicted_count out of range"));
     }
     let prev_hash = match entry.get("prevHash") {
@@ -529,7 +529,7 @@ fn append_audit_row(
     // (and by tests) that bypasses that wrapper, and evicted_count flows
     // straight into a SQL UPDATE ... LIMIT below — it must be validated at
     // the point of use, not just at the JS-facing boundary.
-    if evicted_count < 0 || evicted_count > MAX_EVICT_PER_APPEND {
+    if !(0..=MAX_EVICT_PER_APPEND).contains(&evicted_count) {
         return Err(AppError::invalid("evicted_count out of range"));
     }
 

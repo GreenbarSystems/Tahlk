@@ -120,7 +120,7 @@ pub fn run() {
                 // refuse to launch than silently fall back to an unencrypted DB and
                 // expose PHI. Log the failure before the panic so the on-disk log
                 // names the cause (e.g. "Storage error: ...") even on a GUI launch.
-                let pool = db::open_database(&app.handle()).unwrap_or_else(|e| {
+                let pool = db::open_database(app.handle()).unwrap_or_else(|e| {
                     let safe = log_safety::cap_len(&e.to_string());
                     log::error!("failed to open encrypted SQLite database: {safe}");
                     panic!("failed to open encrypted SQLite database: {safe}");

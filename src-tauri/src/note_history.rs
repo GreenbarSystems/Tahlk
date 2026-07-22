@@ -258,6 +258,11 @@ fn sha256_hex(data: &[u8]) -> String {
 /// already-open transaction or a plain Connection (auto-commit).
 /// Factored out of `append_history_row` so `server_history_append` can reuse
 /// it inside a caller-supplied transaction without nesting BEGIN/COMMIT.
+// One parameter per history column. These are the fields the hash chain
+// covers, so a struct that could be partially populated would let a caller
+// omit one and produce an entry whose hash no longer describes what was
+// stored. Arity is the cheaper problem.
+#[allow(clippy::too_many_arguments)]
 fn insert_history_row(
     conn: &Connection,
     encounter_id: &str,
@@ -345,7 +350,7 @@ fn server_history_append(
     )?;
 
     payload.insert("entryHash".to_string(), json!(entry_hash));
-    Ok(serde_json::to_value(&payload).map_err(AppError::internal_from)?)
+    serde_json::to_value(&payload).map_err(AppError::internal_from)
 }
 
 /// Append a `signed` history entry inside an already-open transaction.
@@ -473,6 +478,9 @@ pub(crate) fn note_history_append(
 // diverged from what's committed (e.g. it appended against a stale/cached
 // view of the history), which correctly maps to `InvalidInput` since that's
 // a client-side logic mismatch, not a storage failure.
+// Same reasoning as insert_history_row: every hashed field is an explicit
+// parameter so none can be silently omitted.
+#[allow(clippy::too_many_arguments)]
 fn append_history_row(
     conn: &mut Connection,
     encounter_id: &str,

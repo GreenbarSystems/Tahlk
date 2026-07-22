@@ -789,7 +789,7 @@ mod tests {
         let cap: usize = 10;
         let acc_len: usize = 8;
         // A 2-byte chunk exactly fills the cap — must be ALLOWED.
-        assert!(!(acc_len.saturating_add(2) > cap));
+        assert!(acc_len.saturating_add(2) <= cap);
         // A 3-byte chunk overflows — must be REJECTED.
         assert!(acc_len.saturating_add(3) > cap);
     }

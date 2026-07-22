@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn gate_disabled_allows_missing_ack() {
         let got = resolve_ack(None, false).expect("disabled gate must not error on missing ack");
-        assert_eq!(got.acknowledged, false);
+        assert!(!got.acknowledged);
         assert_eq!(got.provider_id, "");
     }
 

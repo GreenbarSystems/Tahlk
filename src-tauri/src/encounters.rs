@@ -22,6 +22,24 @@ fn sha256_hex(input: &str) -> String {
     crate::hex::to_hex(d.as_ref())
 }
 
+/// The columns `enforce_signed_immutability` freezes once a row is signed, in
+/// SELECT order: status, signed_at, signed_hash, created_at, provider_id,
+/// encounter_date, audio_path.
+///
+/// Named rather than inlined so the tuple's shape is stated once — a
+/// positional mismatch between this and the SELECT would silently compare the
+/// wrong columns against each other, which is precisely the class of bug the
+/// guard exists to prevent.
+type FrozenFields = (
+    String,         // status
+    Option<String>, // signed_at
+    Option<String>, // signed_hash
+    String,         // created_at
+    String,         // provider_id
+    String,         // encounter_date
+    Option<String>, // audio_path
+);
+
 /// Reject an upsert that would mutate a signed encounter in any way other
 /// than a `patient_alias` typo fix.
 ///
@@ -47,7 +65,7 @@ pub(crate) fn enforce_signed_immutability(
     if id.is_empty() {
         return Ok(()); // upsert will fail on its own; nothing to guard.
     }
-    let existing: Option<(String, Option<String>, Option<String>, String, String, String, Option<String>)> = conn
+    let existing: Option<FrozenFields> = conn
         .query_row(
             "SELECT status, signed_at, signed_hash, created_at, provider_id, encounter_date, audio_path \
              FROM encounters WHERE id = ?1",
@@ -555,6 +573,12 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
 /// committed -- makes the UPDATE a no-op (0 rows changed), which the caller
 /// detects and surfaces as an explicit, retryable error instead of a silent
 /// lost update.
+// One parameter per encounter column, deliberately. Bundling them into a
+// struct would let a caller construct a partially-populated value and have it
+// silently write NULLs over columns it never meant to touch — the exact
+// failure mode this function's targeted-UPDATE design exists to prevent. The
+// compiler checking every column is supplied is worth the arity.
+#[allow(clippy::too_many_arguments)]
 fn upsert_encounter_row(
     conn: &Connection,
     id: &str,
@@ -568,14 +592,13 @@ fn upsert_encounter_row(
     signed_hash: Option<&str>,
     patient_id: Option<&str>,
 ) -> Result<(), AppError> {
-    let is_new_row = !conn
+    let is_new_row = conn
         .query_row(
             "SELECT 1 FROM encounters WHERE id = ?1",
             params![id],
             |_| Ok(()),
         )
-        .optional()?
-        .is_some();
+        .optional()?.is_none();
     let rows_changed = conn.execute(
         "INSERT INTO encounters (id, provider_id, encounter_date, patient_alias, status, \
          audio_path, created_at, signed_at, signed_hash, patient_id) \

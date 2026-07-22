@@ -29,7 +29,6 @@ use crate::patient_audit;
 use crate::retention;
 use crate::DbState;
 
-/// Derive the acting provider's display name from the KV-stored profile.
 // Actor derivation lives in `kv_ops::provider_id` — this module previously
 // carried TWO copies of it under different names (`provider_id_from_kv` and
 // `read_provider_id`), each with its own doc comment claiming to be the

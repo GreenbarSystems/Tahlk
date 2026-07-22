@@ -183,6 +183,7 @@ pub(crate) fn decrypt(key: &[u8; KEY_LEN], data: &[u8]) -> Result<Vec<u8>, AppEr
 ///     harmless overwrite), updates, deletes.
 ///   * crash after update, before delete → next run re-encrypts, the UPDATE
 ///     matches 0 rows (already migrated), deletes the leftover plaintext.
+///
 /// The migration is therefore idempotent and resumable — re-running after full
 /// completion does nothing because no bare `.wav` files remain.
 ///
@@ -331,7 +332,7 @@ mod tests {
     fn wrong_key_fails_authentication() {
         let key = derive_audio_key(&test_dek()).unwrap();
         let other = derive_audio_key(
-            &"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         )
         .unwrap();
         let blob = encrypt(&key, b"sensitive audio").unwrap();

@@ -168,7 +168,7 @@ fn crockford_encode(data: &[u8; CODE_DATA_LEN]) -> [u8; CODE_CHARS] {
     for chunk in 0..3 {
         let b = &data[chunk * 5..chunk * 5 + 5];
         let base = chunk * 8;
-        out[base + 0] = CROCKFORD[(b[0] >> 3) as usize];
+        out[base] = CROCKFORD[(b[0] >> 3) as usize];
         out[base + 1] = CROCKFORD[((b[0] & 0x07) << 2 | b[1] >> 6) as usize];
         out[base + 2] = CROCKFORD[((b[1] >> 1) & 0x1f) as usize];
         out[base + 3] = CROCKFORD[((b[1] & 0x01) << 4 | b[2] >> 4) as usize];
@@ -191,7 +191,7 @@ fn crockford_decode(chars: &[u8; CODE_CHARS]) -> Option<[u8; CODE_DATA_LEN]> {
     for chunk in 0..3 {
         let qi = &q[chunk * 8..chunk * 8 + 8];
         let base = chunk * 5;
-        out[base + 0] = (qi[0] << 3) | (qi[1] >> 2);
+        out[base] = (qi[0] << 3) | (qi[1] >> 2);
         out[base + 1] = ((qi[1] & 0x03) << 6) | (qi[2] << 1) | (qi[3] >> 4);
         out[base + 2] = ((qi[3] & 0x0f) << 4) | (qi[4] >> 1);
         out[base + 3] = ((qi[4] & 0x01) << 7) | (qi[5] << 2) | (qi[6] >> 3);
@@ -808,12 +808,11 @@ pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(
     // Publish before the audio migration below, which calls audio_key().
     set_session_dek_hex(&hex_key);
 
-    let pool = crate::db::open_database_with_dek(&app, &hex_key).map_err(|e| {
+    let pool = crate::db::open_database_with_dek(&app, &hex_key).inspect_err(|e| {
         log::error!(
             "auth_unlock_password: failed to open database: {}",
             crate::log_safety::cap_len(&e.to_string())
         );
-        e
     })?;
 
     // Audio at-rest migration — same best-effort logic as lib.rs::setup().
@@ -1122,7 +1121,7 @@ mod tests {
     fn recovery_code_data_chars_are_crockford_and_check_is_extended() {
         let (code, _) = generate_recovery_code().unwrap();
         let s = code.as_str();
-        for &c in s[..CODE_CHARS].as_bytes() {
+        for &c in &s.as_bytes()[..CODE_CHARS] {
             assert!(CROCKFORD.contains(&c));
         }
         assert!(CROCKFORD_CHECK.contains(&s.as_bytes()[CODE_CHARS]));

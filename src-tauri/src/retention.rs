@@ -418,8 +418,8 @@ mod tests {
         // it is NOT strictly less than the corrected cutoff... and one dated
         // the day before still is, which is correct.
         let cutoff = cutoff_date("2028-02-29", 7).unwrap();
-        assert!("2021-03-01".to_string() >= cutoff, "boundary day is retained");
-        assert!("2021-02-28".to_string() < cutoff, "genuinely older records still expire");
+        assert!(cutoff.as_str() <= "2021-03-01", "boundary day is retained");
+        assert!(cutoff.as_str() > "2021-02-28", "genuinely older records still expire");
     }
 
     #[test]

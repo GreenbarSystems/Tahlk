@@ -440,6 +440,12 @@ mod tests {
         assert!(!super::enc_filename("x").ends_with(".wav"));
     }
 
+    // Both assertions compare two consts, so clippy flags them as having a
+    // constant value. That is exactly the intent: this is a compile-time
+    // invariant between MAX_AUDIO_BYTES and MAX_BASE64_LEN expressed as a
+    // test, so an edit to one without the other fails CI. Silencing the lint
+    // rather than the test.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn size_constants_stay_in_sync() {
         // If MAX_AUDIO_BYTES is bumped without bumping MAX_BASE64_LEN, the

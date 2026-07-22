@@ -135,6 +135,12 @@ jobs:
 
       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
 
+      # Lint as an error, not advice. The tree was carrying 26 clippy warnings,
+      # which is how a real one hides: nobody reads warning 14 of 26. Genuine
+      # exceptions carry a scoped #[allow] and a comment saying why, so the
+      # reasoning is reviewable at the site instead of implied by silence.
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+
       # `cargo test` needs a Secret Service provider. auth::set_password writes
       # the password hash to the OS keychain (auth.rs), secrets stores the
       # Anthropic key there, and lock stores the idle-lock PIN — all via the
