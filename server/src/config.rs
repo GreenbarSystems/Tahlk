@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 pub struct Config {
     pub addr: SocketAddr,
@@ -8,7 +9,34 @@ pub struct Config {
     pub allow_insecure_bind: bool,
     // S4 cache backend selection.
     pub cache: CacheConfig,
+    // Managed-key Anthropic proxy. `main` fails closed at startup if the API key
+    // is missing so the proxy route never serves with an absent key.
+    pub anthropic: AnthropicConfig,
 }
+
+// Managed-key Anthropic proxy configuration (Phase 1). The API key is Greenbar's
+// own ZDR-covered organization key — a single server-side key shared across all
+// tenants, NEVER a per-tenant/customer key. See MANAGED-KEY-PROXY-CONTRACT.md.
+pub struct AnthropicConfig {
+    // Greenbar's server-side Anthropic key. Empty => `main` refuses to start.
+    pub api_key: String,
+    // Upstream base URL, defaulting to the real Anthropic API. Overridable via
+    // `TAHLK_ANTHROPIC_BASE_URL` so integration tests can point at a mock server.
+    pub base_url: String,
+    // Mirrors notes.rs: bounds just the TCP+TLS handshake.
+    pub connect_timeout: Duration,
+    // Mirrors notes.rs: bounds total wall-clock cost of the (streaming) call.
+    pub request_timeout: Duration,
+    // Hard cap on bytes proxied through a single response; the stream is aborted
+    // if exceeded, bounding memory/bandwidth a misbehaving upstream can force.
+    pub max_response_bytes: usize,
+}
+
+// Mirror notes.rs constants so client and proxy share the same safety margins.
+const ANTHROPIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const ANTHROPIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const ANTHROPIC_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 // S4 cache backend. Defaults to the process-local in-memory cache (correct for
 // a single instance). A horizontally-scaled deployment must select `Redis` so
@@ -55,6 +83,23 @@ pub fn from_env() -> Config {
         auth,
         allow_insecure_bind: env_flag("TAHLK_ALLOW_INSECURE"),
         cache: cache_from_env(),
+        anthropic: anthropic_from_env(),
+    }
+}
+
+// The proxy's server-side key comes from `ANTHROPIC_API_KEY`; an empty/unset
+// value is left as-is here and rejected at startup by `main` (fail closed),
+// mirroring the JWKS/auth startup gate rather than 500ing per request.
+fn anthropic_from_env() -> AnthropicConfig {
+    AnthropicConfig {
+        api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+        base_url: std::env::var("TAHLK_ANTHROPIC_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_string()),
+        connect_timeout: ANTHROPIC_CONNECT_TIMEOUT,
+        request_timeout: ANTHROPIC_REQUEST_TIMEOUT,
+        max_response_bytes: ANTHROPIC_MAX_RESPONSE_BYTES,
     }
 }
 

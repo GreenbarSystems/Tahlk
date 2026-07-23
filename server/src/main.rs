@@ -12,6 +12,7 @@
 // the tenant, and `rate_limit` throttles per verified tenant. Health endpoints
 // are intentionally left unauthenticated so orchestrators can probe them.
 
+mod anthropic_proxy;
 mod api;
 mod auth;
 mod cache;
@@ -24,7 +25,12 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use axum::{extract::State, middleware, routing::get, Router};
+use axum::{
+    extract::State,
+    middleware,
+    routing::{get, post},
+    Router,
+};
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -51,6 +57,7 @@ pub struct AppState {
     pub cache: Arc<dyn cache::Cache>,
     pub auth: Arc<JwtVerifier>,
     pub limiter: Arc<TenantRateLimiter>,
+    pub anthropic: Arc<anthropic_proxy::AnthropicProxy>,
 }
 
 // Middleware: throttle per verified tenant. Runs after `require_auth`, so the
@@ -106,6 +113,13 @@ fn app(state: AppState) -> Router {
         .route(
             "/v1/encounters/{id}/audit",
             get(api::list_audit).post(api::post_audit),
+        )
+        // Managed-key Anthropic proxy. Registered here so it inherits the exact
+        // `require_auth` + per-tenant `rate_limit` stack the encounter API uses —
+        // no separate router, no duplicated auth/rate-limit layering.
+        .route(
+            "/v1/anthropic/v1/messages",
+            post(anthropic_proxy::proxy_messages),
         )
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -171,12 +185,24 @@ async fn main() {
     // is exactly the stale-read bug S4 is about).
     let cache = build_cache(&cfg.cache).await;
 
+    // Managed-key proxy fail-closed gate: refuse to start without Greenbar's
+    // server-side Anthropic key rather than let the proxy route 500 (or leak a
+    // missing-key error) per request. Same posture as the JWKS/auth gate above.
+    if cfg.anthropic.api_key.trim().is_empty() {
+        eprintln!(
+            "ANTHROPIC_API_KEY is not set: refusing to start the managed-key proxy without it"
+        );
+        std::process::exit(1);
+    }
+    let anthropic = Arc::new(anthropic_proxy::AnthropicProxy::new(&cfg.anthropic));
+
     // Swap InMemoryStore for PostgresStore in production (see README).
     let state = AppState {
         store: Arc::new(store::InMemoryStore::new()),
         cache,
         auth,
         limiter: Arc::new(rate_limiter()),
+        anthropic,
     };
 
     let app = app(state);
@@ -195,7 +221,21 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
+    use std::time::Duration;
     use tower::ServiceExt;
+
+    // A no-network Anthropic proxy for the router tests here (which never call the
+    // proxy route). Points at an unroutable base URL; proxy-specific behavior is
+    // covered in `anthropic_proxy`'s own tests against a mock upstream.
+    fn test_anthropic() -> Arc<anthropic_proxy::AnthropicProxy> {
+        Arc::new(anthropic_proxy::AnthropicProxy::new(&config::AnthropicConfig {
+            api_key: "test-managed-key".to_string(),
+            base_url: "http://127.0.0.1:1".to_string(),
+            connect_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(5),
+            max_response_bytes: 1024 * 1024,
+        }))
+    }
 
     // A router wired exactly like production but with the network-free test
     // verifier (trusts the embedded test key, no JWKS fetch).
@@ -205,6 +245,7 @@ mod tests {
             cache: Arc::new(cache::InMemoryCache::new()),
             auth: Arc::new(testkit::verifier()),
             limiter: Arc::new(rate_limiter()),
+            anthropic: test_anthropic(),
         };
         app(state)
     }
@@ -428,6 +469,7 @@ mod tests {
             cache,
             auth: Arc::new(testkit::verifier()),
             limiter: Arc::new(rate_limiter()),
+            anthropic: test_anthropic(),
         };
         let app = app(state);
         let token = valid_token();
