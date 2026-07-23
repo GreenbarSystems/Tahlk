@@ -318,27 +318,41 @@ fn zero_and_remove(path: &Path) {
 
 
 
-// Migrates a legacy plaintext SQLite DB at `plaintext_path` into a fresh
-// SQLCipher-encrypted DB at `encrypted_path` using `sqlcipher_export`.
-// `PRAGMA rekey` does NOT work for plaintext→encrypted per SQLCipher docs,
-// so we ATTACH the target with the DEK and copy the schema+data across.
+// Returns true iff the SQLCipher-encrypted DB at `path` opens and answers a
+// trivial schema query under `hex_key`. Used both to gate the destructive
+// swap (never destroy the plaintext original until its encrypted replacement
+// is provably readable) and to decide, during crash recovery, whether a
+// leftover `tahlk.db.encrypted` temp is a complete copy worth promoting.
+fn verify_encrypted_opens(path: &Path, hex_key: &str) -> bool {
+    match Connection::open(path) {
+        Ok(conn) => apply_key(&conn, hex_key).is_ok(),
+        Err(_) => false,
+    }
+}
+
+// Builds a fresh SQLCipher-encrypted copy of the legacy plaintext DB at
+// `plaintext_path` into `encrypted_path` (a temp path — NOT the canonical DB
+// path) using `sqlcipher_export`. `PRAGMA rekey` does NOT work for
+// plaintext→encrypted per SQLCipher docs, so we ATTACH the target with the DEK
+// and copy the schema+data across.
 //
-// Ordering: we build the encrypted copy first, then destroy the plaintext,
-// then rename the encrypted file into place. A crash between the copy and
-// the rename leaves both files on disk; the next launch will see the
-// plaintext file is gone (or empty) and treat the encrypted file as canonical.
+// This function is deliberately NON-destructive: it only writes and verifies
+// the encrypted temp. The plaintext original is left untouched — the caller
+// performs the rename-before-destroy swap (see `open_database_with_dek`) so
+// that no crash window can leave the canonical DB path holding nothing.
 fn migrate_plaintext_to_encrypted(
     plaintext_path: &Path,
     encrypted_path: &Path,
     hex_key: &str,
 ) -> Result<(), AppError> {
-    // Sanity: don't clobber an existing encrypted file. If one exists it
-    // means a previous migration succeeded but the plaintext cleanup
-    // failed — refuse rather than overwriting good data.
+    // Sanity: don't clobber an existing encrypted temp. Startup recovery
+    // (`recover_orphaned_migration`) clears any leftover temp before we get
+    // here, so a temp still present at this point is unexpected — refuse
+    // rather than overwriting it.
     if encrypted_path.exists() {
         return Err(AppError::Storage(format!(
-            "refusing to migrate: encrypted DB already exists at {} while plaintext {} \
-             is still present — manually remove the stale plaintext file after verifying \
+            "refusing to migrate: encrypted temp already exists at {} while plaintext {} \
+             is still present — manually remove the stale temp file after verifying \
              the encrypted copy is intact",
             encrypted_path.display(),
             plaintext_path.display()
@@ -359,21 +373,60 @@ fn migrate_plaintext_to_encrypted(
     src.execute_batch("DETACH DATABASE encrypted;")?;
     drop(src);
 
-    // Verify the new encrypted file is readable with the DEK before we
-    // destroy the plaintext original.
-    {
-        let verify = Connection::open(encrypted_path)?;
-        apply_key(&verify, hex_key)?;
+    // Verify the new encrypted temp is readable with the DEK. The caller
+    // refuses to touch the plaintext original unless this succeeds.
+    if !verify_encrypted_opens(encrypted_path, hex_key) {
+        // Don't leave a half-written temp behind for recovery to trip over.
+        let _ = std::fs::remove_file(encrypted_path);
+        return Err(AppError::Storage(
+            "migration produced an encrypted DB that could not be reopened with the DEK".into(),
+        ));
     }
+    Ok(())
+}
 
-    // Leave a breadcrumb next to the DB so an operator investigating a
-    // partial upgrade can see what happened, then wipe+unlink the plaintext.
-    let bak = plaintext_path.with_extension("db.plaintext.bak");
-    // Best-effort: if rename fails (cross-device etc.) fall back to unlink.
-    if std::fs::rename(plaintext_path, &bak).is_ok() {
-        zero_and_remove(&bak);
-    } else {
-        zero_and_remove(plaintext_path);
+// Recovers from a migration interrupted by a crash between any of the three
+// swap steps in `open_database_with_dek` (build temp → move plaintext aside →
+// promote temp → wipe breadcrumb). Runs on every launch BEFORE the plaintext
+// detection, so an orphaned encrypted temp is never mistaken for a stale file
+// to overwrite and the canonical DB path is never left empty.
+//
+// The invariant it restores: if a verified encrypted temp exists, the
+// canonical path ends up holding it; the plaintext breadcrumb is always wiped.
+fn recover_orphaned_migration(
+    db_path: &Path,
+    encrypted_tmp: &Path,
+    bak: &Path,
+    hex_key: &str,
+) -> Result<(), AppError> {
+    if encrypted_tmp.exists() {
+        if verify_encrypted_opens(encrypted_tmp, hex_key) {
+            // The temp is a complete, readable encrypted copy. Promote it
+            // unless the canonical slot already holds a valid encrypted DB
+            // (crash happened after the swap already completed).
+            let canonical_ok = db_path.exists()
+                && !is_plaintext_db(db_path).unwrap_or(true)
+                && verify_encrypted_opens(db_path, hex_key);
+            if canonical_ok {
+                let _ = std::fs::remove_file(encrypted_tmp);
+            } else {
+                // Move any plaintext original aside (non-destructive) so the
+                // atomic promote can't collide, then promote the temp.
+                if db_path.exists() {
+                    std::fs::rename(db_path, bak).map_err(AppError::storage_from)?;
+                }
+                std::fs::rename(encrypted_tmp, db_path).map_err(AppError::storage_from)?;
+            }
+        } else {
+            // Incomplete/corrupt temp (crash mid-export): discard it. The
+            // plaintext original is still authoritative and will re-migrate.
+            let _ = std::fs::remove_file(encrypted_tmp);
+        }
+    }
+    // Wipe any leftover plaintext breadcrumb — it contains PHI and its only
+    // purpose (a promotion source) is done once we reach here.
+    if bak.exists() {
+        zero_and_remove(bak);
     }
     Ok(())
 }
@@ -400,10 +453,28 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     // ciphertext, so the magic-byte check returns false). MUST run before we
     // hand the file to the pool — the pool's customizer will `PRAGMA key`
     // every fresh connection and reject a plaintext file with "NOTADB".
+    let encrypted_tmp = data_dir.join("tahlk.db.encrypted");
+    let bak = data_dir.join("tahlk.db.plaintext.bak");
+
+    // First, finish any migration a prior launch left half-done. This restores
+    // the invariant "canonical path holds the encrypted DB" before we decide
+    // whether a fresh migration is needed, so a crash mid-swap can never boot
+    // an empty DB or re-migrate over a good encrypted file.
+    recover_orphaned_migration(&db_path, &encrypted_tmp, &bak, hex_key)?;
+
     if is_plaintext_db(&db_path).map_err(AppError::storage_from)? {
-        let encrypted_tmp = data_dir.join("tahlk.db.encrypted");
+        // Rename-before-destroy swap. Each step is individually crash-safe;
+        // `recover_orphaned_migration` above completes whichever step was in
+        // flight if we die partway through:
+        //   1. build + verify the encrypted copy at the temp path (the
+        //      plaintext original is untouched until this succeeds),
+        //   2. move the plaintext original aside to the .bak breadcrumb,
+        //   3. atomically rename the encrypted temp into the canonical path,
+        //   4. zero + unlink the plaintext breadcrumb.
         migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, hex_key)?;
+        std::fs::rename(&db_path, &bak).map_err(AppError::storage_from)?;
         std::fs::rename(&encrypted_tmp, &db_path).map_err(AppError::storage_from)?;
+        zero_and_remove(&bak);
     }
 
     crate::perms::chmod_0600_unix(&db_path);
@@ -563,48 +634,148 @@ mod tests {
         }
     }
 
-    #[test]
-    fn plaintext_db_is_detected_and_migrated() {
-        let dir = TempDir::new().unwrap();
-        let plaintext = dir.path().join("legacy.db");
-        let encrypted = dir.path().join("legacy.db.encrypted");
-        let key = fixed_key();
+    // Test-only mirror of the exact swap sequence in `open_database_with_dek`,
+    // so the crash-window tests can execute it up to any step and then invoke
+    // recovery. Kept in lockstep with the production swap by construction.
+    fn build_plaintext(path: &Path, patient: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE encounters (id TEXT PRIMARY KEY, patient TEXT);
+             INSERT INTO encounters VALUES ('e1', '{}');",
+            patient
+        ))
+        .unwrap();
+    }
 
-        // Build a plaintext DB with a recognizable row.
-        {
-            let conn = Connection::open(&plaintext).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE encounters (id TEXT PRIMARY KEY, patient TEXT);
-                 INSERT INTO encounters VALUES ('e1', 'Jane Doe');",
-            )
-            .unwrap();
-        }
-
-        // File starts with the SQLite magic — detector must agree.
-        assert!(is_plaintext_db(&plaintext).unwrap());
-
-        // Run the migration.
-        migrate_plaintext_to_encrypted(&plaintext, &encrypted, &key).unwrap();
-
-        // Plaintext file (or its .bak) is gone; encrypted file exists.
-        assert!(!plaintext.exists(), "plaintext file must be removed");
-        let bak = plaintext.with_extension("db.plaintext.bak");
-        assert!(!bak.exists(), "plaintext .bak must be zeroed and removed");
-        assert!(encrypted.exists(), "encrypted file must be created");
-
-        // Encrypted file must not start with plaintext SQLite magic.
-        let bytes = std::fs::read(&encrypted).unwrap();
-        assert!(!bytes.starts_with(SQLITE_MAGIC));
-
-        // And the data must be readable with the DEK.
-        let conn = Connection::open(&encrypted).unwrap();
-        apply_key(&conn, &key).unwrap();
-        let patient: String = conn
+    fn assert_canonical_encrypted_with(path: &Path, key: &str, expected: &str) {
+        assert!(path.exists(), "canonical DB must exist");
+        assert!(
+            !is_plaintext_db(path).unwrap(),
+            "canonical DB must be ciphertext, not plaintext"
+        );
+        let conn = Connection::open(path).unwrap();
+        apply_key(&conn, key).unwrap();
+        let got: String = conn
             .query_row("SELECT patient FROM encounters WHERE id = 'e1'", [], |r| {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(patient, "Jane Doe");
+        assert_eq!(got, expected, "no data may be lost across the migration");
+    }
+
+    #[test]
+    fn plaintext_db_is_detected_and_migrated() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("tahlk.db");
+        let encrypted_tmp = dir.path().join("tahlk.db.encrypted");
+        let bak = dir.path().join("tahlk.db.plaintext.bak");
+        let key = fixed_key();
+
+        build_plaintext(&db_path, "Jane Doe");
+        assert!(is_plaintext_db(&db_path).unwrap());
+
+        // Full swap, exactly as open_database_with_dek runs it.
+        migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, &key).unwrap();
+        std::fs::rename(&db_path, &bak).unwrap();
+        std::fs::rename(&encrypted_tmp, &db_path).unwrap();
+        zero_and_remove(&bak);
+
+        assert!(!encrypted_tmp.exists(), "temp must be consumed by the swap");
+        assert!(!bak.exists(), "plaintext breadcrumb must be zeroed and removed");
+        assert_canonical_encrypted_with(&db_path, &key, "Jane Doe");
+    }
+
+    // Crash after step 1 (encrypted temp built + verified) but before the
+    // plaintext original is moved aside. Recovery must promote the temp so the
+    // canonical path is never left as bare plaintext / never lost.
+    #[test]
+    fn crash_after_build_before_move_recovers() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("tahlk.db");
+        let encrypted_tmp = dir.path().join("tahlk.db.encrypted");
+        let bak = dir.path().join("tahlk.db.plaintext.bak");
+        let key = fixed_key();
+
+        build_plaintext(&db_path, "Jane Doe");
+        migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, &key).unwrap();
+        // <-- crash here: temp exists, db_path still plaintext, no bak.
+
+        recover_orphaned_migration(&db_path, &encrypted_tmp, &bak, &key).unwrap();
+
+        assert!(!encrypted_tmp.exists());
+        assert!(!bak.exists());
+        assert_canonical_encrypted_with(&db_path, &key, "Jane Doe");
+    }
+
+    // Crash after step 2 (plaintext moved to .bak) but before the temp is
+    // promoted — the canonical path does not exist at all. This is the exact
+    // window the old destroy-before-rename code lost data in.
+    #[test]
+    fn crash_after_move_before_promote_recovers() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("tahlk.db");
+        let encrypted_tmp = dir.path().join("tahlk.db.encrypted");
+        let bak = dir.path().join("tahlk.db.plaintext.bak");
+        let key = fixed_key();
+
+        build_plaintext(&db_path, "Jane Doe");
+        migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, &key).unwrap();
+        std::fs::rename(&db_path, &bak).unwrap();
+        // <-- crash here: db_path missing, temp + bak present.
+        assert!(!db_path.exists(), "precondition: canonical path is empty");
+
+        recover_orphaned_migration(&db_path, &encrypted_tmp, &bak, &key).unwrap();
+
+        assert!(!encrypted_tmp.exists());
+        assert!(!bak.exists());
+        assert_canonical_encrypted_with(&db_path, &key, "Jane Doe");
+    }
+
+    // Crash after step 3 (temp promoted to canonical) but before the plaintext
+    // breadcrumb is wiped. Recovery must leave the good encrypted DB untouched
+    // and only clean up the leftover .bak.
+    #[test]
+    fn crash_after_promote_before_wipe_recovers() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("tahlk.db");
+        let encrypted_tmp = dir.path().join("tahlk.db.encrypted");
+        let bak = dir.path().join("tahlk.db.plaintext.bak");
+        let key = fixed_key();
+
+        build_plaintext(&db_path, "Jane Doe");
+        migrate_plaintext_to_encrypted(&db_path, &encrypted_tmp, &key).unwrap();
+        std::fs::rename(&db_path, &bak).unwrap();
+        std::fs::rename(&encrypted_tmp, &db_path).unwrap();
+        // <-- crash here: canonical is good encrypted DB, bak still present.
+
+        recover_orphaned_migration(&db_path, &encrypted_tmp, &bak, &key).unwrap();
+
+        assert!(!bak.exists(), "leftover plaintext breadcrumb must be wiped");
+        assert_canonical_encrypted_with(&db_path, &key, "Jane Doe");
+    }
+
+    // A half-written / corrupt temp (crash mid-export, before verify) must be
+    // discarded, leaving the plaintext original authoritative so the next
+    // launch can re-run the migration cleanly.
+    #[test]
+    fn corrupt_temp_is_discarded_and_plaintext_preserved() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("tahlk.db");
+        let encrypted_tmp = dir.path().join("tahlk.db.encrypted");
+        let bak = dir.path().join("tahlk.db.plaintext.bak");
+        let key = fixed_key();
+
+        build_plaintext(&db_path, "Jane Doe");
+        // A bogus temp that will not open under the DEK.
+        std::fs::write(&encrypted_tmp, b"not a real sqlcipher file").unwrap();
+
+        recover_orphaned_migration(&db_path, &encrypted_tmp, &bak, &key).unwrap();
+
+        assert!(!encrypted_tmp.exists(), "corrupt temp must be discarded");
+        assert!(
+            is_plaintext_db(&db_path).unwrap(),
+            "plaintext original must be preserved for a clean re-migration"
+        );
     }
 
     #[test]
