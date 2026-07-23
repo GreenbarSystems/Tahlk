@@ -1,7 +1,7 @@
 //! Database encryption key (DEK) — keychain-held, 256-bit random.
 //!
 //! The DEK is generated on first launch via a CSPRNG (`getrandom`), stored
-//! in the OS secure store next to the Anthropic key, and passed to SQLCipher
+//! in the OS secure store (alongside the idle-lock PIN hash), and passed to SQLCipher
 //! as a 64-character hex blob so `PRAGMA key = "x'HEX'"` bypasses PBKDF2 —
 //! no passphrase, no key derivation, deterministic startup.
 //!

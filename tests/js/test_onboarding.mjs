@@ -1,20 +1,21 @@
-// S-UX-7 (plain-language inline help) + ADR 0003 (BAA step removed from
-// onboarding for the test-data-only beta — see
-// docs/adr/0003-disable-baa-gate-for-beta.md). Onboarding is now 2 steps:
-// provider profile, then Anthropic API key. There is no BAA checkbox or
-// step-baa block here anymore; the Rust-side gate is soft-disabled
+// Phase 2b (managed-proxy cutover): onboarding no longer collects an Anthropic
+// API key. Note generation runs through Greenbar's managed proxy on a
+// per-device token minted transparently on first use (see
+// src-tauri/src/device.rs), so there is no key step and no user-visible sign of
+// device registration. Onboarding is now a SINGLE step: the provider profile.
+//
+// ADR 0003 (BAA step removed from onboarding for the test-data-only beta — see
+// docs/adr/0003-disable-baa-gate-for-beta.md) still applies: there is no BAA
+// checkbox or step-baa block here; the Rust-side gate is soft-disabled
 // (baa::GATE_ENABLED = false) and Settings still offers a voluntary,
 // non-blocking BAA acknowledgment for testers who already have one.
-//
-// The disclosures use the same native <details>/<summary> pattern introduced
-// for "View integrity details" in S-UX-3 (see template.js / test_integrityDisplay).
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-// storageBackend / secretsRepo touch the injected Tauri runtime and DOM at
-// import time, so shim both BEFORE the dynamic import (same approach as
-// test_baa.mjs and test_integrityDisplay.mjs).
+// storageBackend touches the injected Tauri runtime and DOM at import time, so
+// shim both BEFORE the dynamic import (same approach as test_baa.mjs and
+// test_integrityDisplay.mjs).
 const calls = [];
 let nextResult = { ok: null };
 globalThis.__TAHLK_TEST_TAURI__ = {
@@ -37,27 +38,14 @@ beforeEach(() => {
   nextResult = { ok: null };
 });
 
-// ── API-key step: explanation + "How do I get one?" disclosure ───────────────
+// ── No API-key surface anywhere in onboarding (BYOK retired) ──────────────────
 
-test('API-key step explains what the key is and that Tahlk never stores it', () => {
+test('onboarding never mentions an Anthropic API key', () => {
   const html = renderOnboarding();
-  const step = html.slice(html.indexOf('id="step-apikey"'), html.indexOf('onboarding-footer'));
-  assert.match(step, /Anthropic/);
-  assert.match(step, /API key/i);
-  // Plain-language reassurance that the key stays local / Tahlk never sees it.
-  assert.match(step, /never sees or stores your key|secure credential store/i);
-});
-
-test('API-key step has a collapsed "How do I get one?" disclosure with steps', () => {
-  const html = renderOnboarding();
-  const step = html.slice(html.indexOf('id="step-apikey"'), html.indexOf('onboarding-footer'));
-  // Native <details> disclosure (collapsed by default — no `open` attribute).
-  assert.match(step, /<details[^>]*class="onboarding-help"[^>]*>[\s\S]*How do I get one\?/);
-  const details = step.slice(step.indexOf('<details'));
-  assert.ok(!/<details[^>]*\bopen\b/.test(details), 'API-key disclosure must be collapsed by default');
-  // Actionable steps to obtain a key, consistent with SETUP.md.
-  assert.match(details, /console\.anthropic\.com/);
-  assert.match(details, /<ol>[\s\S]*<\/ol>/);
+  assert.ok(!html.includes('id="step-apikey"'), 'API-key step must be removed');
+  assert.ok(!html.includes('id="ob-apikey"'), 'API-key input must be removed');
+  assert.ok(!/API key/i.test(html), 'no API-key copy may remain');
+  assert.ok(!/console\.anthropic\.com/.test(html), 'no console.anthropic.com link may remain');
 });
 
 // ── BAA step is gone from onboarding (ADR 0003) ───────────────────────────────
@@ -69,22 +57,23 @@ test('onboarding no longer renders a BAA step or checkbox', () => {
   assert.ok(!/Anthropic BAA acknowledgment/.test(html), 'BAA step heading must be removed');
 });
 
-test('onboarding only has two numbered steps', () => {
+test('onboarding has a single numbered step (provider profile)', () => {
   const html = renderOnboarding();
   const stepCount = (html.match(/class="onboarding-step"/g) || []).length;
-  assert.equal(stepCount, 2);
+  assert.equal(stepCount, 1);
+  assert.match(html, /id="step-provider"/);
 });
 
 // Drive the real wireOnboarding click handler with a minimal DOM to prove the
-// gate now only requires (a) a name and (b) an API key — no BAA checkbox.
-function mountDom({ name = 'Dr. Jane Smith', apikey = 'sk-ant-test' } = {}) {
+// gate now requires only a name — no API key, no BAA checkbox — and that no
+// key-related command is ever invoked.
+function mountDom({ name = 'Dr. Jane Smith' } = {}) {
   const handlers = {};
   const els = {
     'ob-finish': { addEventListener: (ev, fn) => { handlers[ev] = fn; } },
     'ob-name': { value: name },
     'ob-creds': { value: '' },
     'ob-specialty': { value: 'podiatry' },
-    'ob-apikey': { value: apikey },
   };
   globalThis.document = {
     getElementById: id => (id in els ? els[id] : null),
@@ -93,17 +82,21 @@ function mountDom({ name = 'Dr. Jane Smith', apikey = 'sk-ant-test' } = {}) {
   return { fire: () => handlers.click?.() };
 }
 
-test('gate: name + API key alone completes onboarding — no BAA ack written', async () => {
+test('gate: name alone completes onboarding — no key, no BAA ack written', async () => {
   let completed = false;
   const dom = mountDom();
   await wireOnboarding(() => { completed = true; });
   await dom.fire();
   await new Promise(r => setImmediate(r));
-  assert.equal(completed, true, 'onComplete must run once name + key are satisfied');
+  assert.equal(completed, true, 'onComplete must run once a name is provided');
   assert.ok(!calls.some(c => c.command === 'baa_ack_set'), 'onboarding must never write a BAA ack');
-  const setKey = calls.find(c => c.command === 'set_api_key');
-  assert.ok(setKey, 'set_api_key must be invoked');
-  assert.equal(setKey.args.key, 'sk-ant-test');
+  assert.ok(
+    !calls.some(c => c.command === 'set_api_key' || c.command === 'has_api_key'),
+    'no API-key command may be invoked — BYOK is retired',
+  );
+  const setProfile = calls.find(c => c.command === 'set_provider_profile');
+  assert.ok(setProfile, 'set_provider_profile must be invoked');
+  assert.equal(setProfile.args.profile.name, 'Dr. Jane Smith');
 });
 
 test('gate: missing name blocks completion', async () => {
@@ -113,13 +106,4 @@ test('gate: missing name blocks completion', async () => {
   await dom.fire();
   assert.equal(completed, false, 'onComplete must not run without a name');
   assert.equal(calls.length, 0, 'nothing should be written without a name');
-});
-
-test('gate: missing API key blocks completion', async () => {
-  let completed = false;
-  const dom = mountDom({ apikey: '' });
-  await wireOnboarding(() => { completed = true; });
-  await dom.fire();
-  assert.equal(completed, false, 'onComplete must not run without an API key');
-  assert.ok(!calls.some(c => c.command === 'set_api_key'), 'no key should be written without a value');
 });

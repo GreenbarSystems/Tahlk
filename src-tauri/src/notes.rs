@@ -1,16 +1,20 @@
-//! Note generation via Anthropic Messages API (streaming SSE).
+//! Note generation via Greenbar's managed Anthropic proxy (streaming SSE).
 //!
-//! The DB lock is dropped inside `read_api_key` before the HTTP call, so no
-//! lock is held across `.await`. The stream is parsed line-by-line: each
-//! `content_block_delta` is emitted as a `scribe:note_chunk` event AND
-//! accumulated into the returned full note, so callers don't need to
-//! observe events to get the final result.
+//! In managed mode the desktop app holds NO Anthropic key of its own. It
+//! authenticates to Greenbar's sync proxy with a per-device bearer token
+//! (`device::current_token`, minted/refreshed transparently — see `device.rs`)
+//! and the proxy holds the single Greenbar-owned, BAA/ZDR-covered Anthropic key
+//! and forwards the request body opaquely to Anthropic. There is deliberately
+//! NO direct-to-Anthropic BYOK path left: that path is not covered by
+//! Greenbar's BAA and no longer exists in the client.
+//!
+//! The device token is resolved before the HTTP call; no DB lock is held across
+//! `.await`. The stream is parsed line-by-line: each `content_block_delta` is
+//! emitted as a `scribe:note_chunk` event AND accumulated into the returned
+//! full note, so callers don't need to observe events to get the final result.
 //!
 //! Compliance gate (audit finding C2): before ANY network I/O, `baa::require_ack`
-//! is called. If the provider has not explicitly acknowledged that the
-//! Anthropic account behind this API key is covered by a signed BAA, the
-//! call is refused with `AppError::BaaRequired` — no transcript leaves the
-//! device. Every completed call (success OR failure) is written to the
+//! is called. Every completed call (success OR failure) is written to the
 //! `llm_audit` table with metadata only (no transcript, no response text)
 //! so a compliance officer can trace who sent what model when.
 //!
@@ -22,7 +26,7 @@
 //!
 //! Error mapping (see `errors.rs`):
 //!   * BAA gate not acknowledged  → `AppError::BaaRequired`
-//!   * missing keychain entry     → `AppError::NoApiKey`
+//!   * device token unavailable   → `AppError::SecureServiceUnreachable` (proxy/register unreachable)
 //!   * client builder failure     → `AppError::internal_from` (reqwest config bug)
 //!   * transport error on send    → `AppError::Network`
 //!   * HTTP 401/403               → `AppError::AuthFailed` (status only, no body — audit M10)
@@ -44,13 +48,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::baa;
+use crate::device;
 use crate::errors::AppError;
 use crate::llm_audit::{self, LlmCallEntry};
-use crate::secrets::read_api_key;
 use crate::time::utc_now_iso;
 use crate::DbState;
 
-const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
 
 // M8: bounded HTTP timeouts for the Anthropic call. Without these the request
@@ -259,6 +262,27 @@ fn http_client() -> Result<&'static Client, AppError> {
     Ok(CLIENT.get_or_init(|| built))
 }
 
+/// Build the managed-proxy request: POST to the proxy Messages endpoint with an
+/// `Authorization: Bearer <device_token>` header and the note body verbatim.
+///
+/// The proxy injects Greenbar's own `x-api-key` and `anthropic-version` on the
+/// upstream hop, so the client sends NEITHER — only the bearer token that
+/// authenticates the device to the proxy. Extracted so tests can assert the URL
+/// and auth header shape without a live server.
+fn build_proxy_request(
+    client: &Client,
+    endpoint: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> reqwest::Result<reqwest::Request> {
+    client
+        .post(endpoint)
+        .bearer_auth(token)
+        .header("content-type", "application/json")
+        .json(body)
+        .build()
+}
+
 /// View of the Anthropic SSE frames we care about. Only the fields we
 /// actually consume are declared; everything else is ignored by the
 /// (non-`deny_unknown_fields`) deserialization.
@@ -310,7 +334,13 @@ pub(crate) async fn generate_note(
     system_prompt: String,
     encounter_id: Option<String>,
 ) -> Result<String, AppError> {
-    // BAA gate FIRST — before we look at the key, before we build a client,
+    // Resolve the managed-proxy endpoint from the configured sync base URL. Pure
+    // (env read only, no network) — computed up front so the audit rows below
+    // record the real endpoint the call targets.
+    let base_url = device::sync_base_url();
+    let endpoint = device::proxy_endpoint(&base_url);
+
+    // BAA gate FIRST — before we resolve a token, before we build a client,
     // before we allocate the request body. The compliance failure is that
     // PHI reaches Anthropic without a BAA, so the check has to sit strictly
     // upstream of any state that could accidentally get flushed to the wire.
@@ -328,7 +358,7 @@ pub(crate) async fn generate_note(
                 encounter_id: encounter_id.clone(),
                 provider_id: String::new(),
                 model: ANTHROPIC_MODEL.into(),
-                endpoint: ANTHROPIC_ENDPOINT.into(),
+                endpoint: endpoint.clone(),
                 request_bytes: 0,
                 response_bytes: 0,
                 upstream_reqid: None,
@@ -340,10 +370,6 @@ pub(crate) async fn generate_note(
         }
     };
 
-    // Read the key from the OS keychain (locks drop inside read_api_key — no
-    // lock is held across the await below).
-    let key = read_api_key(&state).ok_or(AppError::NoApiKey)?;
-
     // Reuse a process-lifetime HTTP client (P4). Previously we rebuilt one on
     // every generate_note call, which meant discarding the connection pool,
     // the TLS session cache, and any HTTP/2 stream state, then paying a full
@@ -354,6 +380,36 @@ pub(crate) async fn generate_note(
     // TLS/pinning policy unchanged from the previous inline builder — see
     // audit L4 for why cert pinning is deliberately NOT used.
     let client = http_client()?.clone();
+
+    // Resolve a usable device bearer token, registering/refreshing through the
+    // managed proxy as needed. `current_token` scopes its own pooled DB
+    // checkouts internally so no non-`Send` connection is held across its
+    // network await (which is what keeps this command future `Send`). The token
+    // is resolved BEFORE the note-generation request. A failure here means the
+    // secure processing service is unreachable — we fail closed (never fall
+    // back to a direct-to-Anthropic path, which is not BAA-covered).
+    let token = match device::current_token(state.inner(), &client, &base_url).await {
+        Ok(t) => t,
+        Err(e) => {
+            record_llm_call(
+                &state,
+                LlmCallEntry {
+                    created_at: utc_now_iso(),
+                    encounter_id: encounter_id.clone(),
+                    provider_id: ack.provider_id.clone(),
+                    model: ANTHROPIC_MODEL.into(),
+                    endpoint: endpoint.clone(),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                    upstream_reqid: None,
+                    outcome: "secure_service_unreachable".into(),
+                    error_code: Some("secure_service_unreachable".into()),
+                    duration_ms: None,
+                },
+            );
+            return Err(e);
+        }
+    };
     // Prompt-injection defense (audit H6): wrap the transcript in
     // <transcript> tags and prepend a data-only directive to the system
     // prompt. See module-level helpers for rationale.
@@ -393,7 +449,7 @@ pub(crate) async fn generate_note(
         encounter_id: encounter_id.clone(),
         provider_id: ack.provider_id.clone(),
         model: ANTHROPIC_MODEL.into(),
-        endpoint: ANTHROPIC_ENDPOINT.into(),
+        endpoint: endpoint.clone(),
         request_bytes,
         response_bytes,
         upstream_reqid,
@@ -402,15 +458,17 @@ pub(crate) async fn generate_note(
         duration_ms: Some(started_at.elapsed().as_millis() as i64),
     };
 
-    let resp = match client
-        .post(ANTHROPIC_ENDPOINT)
-        .header("x-api-key", &key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-    {
+    // Build the managed-proxy request (Bearer device token; proxy adds the
+    // Anthropic key + version itself). A builder failure is a config bug, not a
+    // transport error — map it to Network for a single failure surface here.
+    let request = match build_proxy_request(&client, &endpoint, &token, &body) {
+        Ok(r) => r,
+        Err(e) => {
+            record_llm_call(&state, audit_row("network", Some("network"), 0, None));
+            return Err(AppError::Network(e.to_string()));
+        }
+    };
+    let resp = match client.execute(request).await {
         Ok(r) => r,
         Err(e) => {
             record_llm_call(&state, audit_row("network", Some("network"), 0, None));
@@ -429,9 +487,8 @@ pub(crate) async fn generate_note(
     if !resp.status().is_success() {
         let status = resp.status();
         // M10: capture the body for local dev debugging ONLY; never include it
-        // in the returned AppError. Anthropic error payloads can reflect
-        // request fragments (which contained our api key header on the wire)
-        // or upstream stack traces — both are dangerous to funnel into
+        // in the returned AppError. Upstream error payloads can reflect request
+        // fragments or stack traces — both are dangerous to funnel into
         // structured telemetry or a user-visible error toast.
         //
         // L7: read the body with the same MAX_NOTE_BYTES cap the success-path
@@ -1046,6 +1103,56 @@ mod tests {
         assert_eq!(
             full, "good one\ngood two",
             "valid frames on either side of a malformed one must survive"
+        );
+    }
+
+    // Cutover: the managed-proxy request must target the proxy endpoint (NOT
+    // api.anthropic.com), carry `Authorization: Bearer <device_token>`, and send
+    // NEITHER an `x-api-key` nor an `anthropic-version` header — the proxy injects
+    // those on the upstream hop. Build the request and inspect it directly.
+    fn built_request(endpoint: &str, token: &str) -> reqwest::Request {
+        let client = http_client().expect("client must build");
+        let body = serde_json::json!({ "model": ANTHROPIC_MODEL, "messages": [] });
+        build_proxy_request(client, endpoint, token, &body).expect("request must build")
+    }
+
+    #[test]
+    fn proxy_request_targets_the_proxy_endpoint() {
+        let endpoint = device::proxy_endpoint("https://api.tahlk.com");
+        let req = built_request(&endpoint, "jwt.abc");
+        assert_eq!(req.method(), reqwest::Method::POST);
+        assert_eq!(req.url().as_str(), endpoint);
+        assert_eq!(
+            req.url().as_str(),
+            "https://api.tahlk.com/v1/anthropic/v1/messages",
+            "must hit the managed proxy, never api.anthropic.com directly"
+        );
+    }
+
+    #[test]
+    fn proxy_request_carries_bearer_authorization() {
+        let endpoint = device::proxy_endpoint("https://api.tahlk.com");
+        let req = built_request(&endpoint, "jwt.abc");
+        let auth = req
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("Authorization header must be present")
+            .to_str()
+            .unwrap();
+        assert_eq!(auth, "Bearer jwt.abc");
+    }
+
+    #[test]
+    fn proxy_request_sends_no_anthropic_credentials() {
+        let endpoint = device::proxy_endpoint("https://api.tahlk.com");
+        let req = built_request(&endpoint, "jwt.abc");
+        assert!(
+            req.headers().get("x-api-key").is_none(),
+            "client must never send x-api-key — the proxy owns the Anthropic key"
+        );
+        assert!(
+            req.headers().get("anthropic-version").is_none(),
+            "client must not send anthropic-version — the proxy sets it upstream"
         );
     }
 }

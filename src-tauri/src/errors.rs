@@ -1,10 +1,10 @@
 //! Typed error at the IPC boundary.
 //!
 //! Every #[tauri::command] returns Result<T, AppError> so the JS side can
-//! branch on a stable machine-readable `code` (open Settings on `no_api_key`,
-//! prompt reconnect on `auth_failed`, offer retry on `network`) instead of
-//! substring-matching the human message. The `message` field is still filled
-//! in with the underlying diagnostic so logs remain useful.
+//! branch on a stable machine-readable `code` (retry on
+//! `secure_service_unreachable`, prompt reconnect on `auth_failed`, offer retry
+//! on `network`) instead of substring-matching the human message. The `message`
+//! field is still filled in with the underlying diagnostic so logs remain useful.
 //!
 //! Serialization: serde emits `{ "code": "...", "message": "..." }` for every
 //! variant (variants without their own message reuse a canonical default).
@@ -17,8 +17,11 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum AppError {
-    /// The Anthropic API key is not set in the OS keychain.
-    NoApiKey,
+    /// Greenbar's managed sync/proxy service could not be reached to register
+    /// the device or refresh its token (network down, timeout, non-2xx, or a
+    /// malformed register response). Note generation fails closed on this —
+    /// there is deliberately NO fallback to a direct-to-Anthropic path.
+    SecureServiceUnreachable,
     /// The Anthropic BAA acknowledgment gate has not been satisfied —
     /// note generation is refused because sending PHI to a non-BAA
     /// endpoint would be a §164.502 impermissible disclosure.
@@ -62,7 +65,7 @@ pub enum AppError {
 impl AppError {
     fn code(&self) -> &'static str {
         match self {
-            AppError::NoApiKey        => "no_api_key",
+            AppError::SecureServiceUnreachable => "secure_service_unreachable",
             AppError::BaaRequired     => "baa_required",
             AppError::NoModel         => "no_model",
             AppError::Network(_)      => "network",
@@ -79,7 +82,7 @@ impl AppError {
     }
     fn message(&self) -> String {
         match self {
-            AppError::NoApiKey        => "Anthropic API key not set.".into(),
+            AppError::SecureServiceUnreachable => "Unable to reach Tahlk's secure processing service. Check your internet connection and try again.".into(),
             AppError::BaaRequired     => "Anthropic BAA acknowledgment required before note generation.".into(),
             AppError::NoModel         => "Whisper model not downloaded.".into(),
             AppError::Network(m)      => format!("Network error: {}", m),

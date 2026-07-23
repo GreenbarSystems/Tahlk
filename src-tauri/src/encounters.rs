@@ -263,7 +263,7 @@ pub(crate) async fn delete_encounter(
         provider_id = crate::kv_ops::provider_id(&conn);
         delete_encounter_row(&mut conn, &id, &provider_id, "provider_request")?;
         // conn dropped here, before the .await below — no DB lock held
-        // across await, same discipline notes.rs's read_api_key uses.
+        // across await, same discipline notes.rs uses for its token read.
     }
 
     // After the SQL commit: a failure here never leaves a half-deleted

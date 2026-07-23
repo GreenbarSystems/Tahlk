@@ -1,11 +1,13 @@
 // Note generation — sends the session transcript to Anthropic claude-haiku
-// via the Rust generate_note command. The API key lives in the OS keychain
-// and is never accessible from JS. Returns the full note text.
+// via the Rust generate_note command. In managed mode the transcript goes
+// through Greenbar's secure proxy authenticated by a per-device token (see
+// src-tauri/src/device.rs); there is no user API key anywhere in JS. Returns
+// the full note text.
 //
 // Error surface contract: on failure we (1) record a diagnostic locally
 // via telemetry.recordError and (2) re-throw the AppError from `invoke`
-// (preserving `code` for branch logic like `no_api_key` or `baa_required`
-// → open Settings). We do NOT emit `scribe:generation_error` — the caller
+// (preserving `code` for branch logic like `secure_service_unreachable` or
+// `baa_required`). We do NOT emit `scribe:generation_error` — the caller
 // toasts once. Emitting an event on top of throwing led to two user-visible
 // surfaces for a single failure.
 //

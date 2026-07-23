@@ -1,8 +1,7 @@
-// Settings modal — provider profile, API key, Whisper model management.
+// Settings modal — provider profile, agreements, Whisper model management.
 
 import { kvGet, kvSetCacheOnly, kvEnsure } from '../core/storageBackend.js';
 import { invoke } from '../platform/tauri.js';
-import { secretsRepo } from '../data/secretsRepo.js';
 import { baaRepo } from '../data/baa.js';
 import { keys } from '../data/keys.js';
 import * as telemetry from '../core/telemetry.js';
@@ -46,7 +45,6 @@ const DIAG_EXPORT_DISCLOSURE =
 
 export async function renderSettings() {
   const provider = kvGet(PROVIDER_KEY) || {};
-  const hasKey = await secretsRepo.hasApiKey().catch(() => false);
   await kvEnsure([keys.diagEvents()]);          // load any persisted diagnostics for the count
   const diagOn = telemetry.isEnabled();
   const diagCount = telemetry.getEvents().length;
@@ -174,8 +172,8 @@ export async function renderSettings() {
           When you finish recording a visit, Tahlk turns the transcript into a structured clinical note in
           the template you choose — a SOAP note, a psychiatric evaluation, a medication-management
           follow-up, and more. You review and edit every note, then sign it yourself; nothing is finalized
-          automatically. This is powered by Anthropic's Claude; the key that connects to it is set up under
-          <strong>Advanced &amp; troubleshooting</strong> below.
+          automatically. This is powered by Anthropic's Claude, reached through Greenbar's secure processing
+          service — there's nothing to set up.
         </p>
       </section>
 
@@ -248,8 +246,9 @@ export async function renderSettings() {
       <section class="settings-section settings-section--muted">
         <h3>Where your data is stored</h3>
         <p class="settings-desc">
-          Your recordings, transcripts, and notes all stay on this device — nothing is sent to Tahlk, ever.
-          The one thing that leaves your computer is a visit transcript sent to Anthropic to generate a note.
+          Your recordings, transcripts, and notes all stay on this device. The one thing that leaves your
+          computer is a visit transcript, sent through Greenbar's secure processing service to Anthropic's
+          Claude to generate a note.
         </p>
       </section>
 
@@ -263,23 +262,6 @@ export async function renderSettings() {
             <span class="model-status-icon">${iconCheck()}</span>
             <span>Included with Tahlk — ready to use</span>
           </div>
-        </section>
-
-        <section class="settings-section">
-          <h3>Anthropic API key</h3>
-          <p class="settings-desc">
-            The key that connects Tahlk to Anthropic's Claude for note generation. Paste it here — it's
-            stored securely on this device and never sent to Tahlk.
-            <br>Status: ${hasKey ? '<strong>Key added</strong>' : '<strong style="color:var(--danger)">No key yet</strong>'}
-          </p>
-          <div class="field-row">
-            <label>Anthropic API key</label>
-            <input type="password" id="s-apikey" value="${hasKey ? '••••••••••••' : ''}"
-                   placeholder="sk-ant-…" autocomplete="off" />
-          </div>
-          <button class="btn btn-primary" id="s-save-apikey">Save key</button>
-          ${hasKey ? '<button class="btn btn-ghost btn-danger" id="s-clear-apikey">Remove key</button>' : ''}
-          <p class="step-hint"><a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">Get a key at console.anthropic.com →</a></p>
         </section>
 
         <section class="settings-section">
@@ -557,45 +539,6 @@ export function wireSettings() {
       toast('Profile saved.');
     } catch (e) {
       toast(`Could not save profile: ${userMessage(e, 'unknown error')}`);
-    }
-  });
-
-  const apiKeyInput = document.getElementById('s-apikey');
-  if (apiKeyInput) {
-    apiKeyInput.addEventListener('focus', () => {
-      if (apiKeyInput.value === '••••••••••••') apiKeyInput.value = '';
-    });
-    apiKeyInput.addEventListener('blur', async () => {
-      if (!apiKeyInput.value.trim()) {
-        const hasKey = await secretsRepo.hasApiKey().catch(() => false);
-        if (hasKey) apiKeyInput.value = '••••••••••••';
-      }
-    });
-  }
-
-  document.getElementById('s-save-apikey')?.addEventListener('click', async () => {
-    const val = document.getElementById('s-apikey')?.value.trim();
-    if (!val || val === '••••••••••••') return;
-    try {
-      await secretsRepo.setApiKey(val);
-      toast('API key saved.');
-    } catch (e) {
-      toast(`Could not save API key: ${userMessage(e, 'unknown error')}`);
-    }
-  });
-
-  document.getElementById('s-clear-apikey')?.addEventListener('click', async () => {
-    if (!await confirmModal({
-    title: 'Remove API key?',
-    message: 'Note generation will stop working until you add a key again.',
-    confirmLabel: 'Remove key',
-    confirmClass: 'btn-danger',
-  })) return;
-    try {
-      await secretsRepo.clearApiKey();
-      toast('API key removed.');
-    } catch (e) {
-      toast(`Could not remove API key: ${userMessage(e, 'unknown error')}`);
     }
   });
 

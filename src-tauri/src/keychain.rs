@@ -1,19 +1,22 @@
 //! Shared OS-keychain entry construction.
 //!
-//! Three modules hold a secret in the OS secure store (Keychain /
+//! Two modules hold a secret in the OS secure store (Keychain /
 //! Credential Manager / Secret Service), and each had its own copy of the
 //! service constant plus an identical `keyring_entry()` wrapper:
-//!   - `secrets.rs`   → the provider's Anthropic API key
 //!   - `db_key.rs`    → the SQLCipher database encryption key (DEK)
 //!   - `lock.rs`      → the idle-lock PIN hash
 //!
+//! (The retired Anthropic BYOK key used to be a third; managed mode holds no
+//! user-supplied credential — the device proxy token lives in the `kv` table,
+//! guarded like a secret, not in the OS keychain.)
+//!
 //! Only the *service* name and the constructor are shared here. **Each
-//! module keeps its own item/user constant** (`anthropic_api_key`,
-//! `db_encryption_key`, `lock_pin_hash`) rather than centralizing them:
-//! those distinct names are what keep the three secrets in separate
-//! keychain items, so one being read, rotated, or cleared cannot touch
-//! another. That separation is a security boundary, not incidental
-//! structure — do not consolidate the user constants here.
+//! module keeps its own item/user constant** (`db_encryption_key`,
+//! `lock_pin_hash`) rather than centralizing them: those distinct names are
+//! what keep the secrets in separate keychain items, so one being read,
+//! rotated, or cleared cannot touch another. That separation is a security
+//! boundary, not incidental structure — do not consolidate the user constants
+//! here.
 
 use crate::errors::AppError;
 
@@ -30,15 +33,14 @@ pub(crate) fn entry(user: &str) -> Result<keyring::Entry, AppError> {
 
 #[cfg(test)]
 mod tests {
-    /// The three item names must stay distinct — if any two collided, one
-    /// secret would silently overwrite another in the OS keychain (e.g.
-    /// setting a lock PIN would clobber the DEK and lock the user out of
-    /// their own database). This pins that invariant at the one place that
-    /// can see all three.
+    /// The item names must stay distinct — if any two collided, one secret
+    /// would silently overwrite another in the OS keychain (e.g. setting a
+    /// lock PIN would clobber the DEK and lock the user out of their own
+    /// database). This pins that invariant at the one place that can see all
+    /// of them.
     #[test]
     fn every_keychain_item_name_is_distinct() {
         let names = [
-            crate::secrets::KEYRING_USER,
             crate::db_key::KEYRING_USER,
             crate::lock::KEYRING_USER,
         ];
