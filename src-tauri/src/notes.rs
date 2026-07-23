@@ -18,11 +18,13 @@
 //! `llm_audit` table with metadata only (no transcript, no response text)
 //! so a compliance officer can trace who sent what model when.
 //!
-//! **Currently non-blocking (ADR 0003).** `baa::GATE_ENABLED` is `false` for
-//! the test-data-only beta, so `require_ack` no longer errors on a missing
-//! ack — see that flag's doc comment and
-//! `docs/adr/0003-disable-baa-gate-for-beta.md` before assuming this gate is
-//! actively enforced.
+//! **Enabled and blocking (ADR 0006).** `baa::GATE_ENABLED` is `true`, so
+//! `require_ack` returns `AppError::BaaRequired` when the BAA/EULA
+//! acknowledgment is missing or stale, aborting before any network I/O.
+//! Onboarding collects the acknowledgment as a blocking step, so a completed
+//! fresh install can generate a note without hitting this error. See
+//! `baa::GATE_ENABLED`'s doc comment and
+//! `docs/adr/0006-enforce-baa-gate-managed-key.md`.
 //!
 //! Error mapping (see `errors.rs`):
 //!   * BAA gate not acknowledged  → `AppError::BaaRequired`
