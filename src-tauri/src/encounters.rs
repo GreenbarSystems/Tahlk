@@ -123,7 +123,7 @@ const DEFAULT_LIST_LIMIT: i64 = 50;
 
 #[tauri::command]
 pub(crate) fn list_encounters(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let n = clamp_list_limit(limit);
     let sql = format!(
         "SELECT {ENCOUNTER_COLS} FROM encounters ORDER BY created_at DESC LIMIT ?1"
@@ -160,7 +160,7 @@ pub(crate) fn mark_encounter_signed(
     id: String,
     signed_hash: String,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let signed_at = crate::time::utc_now_iso();
     mark_signed(&mut conn, &id, &signed_at, &signed_hash)
 }
@@ -212,7 +212,7 @@ pub(crate) fn mark_signed(
 // clobber patient_alias or sign-off fields.
 #[tauri::command]
 pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> Result<(), AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let n = conn.execute(
         "UPDATE encounters SET audio_path = NULL WHERE id = ?1",
         params![id],
@@ -259,7 +259,7 @@ pub(crate) async fn delete_encounter(
 ) -> Result<(), AppError> {
     let provider_id;
     {
-        let mut conn = state.0.get()?;
+        let mut conn = state.conn()?;
         provider_id = crate::kv_ops::provider_id(&conn);
         delete_encounter_row(&mut conn, &id, &provider_id, "provider_request")?;
         // conn dropped here, before the .await below — no DB lock held
@@ -271,7 +271,8 @@ pub(crate) async fn delete_encounter(
     // problem than an inconsistent DB state, but not a silent one. An
     // unremovable file is recorded as `disposal_incomplete` in the same
     // destruction_log that just claimed this encounter was destroyed.
-    crate::audio::purge_after_destruction(&app, &state.0, &id, &provider_id).await;
+    let pool = state.pool()?;
+    crate::audio::purge_after_destruction(&app, &pool, &id, &provider_id).await;
 
     Ok(())
 }
@@ -411,7 +412,7 @@ pub(crate) fn delete_encounter_row(
 // Fetch a single encounter by id — avoids pulling the whole list to open one row.
 #[tauri::command]
 pub(crate) fn get_encounter(state: State<DbState>, id: String) -> Result<Option<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let sql = format!("SELECT {ENCOUNTER_COLS} FROM encounters WHERE id = ?1");
     Ok(conn.query_row(&sql, params![id], encounter_row_to_json).optional()?)
 }
@@ -429,7 +430,7 @@ pub(crate) fn get_encounter(state: State<DbState>, id: String) -> Result<Option<
 // step, one lock.
 #[tauri::command]
 pub(crate) fn encounter_stats(state: State<DbState>, today: String) -> Result<Value, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let (total, signed, today_count) = query_encounter_stats(&conn, &today)?;
     Ok(json!({ "total": total, "signed": signed, "today": today_count }))
 }
@@ -526,7 +527,7 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
     // still lands on "draft", which is always valid. [audit M4]
     check_status(status)?;
 
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let tx = conn.transaction()?;
     enforce_signed_immutability(&tx, &encounter)?;
     upsert_encounter_row(

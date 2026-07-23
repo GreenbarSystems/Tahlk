@@ -136,8 +136,8 @@ impl From<rusqlite::Error> for AppError {
 }
 
 // r2d2 pool checkout failures are also storage — same class as a rusqlite
-// error. Having this impl means every `state.0.get().map_err(AppError::
-// storage_from)?` site collapses to `state.0.get()?`, folding 21 identical
+// error. Having this impl means every `state.conn().map_err(AppError::
+// storage_from)?` site collapses to `state.conn()?`, folding 21 identical
 // lines across the KV/encounters/notes/audit surface into the pool call
 // itself. Introduced during the ADR 0001 modularity pass.
 impl From<r2d2::Error> for AppError {

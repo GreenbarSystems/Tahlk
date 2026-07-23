@@ -80,7 +80,7 @@ pub(crate) fn append(conn: &Connection, patient_id: &str, provider_id: &str, act
 
 #[tauri::command]
 pub(crate) fn patient_audit_list(state: State<DbState>, patient_id: String) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let mut stmt = conn.prepare(
         "SELECT created_at, patient_id, provider_id, action \
          FROM patient_audit WHERE patient_id = ?1 ORDER BY id",

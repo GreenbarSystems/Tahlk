@@ -131,7 +131,7 @@ pub(crate) fn config_audit_list(
     state: State<DbState>,
     limit: Option<i64>,
 ) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let n = crate::db::clamp_list_limit(limit, 100);
     let mut stmt = conn.prepare(
         "SELECT created_at, action, old_value, new_value, provider_id \

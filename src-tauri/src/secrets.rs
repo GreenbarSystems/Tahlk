@@ -176,7 +176,7 @@ pub(crate) fn set_provider_profile(state: State<DbState>, profile: Value) -> Res
     if json.len() > crate::kv::MAX_KV_VALUE_BYTES {
         return Err(AppError::invalid("provider profile value too large"));
     }
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     crate::kv_ops::upsert_json(&conn, NOTE_PROVIDER_PROFILE_KEY, &json)
 }
 

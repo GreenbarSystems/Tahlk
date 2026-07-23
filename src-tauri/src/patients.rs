@@ -62,7 +62,7 @@ fn required_str<'a>(incoming: &'a Value, field: &'static str) -> Result<&'a str,
 
 #[tauri::command]
 pub(crate) fn list_patients(state: State<DbState>, limit: Option<i64>) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     list_patients_conn(&conn, limit)
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn list_patients_conn(conn: &Connection, limit: Option<i64>) -> Resul
 
 #[tauri::command]
 pub(crate) fn get_patient(state: State<DbState>, id: String) -> Result<Option<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     get_patient_conn(&conn, &id)
 }
 
@@ -93,7 +93,7 @@ pub(crate) fn get_patient_conn(conn: &Connection, id: &str) -> Result<Option<Val
 
 #[tauri::command]
 pub(crate) fn upsert_patient(state: State<DbState>, patient: Value) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let provider_id = crate::kv_ops::provider_id(&conn);
     upsert_patient_conn(&mut conn, &patient, &provider_id)
 }
@@ -149,7 +149,7 @@ pub(crate) fn upsert_patient_conn(conn: &mut Connection, patient: &Value, provid
 
 #[tauri::command]
 pub(crate) fn delete_patient(state: State<DbState>, id: String) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let provider_id = crate::kv_ops::provider_id(&conn);
     delete_patient_conn(&mut conn, &id, &provider_id)
 }
@@ -192,7 +192,7 @@ pub(crate) async fn destroy_patient_records(
     patient_id: String,
     expected_count: i64,
 ) -> Result<Value, AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
 
     // Explicit hold check, in addition to the one inside delete_encounter_in_tx.
     // Not redundant: a patient with zero linked encounters never enters the
@@ -292,8 +292,9 @@ pub(crate) async fn destroy_patient_records(
     // leaves a partially-committed DB state. Each unremovable file is recorded
     // as `disposal_incomplete` rather than only logged — see
     // audio::purge_after_destruction.
+    let pool = state.pool()?;
     for enc_id in &encounter_ids {
-        crate::audio::purge_after_destruction(&app, &state.0, enc_id, &provider_id).await;
+        crate::audio::purge_after_destruction(&app, &pool, enc_id, &provider_id).await;
     }
 
     Ok(json!({ "encounters_destroyed": encounters_destroyed }))
@@ -311,7 +312,7 @@ pub(crate) fn count_patient_encounters(
     state: State<DbState>,
     patient_id: String,
 ) -> Result<i64, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     count_linked_encounters(&conn, &patient_id)
 }
 

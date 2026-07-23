@@ -198,7 +198,7 @@ fn record_llm_call(state: &State<DbState>, entry: LlmCallEntry) {
     // and we already refused to propagate append() failures for the same
     // reason (a lost audit row is worse than a masked real error, but
     // masking is worse still).
-    let conn = match state.0.get() {
+    let conn = match state.conn() {
         Ok(c) => c,
         Err(e) => {
             log::error!(

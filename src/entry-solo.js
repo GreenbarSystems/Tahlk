@@ -11,7 +11,6 @@ import { shouldLogRecordView } from './domain/recordAccess.js';
 import { onWindowCloseRequested, destroyWindow } from './platform/tauri.js';
 import { clearClipboardOnExit } from './export/exportFormatter.js';
 import { startIdleWatcher } from './core/idleLock.js';
-import { showLockScreen } from './solo/lockScreen.js';
 import * as telemetry from './core/telemetry.js';
 import { authRepo } from './data/authRepo.js';
 import { showSignInScreen, runFirstOpenAuth, showMigrationInterstitial } from './solo/authScreen.js';
@@ -64,14 +63,37 @@ async function wireClipboardClearOnExit() {
   });
 }
 
+// A crossed idle threshold hardening step: not merely covering the screen but
+// a real cryptographic logoff (M4). First ask Rust to zero the session DEK and
+// drop the DB connection pool, so decrypted PHI is genuinely unreachable while
+// locked; then require the same password sign-in used at startup, which
+// re-derives the DEK and reopens the pool before the app shell is restored.
+// The guard makes a repeat idle fire while already locked a no-op so it can't
+// wipe a half-typed password out from under the provider.
+let _locking = false;
+async function handleIdleLock() {
+  if (_locking) return;
+  _locking = true;
+  try {
+    await authRepo.lockSession();
+  } catch (err) {
+    // Even if the backend call fails, still force re-authentication — demanding
+    // a password is the safe direction; silently staying unlocked is not.
+    console.error('Idle lock: failed to drop session in backend', err);
+  }
+  await new Promise(resolve => showSignInScreen(resolve));
+  _locking = false;
+  renderApp();
+}
+
 async function bootstrap() {
   await kvWarmup();
   installSoloCapabilities();
   await wireClipboardClearOnExit();
-  // startIdleWatcher is a no-op timer-wise until the provider both enables
-  // this in Settings AND sets a PIN — safe to start unconditionally here
-  // rather than gating bootstrap on that being configured yet.
-  startIdleWatcher(() => showLockScreen(() => {}));
+  // Idle lock is ON by default now (M4). Start the watcher unconditionally;
+  // it re-reads isLockEnabled() on every tick, so a provider disabling it in
+  // Settings takes effect without a restart.
+  startIdleWatcher(() => { handleIdleLock(); });
   await telemetry.init();   // opt-in gated; subscribes to the bus, records nothing unless enabled
 
   const authConfigured = await authRepo.isConfigured();

@@ -220,7 +220,7 @@ fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 // comment above: verification logic stays entirely in the JS domain layer.
 #[tauri::command]
 pub(crate) fn note_history_list_encounter_ids(state: State<DbState>) -> Result<Vec<String>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let mut stmt = conn.prepare("SELECT DISTINCT encounter_id FROM note_history ORDER BY encounter_id")?;
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))?
@@ -230,7 +230,7 @@ pub(crate) fn note_history_list_encounter_ids(state: State<DbState>) -> Result<V
 
 #[tauri::command]
 pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let mut stmt = conn.prepare(
         "SELECT action, actor, timestamp, content_hash, notes, prev_hash, entry_hash \
          FROM note_history WHERE encounter_id = ?1 ORDER BY seq",
@@ -378,7 +378,7 @@ pub(crate) fn history_note_generated(
     encounter_id: String,
     content_hash: String,
 ) -> Result<Value, AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let tx = conn.transaction()?;
     let entry = server_history_append(&tx, &encounter_id, "generated", "AI (Tahlk)", &content_hash, "")?;
     tx.commit()?;
@@ -393,7 +393,7 @@ pub(crate) fn history_note_edited(
     encounter_id: String,
     content_hash: String,
 ) -> Result<Value, AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let tx = conn.transaction()?;
     let actor = crate::kv_ops::provider_id(&tx);
     let entry = server_history_append(&tx, &encounter_id, "edited", &actor, &content_hash, "")?;
@@ -453,7 +453,7 @@ pub(crate) fn note_history_append(
     let prev_hash = opt_str(&entry, "prevHash", 128)?;
     let entry_hash = take_str(&entry, "entryHash", 128)?;
 
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     append_history_row(
         &mut conn, &encounter_id, &action, &actor, &timestamp, &content_hash,
         &notes, prev_hash.as_deref(), &entry_hash,

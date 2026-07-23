@@ -141,7 +141,7 @@ pub(crate) fn audit_log_record_viewed(
     encounter_id: String,
     status: String,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let mut extra = BTreeMap::new();
     extra.insert("encounterId".to_string(), json!(encounter_id));
     extra.insert("status".to_string(),      json!(status));
@@ -154,7 +154,7 @@ pub(crate) fn audit_log_note_edited(
     state: State<'_, DbState>,
     encounter_id: String,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let mut extra = BTreeMap::new();
     extra.insert("encounterId".to_string(), json!(encounter_id));
     server_append(&mut conn, &encounter_id, "note_edited", extra)
@@ -167,7 +167,7 @@ pub(crate) fn audit_log_note_signed(
     encounter_id: String,
     content_hash: String,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let mut extra = BTreeMap::new();
     extra.insert("contentHash".to_string(), json!(content_hash));
     extra.insert("encounterId".to_string(), json!(encounter_id));
@@ -183,7 +183,7 @@ pub(crate) fn audit_log_audio_deleted(
     reason: String,
     error: Option<String>,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let mut extra = BTreeMap::new();
     extra.insert("encounterId".to_string(), json!(encounter_id));
     extra.insert("error".to_string(), match &error {
@@ -203,7 +203,7 @@ pub(crate) fn audit_log_note_exported(
     format: String,
     method: String,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     let mut extra = BTreeMap::new();
     extra.insert("format".to_string(), json!(format));
     extra.insert("method".to_string(), json!(method));
@@ -328,7 +328,7 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 pub(crate) fn note_audit_list_encounter_ids(
     state: State<DbState>,
 ) -> Result<Vec<String>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let mut stmt = conn.prepare("SELECT DISTINCT encounter_id FROM note_audit ORDER BY encounter_id")?;
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))?
@@ -504,13 +504,13 @@ fn entries_from(conn: &Connection, encounter_id: &str, archived: bool) -> Result
 
 #[tauri::command]
 pub(crate) fn audit_list(state: State<DbState>, encounter_id: String) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     entries_from(&conn, &encounter_id, false)
 }
 
 #[tauri::command]
 pub(crate) fn audit_archive_list(state: State<DbState>, encounter_id: String) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     entries_from(&conn, &encounter_id, true)
 }
 
@@ -550,7 +550,7 @@ pub(crate) fn audit_append(
         return Err(AppError::invalid("audit entry exceeds 16 KiB"));
     }
 
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     append_audit_row(&mut conn, &encounter_id, prev_hash.as_deref(), &entry_hash, &entry_json, evicted_count)
 }
 

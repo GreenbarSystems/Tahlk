@@ -96,7 +96,7 @@ pub(crate) struct BaaAck {
 /// a Some only when the gate is currently satisfied for the CURRENT
 /// attestation version.
 pub(crate) fn read_ack(state: &State<DbState>) -> Result<Option<BaaAck>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let row: Option<String> = conn
         .query_row(
             "SELECT value FROM kv WHERE key = ?1",
@@ -196,7 +196,7 @@ pub(crate) fn baa_ack_set(
         attestation_version: ATTESTATION_VERSION,
     };
     let json = serde_json::to_string(&ack).map_err(AppError::internal_from)?;
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     crate::kv_ops::upsert_json(&conn, BAA_ACK_KEY, &json)
 }
 
@@ -205,7 +205,7 @@ pub(crate) fn baa_ack_set(
 /// re-attest after a BAA renegotiation, or by uninstall/reset flows.
 #[tauri::command]
 pub(crate) fn baa_ack_clear(state: State<DbState>) -> Result<(), AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     crate::kv_ops::delete_by_key(&conn, BAA_ACK_KEY)?;
     Ok(())
 }
