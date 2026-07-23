@@ -1,6 +1,7 @@
 // Home screen — encounter list, quick-start, session stats.
 
 import { encountersRepo } from '../data/encountersRepo.js';
+import { logRecordsListed } from '../core/auditLog.js';
 import { userMessage } from '../platform/appError.js';
 import { genId, nowISO, todayISO, displayDateShort, escapeHtml, statusLabel, toast } from '../utils/format.js';
 import { pickPatient } from './patientPickerModal.js';
@@ -13,6 +14,14 @@ export async function renderHomeScreen() {
     encountersRepo.stats(todayISO()).catch(() => ({ total: 0, signed: 0, today: 0 })),
     encountersRepo.list(50).catch(() => []),
   ]);
+
+  // Record that this roster of encounter PHI (patient alias + date per row)
+  // was displayed — one access event for the whole list, not one per row.
+  // Skipped when empty: nothing was disclosed. See auditLog.js::logRecordsListed
+  // and HIPAA risk assessment §4 (record-access accounting).
+  if (encounters.length > 0) {
+    await logRecordsListed('sessions', encounters.length);
+  }
 
   return `
     <div class="home-screen">

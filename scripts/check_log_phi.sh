@@ -49,7 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/../src-tauri/src"
 
 # Field/variable names that strongly imply PHI. Substring, case-insensitive.
-FORBIDDEN="transcript|note|content|patient|provider_name|chief_complaint"
+FORBIDDEN="transcript|note|content|patient|provider_name|chief_complaint|ssn|dob|date_of_birth|mrn|phone|email|address|zip|postal|insurance|member_id|policy|dea|npi|first_name|last_name|birth"
 
 # Collect log::/eprintln!/println! macro lines (with file:line) across all
 # .rs files. grep exits non-zero when nothing matches, which is the success

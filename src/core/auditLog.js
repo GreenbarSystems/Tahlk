@@ -200,6 +200,18 @@ export async function logNoteExported(encounterId, format, method) {
   return appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method });
 }
 
+// Record that a roster/list of records (`scope`) was displayed with `count`
+// rows of PHI visible — the list-view counterpart to logRecordViewed, which
+// only covers a single-encounter panel open. One entry per render, not one
+// per row: a roster is a single "PHI became visible in this context" access
+// event. Reuses the same server-side append/hash-chain as every other narrow
+// wrapper above; the entries live under a synthetic `roster:<scope>` chain so
+// they never touch a real encounter's audit trail.
+export async function logRecordsListed(scope, count) {
+  if (isTauri) return invoke('audit_log_records_listed', { scope, count });
+  return appendAudit(keys.noteAudit(`roster:${scope}`), 'records_listed', { scope, count });
+}
+
 // Verify every record-access audit chain in the database.
 //
 // verifyAuditChain existed with ZERO call sites: the hash was computed on

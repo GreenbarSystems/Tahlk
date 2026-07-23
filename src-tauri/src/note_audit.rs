@@ -210,6 +210,50 @@ pub(crate) fn audit_log_note_exported(
     server_append(&mut conn, &encounter_id, "note_exported", extra)
 }
 
+/// Roster/list scopes that may be recorded as a records-listed access event.
+/// Enforced at the command boundary so a compromised WebView can't stuff an
+/// arbitrary string into the (synthetic) `encounter_id` column and forge an
+/// unbounded set of chains — mirrors patient_audit::VALID_ACTIONS.
+pub(crate) const VALID_LIST_SCOPES: &[&str] = &["sessions", "patients"];
+
+/// Record that a roster/list of records was displayed to the provider — the
+/// list-view counterpart to `record_viewed` (which covers a single-encounter
+/// panel). One entry per view render, carrying how many rows of PHI were
+/// shown, rather than one entry per row: a roster is a single "PHI became
+/// visible in this context" access event, not N of them.
+///
+/// Reuses the same `server_append` mechanism (same table, same hash chain,
+/// same server-derived actor) as every other narrow audit command — it is a
+/// sibling action, not a parallel logging path. The rows land under a
+/// synthetic `roster:<scope>` key so they form their own chain and can never
+/// collide with, or pollute, a real encounter's audit trail.
+#[tauri::command]
+pub(crate) fn audit_log_records_listed(
+    state: State<'_, DbState>,
+    scope: String,
+    count: i64,
+) -> Result<(), AppError> {
+    let mut conn = state.0.get()?;
+    records_listed_conn(&mut conn, &scope, count)
+}
+
+/// Validation + append for `audit_log_records_listed`, split out from the
+/// `#[tauri::command]` wrapper so it is exercisable without a Tauri `State`
+/// harness (mirrors patient_audit's `list_conn` test seam).
+fn records_listed_conn(conn: &mut Connection, scope: &str, count: i64) -> Result<(), AppError> {
+    if !VALID_LIST_SCOPES.contains(&scope) {
+        return Err(AppError::invalid("unknown records-listed scope"));
+    }
+    if count < 0 {
+        return Err(AppError::invalid("records-listed count must be non-negative"));
+    }
+    let scope_key = format!("roster:{scope}");
+    let mut extra = BTreeMap::new();
+    extra.insert("scope".to_string(), json!(scope));
+    extra.insert("count".to_string(), json!(count));
+    server_append(conn, &scope_key, "records_listed", extra)
+}
+
 const LEGACY_LIVE_PREFIX: &str = "note_audit_v1::";
 const LEGACY_ARCHIVE_PREFIX: &str = "note_audit_archive_v1::";
 
@@ -714,6 +758,53 @@ mod tests {
         let mut conn = fresh_db();
         let seq = append(&mut conn, "enc-1", None, "hash-a", 0).unwrap();
         assert_eq!(seq, 1);
+    }
+
+    // ── records_listed (roster/list view access) ────────────────────────
+
+    #[test]
+    fn records_listed_appends_a_records_listed_entry_under_a_roster_key() {
+        let mut conn = fresh_db();
+        records_listed_conn(&mut conn, "sessions", 12).unwrap();
+
+        // Lands under the synthetic roster scope, never a real encounter chain.
+        let rows = entries_from(&conn, "roster:sessions", false).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["action"], "records_listed");
+        assert_eq!(rows[0]["scope"], "sessions");
+        assert_eq!(rows[0]["count"], 12);
+        // Actor is server-derived (defaults to "provider" without a kv row),
+        // never taken from the caller.
+        assert_eq!(rows[0]["actor"], "provider");
+    }
+
+    #[test]
+    fn records_listed_chains_repeated_views_and_stays_off_encounter_chains() {
+        let mut conn = fresh_db();
+        records_listed_conn(&mut conn, "patients", 3).unwrap();
+        records_listed_conn(&mut conn, "patients", 4).unwrap();
+
+        let roster = entries_from(&conn, "roster:patients", false).unwrap();
+        assert_eq!(roster.len(), 2, "each render is its own access event");
+        assert_eq!(roster[1]["prevHash"], roster[0]["entryHash"], "entries chain");
+        // A real encounter id keyed the same as the scope string is untouched.
+        assert!(entries_from(&conn, "patients", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn records_listed_rejects_an_unknown_scope() {
+        let mut conn = fresh_db();
+        let err = records_listed_conn(&mut conn, "billing", 1).unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        // Nothing is written on rejection.
+        assert!(entries_from(&conn, "roster:billing", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn records_listed_rejects_a_negative_count() {
+        let mut conn = fresh_db();
+        let err = records_listed_conn(&mut conn, "sessions", -1).unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
     }
 
     #[test]
