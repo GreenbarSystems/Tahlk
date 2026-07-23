@@ -53,12 +53,15 @@ test('the technical detail is preserved in the diagnostics log, not the toast', 
   // Toast stays plain; the jargon/technical detail is NOT surfaced to the user.
   assert.ok(!shownToast.toLowerCase().includes('mismatch'));
 
-  // ...but support can still see exactly what failed in the opt-in log.
+  // ...but support can still see exactly what failed in the opt-in log. The
+  // technical detail rides recordError's allowlisted `code` channel now, not a
+  // free-text `message` (which recordError drops to keep PHI out of the log).
   const ev = telemetry.getEvents().at(-1);
   assert.equal(ev.event, 'error');
   assert.equal(ev.kind, 'integrity');
-  assert.match(ev.message, /entryHash mismatch/);
-  assert.match(ev.message, /entry 2/);
+  assert.ok(!('message' in ev), 'no free-text message is persisted');
+  assert.match(ev.code, /entryHash mismatch/);
+  assert.match(ev.code, /entry 2/);
 });
 
 test('a missing reason still records a sensible diagnostic and shows the toast', () => {
@@ -67,5 +70,5 @@ test('a missing reason still records a sensible diagnostic and shows the toast',
   assert.equal(shownToast, INTEGRITY_FAILURE_MESSAGE);
   const ev = telemetry.getEvents().at(-1);
   assert.equal(ev.kind, 'integrity');
-  assert.match(ev.message, /integrity check failed/);
+  assert.match(ev.code, /integrity check failed/);
 });
