@@ -12,6 +12,12 @@ pub enum ApiError {
     NotFound,
     BadRequest(String),
     Internal(String),
+    // Managed-key Anthropic proxy upstream failures. Status-only by design: the
+    // upstream response body is never forwarded, so nothing data-like (or the
+    // state of Greenbar's own key) can leak to the client. See anthropic_proxy.rs.
+    BadGateway,          // upstream returned an unmapped 4xx/5xx (incl. its own 401/403)
+    ServiceUnavailable,  // upstream overloaded (Anthropic 529)
+    GatewayTimeout,      // upstream call exceeded the proxy deadline / transport error
 }
 
 impl IntoResponse for ApiError {
@@ -22,6 +28,11 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+            ApiError::BadGateway => (StatusCode::BAD_GATEWAY, "upstream error".to_string()),
+            ApiError::ServiceUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable".to_string())
+            }
+            ApiError::GatewayTimeout => (StatusCode::GATEWAY_TIMEOUT, "upstream timeout".to_string()),
         };
         // Never leak internals to clients in the body; full detail goes to logs.
         if status == StatusCode::INTERNAL_SERVER_ERROR {
