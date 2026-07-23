@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::{AuditEntry, Encounter};
 
@@ -150,6 +151,98 @@ impl EncounterStore for InMemoryStore {
     }
 }
 
+// Registry of device_ids that have been through POST /v1/devices/register.
+// Follows the same `Arc<dyn Trait>` boundary as `EncounterStore`: an in-memory
+// impl here for zero-infra runs, a Postgres impl droppable in later without
+// touching the handler. Its purpose is twofold — make registration auditable
+// (who/when/how-often) and give a place to hang revocation later — NOT to gate
+// issuance: registration is idempotent by device_id (a lost token must be
+// re-mintable), so `register` never errors on "already registered".
+#[async_trait]
+pub trait DeviceStore: Send + Sync {
+    // Idempotent: records a first registration or updates an existing device's
+    // last-seen/count, returning the (post-update) record for auditing.
+    async fn register(&self, device_id: &str) -> anyhow::Result<DeviceRecord>;
+    // Lookup used by tests/auditing; not on the request hot path.
+    async fn get(&self, device_id: &str) -> anyhow::Result<Option<DeviceRecord>>;
+}
+
+// Per-device audit record. `registrations` counts (re-)enrollments so token-loss
+// recovery is observable; timestamps are unix milliseconds (matching api.rs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceRecord {
+    pub first_registered_at: i64,
+    pub last_registered_at: i64,
+    pub registrations: u64,
+}
+
+// Cap on distinct devices the in-memory registry retains. The register endpoint
+// is unauthenticated, so an anonymous caller could otherwise grow this map
+// without bound over time (the per-IP rate limiter bounds the *rate*, not the
+// lifetime total). Oldest-first eviction is safe here precisely because
+// registration is idempotent: an evicted device simply re-registers on its next
+// call and gets a fresh record + token, losing only audit history — acceptable
+// for the zero-infra fallback (real deployments use a durable Postgres impl).
+const MAX_REGISTERED_DEVICES: usize = 100_000;
+
+// `by_id` for O(1) lookup, `insert_order` as a FIFO of ids for eviction. As with
+// `TenantEncounters`, `insert_order` only ever holds ids currently in `by_id`.
+#[derive(Default)]
+struct DeviceRegistry {
+    by_id: HashMap<String, DeviceRecord>,
+    insert_order: VecDeque<String>,
+}
+
+#[derive(Default)]
+pub struct InMemoryDeviceStore {
+    devices: Mutex<DeviceRegistry>,
+}
+
+impl InMemoryDeviceStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl DeviceStore for InMemoryDeviceStore {
+    async fn register(&self, device_id: &str) -> anyhow::Result<DeviceRecord> {
+        let now = now_ms();
+        let mut reg = self.devices.lock();
+        if let Some(rec) = reg.by_id.get_mut(device_id) {
+            rec.last_registered_at = now;
+            rec.registrations += 1;
+            return Ok(rec.clone());
+        }
+        let rec = DeviceRecord {
+            first_registered_at: now,
+            last_registered_at: now,
+            registrations: 1,
+        };
+        reg.by_id.insert(device_id.to_string(), rec.clone());
+        reg.insert_order.push_back(device_id.to_string());
+        while reg.by_id.len() > MAX_REGISTERED_DEVICES {
+            if let Some(oldest) = reg.insert_order.pop_front() {
+                reg.by_id.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        Ok(rec)
+    }
+
+    async fn get(&self, device_id: &str) -> anyhow::Result<Option<DeviceRecord>> {
+        Ok(self.devices.lock().by_id.get(device_id).cloned())
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +380,42 @@ mod tests {
         // property the old composite key could silently violate.
         assert!(!victim.iter().any(|e| e.action == "attacker-entry"));
         assert!(!attacker.iter().any(|e| e.action == "victim-entry"));
+    }
+
+    #[tokio::test]
+    async fn register_records_a_new_device() {
+        let store = InMemoryDeviceStore::new();
+        let rec = store.register("dev-1").await.unwrap();
+        assert_eq!(rec.registrations, 1);
+        assert_eq!(store.get("dev-1").await.unwrap(), Some(rec));
+        assert!(store.get("dev-2").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn re_registration_is_idempotent_and_bumps_the_count() {
+        let store = InMemoryDeviceStore::new();
+        let first = store.register("dev-1").await.unwrap();
+        let second = store.register("dev-1").await.unwrap();
+        assert_eq!(second.registrations, 2, "re-registration bumps the count, never errors");
+        assert_eq!(
+            second.first_registered_at, first.first_registered_at,
+            "first_registered_at is preserved across re-registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn devices_beyond_the_cap_evict_the_oldest_first() {
+        let store = InMemoryDeviceStore::new();
+        for i in 0..=MAX_REGISTERED_DEVICES {
+            store.register(&format!("dev-{i}")).await.unwrap();
+        }
+        assert!(
+            store.get("dev-0").await.unwrap().is_none(),
+            "the oldest device should have been evicted at the cap"
+        );
+        assert!(
+            store.get(&format!("dev-{MAX_REGISTERED_DEVICES}")).await.unwrap().is_some(),
+            "the newest device should still be present"
+        );
     }
 }

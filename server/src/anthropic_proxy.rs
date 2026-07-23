@@ -279,6 +279,9 @@ mod tests {
                 request_timeout: Duration::from_secs(10),
                 max_response_bytes: 1024,
             })),
+            signer: Arc::new(crate::issuer::test_signer()),
+            devices: Arc::new(crate::store::InMemoryDeviceStore::new()),
+            device_limiter: Arc::new(crate::device_rate_limiter()),
         }
     }
 

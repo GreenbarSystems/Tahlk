@@ -4,6 +4,10 @@ use std::time::Duration;
 pub struct Config {
     pub addr: SocketAddr,
     pub auth: AuthConfig,
+    // Token-issuance signing key for POST /v1/devices/register. `main` fails
+    // closed at startup if the key is missing/malformed, mirroring the auth and
+    // Anthropic gates, so the register route never 500s per-request on a bad key.
+    pub issuer: IssuerConfig,
     // S2 fail-closed bind gate: `main` refuses to bind a non-loopback address
     // unless this was explicitly opted into. Sourced from `TAHLK_ALLOW_INSECURE=1`.
     pub allow_insecure_bind: bool,
@@ -12,6 +16,20 @@ pub struct Config {
     // Managed-key Anthropic proxy. `main` fails closed at startup if the API key
     // is missing so the proxy route never serves with an absent key.
     pub anthropic: AnthropicConfig,
+}
+
+// Signing side of the JWT story (the verifier in `auth.rs` is the other half).
+// The register endpoint mints RS256 tokens the existing `JwtVerifier` will
+// accept, so it reuses that verifier's `issuer`/`audience` (see `AuthConfig`)
+// rather than defining its own — only the private key + its `kid` are new here.
+pub struct IssuerConfig {
+    // RS256 private key in PEM (PKCS#8/PKCS#1). Empty => `main` refuses to start.
+    // Sourced from `TAHLK_JWT_SIGNING_KEY`.
+    pub signing_key_pem: String,
+    // `kid` stamped into minted token headers. MUST match a key published in the
+    // JWKS `JwtVerifier` fetches, or the verifier can't select the decoding key.
+    // Sourced from `TAHLK_JWT_SIGNING_KID`.
+    pub signing_kid: String,
 }
 
 // Managed-key Anthropic proxy configuration (Phase 1). The API key is Greenbar's
@@ -81,9 +99,21 @@ pub fn from_env() -> Config {
     Config {
         addr: SocketAddr::new(parse_bind_ip(std::env::var("TAHLK_BIND_ADDR").ok()), port),
         auth,
+        issuer: issuer_from_env(),
         allow_insecure_bind: env_flag("TAHLK_ALLOW_INSECURE"),
         cache: cache_from_env(),
         anthropic: anthropic_from_env(),
+    }
+}
+
+// The signing key comes from `TAHLK_JWT_SIGNING_KEY`; an empty/unset value (or a
+// malformed PEM) is left as-is here and rejected at startup by `main` via
+// `JwtSigner::init` (fail closed), mirroring the JWKS/auth and Anthropic startup
+// gates rather than 500ing per request.
+fn issuer_from_env() -> IssuerConfig {
+    IssuerConfig {
+        signing_key_pem: std::env::var("TAHLK_JWT_SIGNING_KEY").unwrap_or_default(),
+        signing_kid: std::env::var("TAHLK_JWT_SIGNING_KID").unwrap_or_default(),
     }
 }
 

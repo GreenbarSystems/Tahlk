@@ -53,6 +53,12 @@ cd server
 export TAHLK_JWT_ISSUER="https://your-idp.example/"
 export TAHLK_JWT_AUDIENCE="tahlk-sync"          # default; override if needed
 export TAHLK_JWKS_URL="https://your-idp.example/.well-known/jwks.json"
+# Token issuance for POST /v1/devices/register. The RS256 private key whose
+# PUBLIC half is published in the JWKS above under $TAHLK_JWT_SIGNING_KID, so the
+# tokens it mints verify against the same JWKS. Startup fails closed if either is
+# missing/malformed.
+export TAHLK_JWT_SIGNING_KEY="$(cat signing-key.pem)"
+export TAHLK_JWT_SIGNING_KID="tahlk-desktop-2026"
 # Binding a non-loopback address requires an explicit opt-in, since TLS is
 # terminated upstream (see below):
 # export TAHLK_ALLOW_INSECURE=1
@@ -74,6 +80,15 @@ cargo run
 ```bash
 # health (unauthenticated — for orchestrator probes)
 curl localhost:8080/healthz
+
+# device registration (unauthenticated — a first-time device has no token yet).
+# Returns a long-lived (90-day) bearer token whose tenant_id IS the device_id;
+# idempotent by device_id, and per-source-IP rate limited. Use the returned
+# token as $TOKEN for the /v1 calls below.
+curl -X POST localhost:8080/v1/devices/register \
+  -H 'Content-Type: application/json' \
+  -d '{"device_id":"a-random-client-generated-opaque-id"}'
+# -> {"token":"<jwt>","expires_at":<unix-seconds>}
 
 # All /v1 requests require a valid bearer JWT. tenant/provider come from the
 # token's claims — the x-tenant-id header is no longer trusted. TOKEN below is a
