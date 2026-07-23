@@ -36,6 +36,7 @@ use crate::errors::AppError;
 
 mod audio;
 mod audio_crypto;
+mod audit_mac;
 mod auth;
 mod baa;
 mod config_audit;
@@ -292,6 +293,7 @@ pub fn run() {
             note_history::note_history_list_encounter_ids,
             note_history::history_note_generated,
             note_history::history_note_edited,
+            note_history::verify_history_macs,
             note_audit::audit_list,
             note_audit::audit_archive_list,
             note_audit::audit_log_record_viewed,
@@ -300,6 +302,7 @@ pub fn run() {
             note_audit::audit_log_audio_deleted,
             note_audit::audit_log_note_exported,
             note_audit::audit_log_records_listed,
+            note_audit::verify_audit_macs,
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,

@@ -51,11 +51,25 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              notes         TEXT NOT NULL DEFAULT '',
              prev_hash     TEXT,
              entry_hash    TEXT NOT NULL,
+             chain_mac     TEXT,
              UNIQUE (encounter_id, seq)
          );
          CREATE INDEX IF NOT EXISTS note_history_enc_idx
              ON note_history (encounter_id, seq);",
-    )
+    )?;
+    // Migration: add the keyed MAC anchor column to pre-existing tables
+    // (audit_mac.rs). Nullable — rows written before this feature (and rows
+    // written when the MAC key could not be resolved) carry NULL and are
+    // treated as legacy/unverifiable by `audit_mac::verify_chain`.
+    let has_chain_mac: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('note_history') WHERE name = 'chain_mac'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_chain_mac == 0 {
+        conn.execute_batch("ALTER TABLE note_history ADD COLUMN chain_mac TEXT;")?;
+    }
+    Ok(())
 }
 
 // One-shot migration of note_history_v1::<id> KV blobs into the relational
@@ -279,25 +293,34 @@ fn insert_history_row(
         params![encounter_id],
         |r| r.get(0),
     )?;
-    let last_hash: Option<String> = conn
+    // Fetch the prior row's entry_hash (for the chain check) AND its chain_mac
+    // (to chain this row's keyed MAC) in one read.
+    let prev: Option<(String, Option<String>)> = conn
         .query_row(
-            "SELECT entry_hash FROM note_history \
+            "SELECT entry_hash, chain_mac FROM note_history \
              WHERE encounter_id = ?1 AND seq = ?2",
             params![encounter_id, next_seq - 1],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
+    let last_hash: Option<String> = prev.as_ref().map(|(h, _)| h.clone());
+    let prev_mac: Option<String> = prev.as_ref().and_then(|(_, m)| m.clone());
     if last_hash.as_deref() != prev_hash {
         return Err(AppError::invalid(format!(
             "prev_hash chain mismatch (expected {:?}, got {:?})",
             last_hash, prev_hash
         )));
     }
+    // Keyed MAC anchor (audit_mac.rs): binds this row to the keychain-derived
+    // MAC key so a wholesale-substituted or edited chain fails verification.
+    // Best-effort — if the key can't be resolved the row is stored unanchored
+    // (NULL) rather than blocking the write; see audit_mac::compute_best_effort.
+    let chain_mac = crate::audit_mac::compute_best_effort(entry_hash, prev_mac.as_deref());
     conn.execute(
         "INSERT INTO note_history \
-         (encounter_id, seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-        params![encounter_id, next_seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash],
+         (encounter_id, seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash, chain_mac) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![encounter_id, next_seq, action, actor, timestamp, content_hash, notes, prev_hash, entry_hash, chain_mac],
     )?;
     Ok(next_seq)
 }
@@ -399,6 +422,39 @@ pub(crate) fn history_note_edited(
     let entry = server_history_append(&tx, &encounter_id, "edited", &actor, &content_hash, "")?;
     tx.commit()?;
     Ok(entry)
+}
+
+/// Verify the KEYED MAC anchor for one encounter's note-history chain
+/// (audit_mac.rs). This is the authoritative, forgery-resistant integrity check:
+/// unlike `verifyHistoryChain` in JS (which only proves the stored rows are
+/// internally self-consistent), this recomputes each row's `chain_mac` with the
+/// keychain-derived MAC key, so a wholesale-substituted or edited chain — which
+/// a self-referential hash chain cannot detect — fails here.
+///
+/// Returns `{ ok, brokenAt, reason, legacySkipped }`, shaped to match what
+/// `reportIntegrityFailure` (integrityAlert.js) consumes.
+#[tauri::command]
+pub(crate) fn verify_history_macs(
+    state: State<'_, DbState>,
+    encounter_id: String,
+) -> Result<Value, AppError> {
+    let conn = state.conn()?;
+    let key = crate::audit_mac::mac_key()?;
+    let mut stmt = conn.prepare(
+        "SELECT seq, entry_hash, chain_mac FROM note_history \
+         WHERE encounter_id = ?1 ORDER BY seq",
+    )?;
+    let rows: Vec<(i64, String, Option<String>)> = stmt
+        .query_map(params![encounter_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let verdict =
+        crate::audit_mac::verify_chain(&key, rows.iter().map(|(s, h, m)| (*s, h.as_str(), m.as_deref())));
+    Ok(json!({
+        "ok": verdict.ok,
+        "brokenAt": verdict.broken_at,
+        "reason": verdict.reason,
+        "legacySkipped": verdict.legacy_skipped,
+    }))
 }
 
 // Removed from the invoke handler — callers must use the narrow commands above
