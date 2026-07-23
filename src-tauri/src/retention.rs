@@ -115,41 +115,141 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-/// Compute the retention cutoff date by subtracting `years` from `today`.
+/// Age of majority — the same 18 in Arizona as in every US state. Used by the
+/// minor-record retention extension below.
+const AGE_OF_MAJORITY_YEARS: i64 = 18;
+
+/// Shift a `YYYY-MM-DD` date by `delta` years (negative shifts earlier).
 ///
-/// `today` must be in `YYYY-MM-DD` format (the same format used for
-/// `encounters.encounter_date`). ISO date strings sort lexicographically, so
-/// `encounter_date < cutoff` gives the correct "older than N years" filter.
+/// Dates are kept as `YYYY-MM-DD` strings because that is the format of
+/// `encounters.encounter_date` and ISO strings sort lexicographically, so
+/// `a < b` is a correct date comparison.
 ///
-/// Feb 29 is the one case plain year subtraction gets wrong. The original
-/// implementation copied `-MM-DD` verbatim, so on 2028-02-29 with the default
-/// 7-year window it produced `"2021-02-29"` — a date that does not exist.
-/// Lexicographic comparison then treats `"2021-02-28" < "2021-02-29"` as true,
-/// so a record dated 2021-02-28 was destroyed after 6 years and 364 days:
-/// one day EARLY. With the default window that fires on every Feb 29, since
-/// 2028→2021, 2032→2025 and 2036→2029 are all non-leap.
-///
-/// Rolls FORWARD to Mar 1 rather than back to Feb 28, so the residual error is
-/// one day of over-retention. Retaining a record slightly too long is a
-/// recoverable policy deviation; destroying one early is not.
-fn cutoff_date(today: &str, years: i64) -> Option<String> {
+/// Feb 29 is the one case plain year arithmetic gets wrong. Verbatim copying of
+/// `-MM-DD` onto a non-leap target year produces e.g. `"2021-02-29"`, a date
+/// that does not exist; lexicographic comparison then treats `"2021-02-28" <
+/// "2021-02-29"` as true, expiring a record one day EARLY. We roll FORWARD to
+/// Mar 1 instead. In BOTH directions this errs toward LONGER retention — a
+/// later cutoff keeps more records, a later minor floor holds a record longer —
+/// which is the safe side: over-retention is a recoverable policy deviation,
+/// destroying a record early is not.
+fn shift_years(date: &str, delta: i64) -> Option<String> {
     // `get` rather than direct slicing: a multi-byte character would make
     // byte-index slicing panic, and this parses caller-adjacent data.
-    let year: i64 = today.get(0..4)?.parse().ok()?;
-    let month: u32 = today.get(5..7)?.parse().ok()?;
-    let day: u32 = today.get(8..10)?.parse().ok()?;
-    if today.get(4..5) != Some("-") || today.get(7..8) != Some("-") {
+    let year: i64 = date.get(0..4)?.parse().ok()?;
+    let month: u32 = date.get(5..7)?.parse().ok()?;
+    let day: u32 = date.get(8..10)?.parse().ok()?;
+    if date.get(4..5) != Some("-") || date.get(7..8) != Some("-") {
         return None;
     }
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
-    let target = year - years;
+    let target = year + delta;
     if month == 2 && day == 29 && !is_leap_year(target) {
         return Some(format!("{target:04}-03-01"));
     }
     Some(format!("{target:04}-{month:02}-{day:02}"))
+}
+
+/// Compute the retention cutoff date by subtracting `years` from `today`.
+/// A signed encounter is eligible for destruction when its `encounter_date`
+/// sorts strictly before this cutoff (the default, patient-agnostic window).
+fn cutoff_date(today: &str, years: i64) -> Option<String> {
+    shift_years(today, -years)
+}
+
+/// Decide whether an encounter that has already passed the default
+/// `encounter_date < cutoff` window is genuinely eligible for destruction once
+/// the minor-record retention extension is applied.
+///
+/// AZ background: A.R.S. §12-2297 (general medical records, 6 years) and A.R.S.
+/// §32-2936 (physician board rule, 7 years) set the adult floor, but a minor's
+/// record must be preserved longer. The widely-followed practice is to hold a
+/// minor's record until they reach the age of majority (18) and only THEN run
+/// the ordinary retention clock. We model that floor as `DOB + 18 + <retention
+/// window>` years and keep the LATER of it and the ordinary `encounter_date +
+/// window`. This is deliberately conservative (the enhancement is defensive,
+/// not a precisely-mandated formula, and the 7-year default already carries
+/// margin) — when in doubt we retain longer.
+///
+/// Returns `true` (eligible, exactly as today) whenever DOB is absent or
+/// unparseable, or the patient was already an adult at the encounter. That
+/// keeps the unset and adult cases byte-for-byte the current behavior; only a
+/// genuine minor-at-encounter record is ever held back.
+fn minor_extension_allows_destruction(
+    dob: Option<&str>,
+    encounter_date: &str,
+    today: &str,
+    years: i64,
+) -> bool {
+    let dob = match dob {
+        Some(d) => d,
+        None => return true,
+    };
+    // If the patient had already turned 18 by the encounter, the ordinary clock
+    // is correct and nothing changes.
+    let majority = match shift_years(dob, AGE_OF_MAJORITY_YEARS) {
+        Some(m) => m,
+        None => return true, // unparseable DOB → fall back to current behavior
+    };
+    if encounter_date >= majority.as_str() {
+        return true;
+    }
+    // Minor at encounter: retain until they turn 18 plus the standard window.
+    match shift_years(dob, AGE_OF_MAJORITY_YEARS + years) {
+        Some(floor) => today >= floor.as_str(),
+        None => true,
+    }
+}
+
+/// A signed encounter eligible for retention-based destruction.
+struct Candidate {
+    id: String,
+    encounter_date: String,
+    patient_alias: Option<String>,
+}
+
+/// Signed encounters past the default retention cutoff that are ALSO past any
+/// minor-record retention extension. The single source of truth shared by the
+/// list (preview) and destroy paths, so the two can never disagree about what
+/// is eligible. `today` is the server-derived current date (`YYYY-MM-DD`).
+///
+/// The `LEFT JOIN` means an encounter with no linked patient row — the common
+/// legacy case — yields `dob = NULL` and is treated exactly as today.
+fn eligible_candidates(
+    conn: &Connection,
+    cutoff: &str,
+    today: &str,
+    years: i64,
+) -> Result<Vec<Candidate>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.encounter_date, e.patient_alias, p.dob \
+         FROM encounters e LEFT JOIN patients p ON p.id = e.patient_id \
+         WHERE e.encounter_date < ?1 AND e.status = 'signed' \
+         ORDER BY e.encounter_date ASC",
+    )?;
+    let rows = stmt.query_map(params![cutoff], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, encounter_date, patient_alias, dob) = row?;
+        if minor_extension_allows_destruction(dob.as_deref(), &encounter_date, today, years) {
+            out.push(Candidate {
+                id,
+                encounter_date,
+                patient_alias,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Read the configured record-retention window. Defaults to 7 years when the
@@ -266,24 +366,22 @@ pub(crate) fn retention_list_candidates(
     let years = retention_years(&conn);
 
     let today_iso = crate::time::utc_now_iso();
-    let cutoff = cutoff_date(&today_iso[..10], years)
+    let today = &today_iso[..10];
+    let cutoff = cutoff_date(today, years)
         .ok_or_else(|| AppError::invalid("internal: utc_now_iso did not produce YYYY-MM-DD"))?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, encounter_date, patient_alias, status \
-         FROM encounters WHERE encounter_date < ?1 AND status = 'signed' \
-         ORDER BY encounter_date ASC",
-    )?;
-    let rows: Vec<Value> = stmt
-        .query_map(params![cutoff], |r| {
-            Ok(json!({
-                "id":             r.get::<_, String>(0)?,
-                "encounter_date": r.get::<_, String>(1)?,
-                "patient_alias":  r.get::<_, Option<String>>(2)?,
-                "status":         r.get::<_, String>(3)?,
-            }))
-        })?
-        .filter_map(|r| r.ok())
+    // Only `status = 'signed'` rows survive the query; the extension only ever
+    // shrinks this set (a minor's record is held back), never grows it.
+    let rows: Vec<Value> = eligible_candidates(&conn, &cutoff, today, years)?
+        .into_iter()
+        .map(|c| {
+            json!({
+                "id":             c.id,
+                "encounter_date": c.encounter_date,
+                "patient_alias":  c.patient_alias,
+                "status":         "signed",
+            })
+        })
         .collect();
     Ok(rows)
 }
@@ -341,15 +439,12 @@ pub(crate) async fn retention_destroy_eligible(
         )));
     }
 
-    let ids: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM encounters WHERE encounter_date < ?1 AND status = 'signed'",
-        )?;
-        let result: Vec<String> = stmt.query_map(params![cutoff], |r| r.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        result
-    };
+    // Same eligibility source as the preview, so a minor's record held back
+    // there is held back here too.
+    let ids: Vec<String> = eligible_candidates(&conn, &cutoff, today, years)?
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
 
     // Single outer transaction — all encounter deletions are atomic.
     {
@@ -429,6 +524,159 @@ mod tests {
         // and no adjustment should happen.
         assert_eq!(cutoff_date("2028-02-29", 4), Some("2024-02-29".to_string()));
         assert_eq!(cutoff_date("2028-02-29", 8), Some("2020-02-29".to_string()));
+    }
+
+    // ── Minor-record retention extension (L3) ───────────────────────────
+    //
+    // A minor's record is held until the patient turns 18 and the ordinary
+    // retention window then elapses (floor = DOB + 18 + window). The extension
+    // may only ever SHRINK the destroyable set, so the DOB-unset and
+    // adult-at-encounter cases must stay byte-for-byte the current behavior.
+
+    #[test]
+    fn shift_years_adds_and_handles_leap_days_forward() {
+        // Adult direction reused by the majority/floor math.
+        assert_eq!(shift_years("2000-01-15", 18), Some("2018-01-15".to_string()));
+        assert_eq!(shift_years("2000-01-15", 25), Some("2025-01-15".to_string()));
+        // Feb 29 + 18y lands on a non-leap 2026 → rolls forward, never back.
+        assert_eq!(shift_years("2008-02-29", 18), Some("2026-03-01".to_string()));
+        // Lands on a leap year → preserved exactly.
+        assert_eq!(shift_years("2008-02-29", 16), Some("2024-02-29".to_string()));
+    }
+
+    #[test]
+    fn a_missing_dob_is_eligible_exactly_as_today() {
+        // The common/legacy case: no linked patient or no DOB recorded.
+        assert!(minor_extension_allows_destruction(None, "2015-01-01", "2026-07-20", 7));
+    }
+
+    #[test]
+    fn an_unparseable_dob_falls_back_to_current_behavior() {
+        assert!(minor_extension_allows_destruction(Some("not-a-date"), "2015-01-01", "2026-07-20", 7));
+    }
+
+    #[test]
+    fn an_adult_at_encounter_is_eligible_exactly_as_today() {
+        // DOB 1980 → adult (18 in 1998) well before a 2015 encounter, so the
+        // ordinary window governs and the record is destroyed as it is today.
+        assert!(minor_extension_allows_destruction(
+            Some("1980-01-01"),
+            "2015-01-01",
+            "2026-07-20",
+            7
+        ));
+    }
+
+    #[test]
+    fn a_minor_at_encounter_is_retained_until_the_extended_floor() {
+        // DOB 2010, encounter at age 5. Floor = 2010 + 18 + 7 = 2035-01-01.
+        // Today (2026) is well before the floor → NOT eligible, held back even
+        // though the default 7-year window (cutoff 2019) alone would expire it.
+        assert!(!minor_extension_allows_destruction(
+            Some("2010-01-01"),
+            "2015-01-01",
+            "2026-07-20",
+            7
+        ));
+    }
+
+    #[test]
+    fn a_former_minor_becomes_eligible_once_the_floor_passes() {
+        // DOB 1990, encounter at age 15. Floor = 1990 + 18 + 7 = 2015-01-01.
+        // Today (2026) is past the floor → eligible again.
+        assert!(minor_extension_allows_destruction(
+            Some("1990-01-01"),
+            "2005-01-01",
+            "2026-07-20",
+            7
+        ));
+        // One day before the floor, the same record is still retained.
+        assert!(!minor_extension_allows_destruction(
+            Some("1990-01-01"),
+            "2005-01-01",
+            "2014-12-31",
+            7
+        ));
+    }
+
+    fn retention_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE encounters (
+                 id             TEXT PRIMARY KEY,
+                 encounter_date TEXT NOT NULL,
+                 patient_alias  TEXT,
+                 patient_id     TEXT,
+                 status         TEXT NOT NULL DEFAULT 'draft'
+             );
+             CREATE TABLE patients (
+                 id  TEXT PRIMARY KEY,
+                 dob TEXT
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn add_signed_encounter(conn: &Connection, id: &str, date: &str, patient_id: Option<&str>) {
+        conn.execute(
+            "INSERT INTO encounters (id, encounter_date, patient_id, status) \
+             VALUES (?1, ?2, ?3, 'signed')",
+            params![id, date, patient_id],
+        )
+        .unwrap();
+    }
+
+    fn add_patient(conn: &Connection, id: &str, dob: Option<&str>) {
+        conn.execute(
+            "INSERT INTO patients (id, dob) VALUES (?1, ?2)",
+            params![id, dob],
+        )
+        .unwrap();
+    }
+
+    fn eligible_ids(conn: &Connection, today: &str, years: i64) -> Vec<String> {
+        let cutoff = cutoff_date(today, years).unwrap();
+        eligible_candidates(conn, &cutoff, today, years)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[test]
+    fn eligible_candidates_mixes_regression_adult_and_minor_cases() {
+        let conn = retention_db();
+        // No linked patient → dob NULL → destroyed exactly as today.
+        add_signed_encounter(&conn, "enc-legacy", "2015-01-01", None);
+        // Adult at encounter → ordinary window → destroyed as today.
+        add_patient(&conn, "pt-adult", Some("1980-01-01"));
+        add_signed_encounter(&conn, "enc-adult", "2015-01-01", Some("pt-adult"));
+        // Minor at encounter, floor (2035) still ahead → retained.
+        add_patient(&conn, "pt-minor", Some("2010-01-01"));
+        add_signed_encounter(&conn, "enc-minor", "2015-01-01", Some("pt-minor"));
+        // Former minor whose floor (2015) has passed → eligible again.
+        add_patient(&conn, "pt-grown", Some("1990-01-01"));
+        add_signed_encounter(&conn, "enc-grown", "2005-01-01", Some("pt-grown"));
+
+        let ids = eligible_ids(&conn, "2026-07-20", 7);
+        assert!(ids.contains(&"enc-legacy".to_string()), "unset DOB must not regress");
+        assert!(ids.contains(&"enc-adult".to_string()), "adult-at-encounter must not regress");
+        assert!(ids.contains(&"enc-grown".to_string()), "past-floor minor is eligible again");
+        assert!(
+            !ids.contains(&"enc-minor".to_string()),
+            "a minor whose extended floor is still ahead must be held back"
+        );
+    }
+
+    #[test]
+    fn a_dob_linked_patient_with_a_missing_row_is_treated_as_unset() {
+        // patient_id points at no patients row → LEFT JOIN yields dob NULL →
+        // current behavior. Proves the join can't silently drop a candidate.
+        let conn = retention_db();
+        add_signed_encounter(&conn, "enc-dangling", "2015-01-01", Some("pt-gone"));
+        let ids = eligible_ids(&conn, "2026-07-20", 7);
+        assert_eq!(ids, vec!["enc-dangling".to_string()]);
     }
 
     #[test]
