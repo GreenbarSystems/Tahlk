@@ -232,6 +232,7 @@ pub fn run() {
             note_audit::audit_log_note_signed,
             note_audit::audit_log_audio_deleted,
             note_audit::audit_log_note_exported,
+            note_audit::audit_log_records_listed,
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,

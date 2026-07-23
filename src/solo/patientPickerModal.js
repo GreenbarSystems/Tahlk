@@ -3,6 +3,7 @@
 // Nodes are built explicitly (no innerHTML) to match confirmModal.js convention.
 
 import { patientsRepo } from '../data/patientsRepo.js';
+import { logRecordsListed } from '../core/auditLog.js';
 import { createModal } from '../platform/modal.js';
 
 export function pickPatient() {
@@ -55,6 +56,13 @@ export function pickPatient() {
     card.appendChild(listEl);
 
     patientsRepo.list().then(patients => {
+      // The picker discloses the whole patient roster (alias + DOB) in the
+      // new-session flow — a PHI access event outside the per-encounter panel.
+      // Logged once when the list loads, not per keystroke of the filter below.
+      if (patients.length > 0) {
+        logRecordsListed('patients', patients.length).catch(() => {});
+      }
+
       function renderList(query) {
         const q = query.trim().toLowerCase();
         const filtered = q

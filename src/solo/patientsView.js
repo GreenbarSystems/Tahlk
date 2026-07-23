@@ -4,6 +4,7 @@
 // wire step that attaches handlers and re-renders on mutation.
 
 import { patientsRepo } from '../data/patientsRepo.js';
+import { logRecordsListed } from '../core/auditLog.js';
 import { genId, nowISO, displayDateShort, escapeHtml, toast } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { confirmModal } from './confirmModal.js';
@@ -13,6 +14,15 @@ import { openImportModal } from './patientsImport.js';
 export async function renderPatientsView() {
   const patients = await patientsRepo.list().catch(() => []);
   const count = patients.length;
+
+  // Record that this patient roster (alias + DOB + notes per row) was
+  // displayed — one access event for the whole list, not one per row. Skipped
+  // when empty: nothing was disclosed. The client-side search below only
+  // hides/shows already-rendered rows (no re-fetch), so it does not re-disclose
+  // PHI and is deliberately not logged again per keystroke.
+  if (count > 0) {
+    await logRecordsListed('patients', count);
+  }
 
   return `
     <div class="patients-page">
