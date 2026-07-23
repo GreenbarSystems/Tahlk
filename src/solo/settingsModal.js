@@ -180,15 +180,17 @@ export async function renderSettings() {
       <section class="settings-section">
         <h3>Agreements (BAA &amp; EULA)</h3>
         <p class="settings-desc">
-          Using Tahlk with real patient information is covered by two agreements between your organization
-          and <strong>Greenbar Systems</strong>, the maker of Tahlk: a <strong>Business Associate Agreement
-          (BAA)</strong> setting out how protected health information is handled under HIPAA, and an
-          <strong>End User License Agreement (EULA)</strong> covering your use of the app. Confirm below
-          once both are in place. During the current beta (test data only), this is optional.
+          Tahlk generates your notes through <strong>Greenbar Systems'</strong> managed,
+          HIPAA-covered infrastructure — Greenbar holds the Anthropic account and routes every
+          transcript through a zero-data-retention (ZDR) subcontractor arrangement. Your use is
+          governed by a <strong>Business Associate Agreement (BAA)</strong> between your practice
+          and Greenbar (Greenbar is your business associate; no Anthropic account of your own is
+          involved) and Greenbar's <strong>End User License Agreement (EULA)</strong>. You accept
+          these during setup; you can review your acknowledgment here at any time.
         </p>
         <div class="baa-status-row">
           <span class="baa-status-pill ${baaAcked ? 'baa-status-pill--ok' : 'baa-status-pill--danger'}">
-            ${baaAcked ? 'Confirmed' : 'Not confirmed'}
+            ${baaAcked ? 'Accepted' : 'Not accepted'}
           </span>
           ${baaAcked && baaAck.acknowledged_at
             ? `<span class="settings-desc">on ${escapeHtml(baaAck.acknowledged_at)}${baaAck.provider_id ? ` by ${escapeHtml(baaAck.provider_id)}` : ''}</span>`
@@ -196,7 +198,7 @@ export async function renderSettings() {
         </div>
         <label class="baa-toggle">
           <input type="checkbox" id="s-baa-ack" ${baaAcked ? 'checked' : ''} />
-          <span>My organization has accepted Greenbar Systems' BAA and EULA.</span>
+          <span>I accept Greenbar Systems' BAA and EULA governing its processing of protected health information.</span>
         </label>
       </section>
 
@@ -543,14 +545,11 @@ export function wireSettings() {
   });
 
   // BAA toggle. Setting = write ack row with a fresh timestamp; unsetting =
-  // clear the row. Copy is deliberately silent on whether this currently
-  // blocks note generation — that's a Rust-side flag (baa::GATE_ENABLED,
-  // see ADR 0003) this module can't see, and hardcoding "enabled/disabled"
-  // language here is exactly what went stale when the beta gate was
-  // soft-disabled. When the gate IS enforced, the Rust side still rejects
-  // note generation the instant the row is missing, so a user can revoke and
-  // immediately verify the app refuses to send further transcripts — no
-  // restart or refresh required.
+  // clear the row. The Rust gate is enabled and enforced (baa::GATE_ENABLED =
+  // true, see ADR 0006), so this acknowledgment is normally recorded at
+  // onboarding; this toggle is a re-confirm / revoke surface. Clearing the row
+  // makes the Rust side reject the next note generation immediately (no restart
+  // or refresh required), which is why the revoke path warns before clearing.
   document.getElementById('s-baa-ack')?.addEventListener('change', async e => {
     const checked = !!e.target.checked;
     try {

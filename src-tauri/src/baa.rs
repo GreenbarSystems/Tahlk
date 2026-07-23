@@ -1,17 +1,19 @@
-//! Anthropic BAA acknowledgment gate (fixes audit finding C2).
+//! BAA/EULA acknowledgment gate (fixes audit finding C2).
 //!
-//! Under 45 CFR §164.502(e), Anthropic is a "business associate" when Tahlk
-//! transmits PHI-bearing transcripts to their API. Anthropic *does* offer a
-//! BAA-eligible tier, but a standard consumer API key is NOT covered by it —
-//! the covered entity must have executed a BAA with Anthropic separately and
-//! be using the account/endpoint that BAA names. Without that, every note
-//! generation is a §164.502(a)(1) impermissible disclosure.
+//! Under 45 CFR §164.502(e), transmitting PHI-bearing transcripts for note
+//! generation is a disclosure to a business associate. Tahlk no longer uses a
+//! per-provider Anthropic key (BYOK is retired): all note generation flows
+//! through Greenbar's managed proxy, which holds Greenbar's own ZDR-covered
+//! Anthropic key. Greenbar is the practice's business associate (with Anthropic
+//! as Greenbar's subcontractor), and that relationship is governed by a BAA +
+//! EULA between the practice and Greenbar — not by any Anthropic account the
+//! provider owns.
 //!
-//! We can't verify Anthropic's contracts from the client. What we CAN do is
-//! refuse to transmit until the provider has affirmatively attested that the
-//! account they entered IS covered — and record the attestation with a
-//! timestamp + provider identity so the practice has an audit trail if HHS
-//! ever asks.
+//! What the gate does is refuse to transmit until the provider has
+//! affirmatively accepted Greenbar's BAA + EULA — and records that acceptance
+//! with a timestamp + provider identity so the practice has an audit trail if
+//! HHS ever asks. The acceptance is normally collected at onboarding (a
+//! blocking step) and can be re-confirmed or revoked from Settings.
 //!
 //! Storage lives in the KV table under `note_settings_v1::baa_ack` so the
 //! ack is encrypted at rest with the rest of the DB (see `db` module).
@@ -28,12 +30,12 @@
 //! }
 //! ```
 //!
-//! We deliberately do NOT store the API key or any Anthropic account
-//! identifier here — the covered entity can inspect the KV row and share
-//! that during an audit without leaking the credential.
+//! The row holds no credential of any kind (there is no user-owned Anthropic
+//! key or account under the managed proxy) — the covered entity can inspect
+//! and share it during an audit without leaking anything sensitive.
 //!
-//! Bumping `ATTESTATION_VERSION` forces the user through the modal again
-//! (e.g., if we materially change what they're attesting to).
+//! Bumping `ATTESTATION_VERSION` forces the user to re-accept the agreements
+//! (e.g., if we materially change what they're accepting).
 //!
 //! The gate is enforced in `notes::generate_note` before ANY network I/O so
 //! a compromised WebView can't bypass it by skipping the JS-side modal.
@@ -52,16 +54,14 @@ use crate::DbState;
 pub(crate) const BAA_ACK_KEY: &str = "note_settings_v1::baa_ack";
 
 /// Runtime toggle for gate ENFORCEMENT (storage, Settings UI, and this
-/// module's tests are unaffected either way). Set to `false` for the current
-/// beta phase — see ADR 0003 (`docs/adr/0003-disable-baa-gate-for-beta.md`):
-/// testers use synthetic/test data only until Tahlk's managed Anthropic key
-/// (with an org-level BAA) ships, so per-provider BYOK attestation is pure
-/// friction with no compliance benefit right now.
+/// module's tests are unaffected either way). Enabled and blocking — see
+/// ADR 0006 (`docs/adr/0006-enforce-baa-gate-managed-key.md`), which supersedes
+/// ADR 0003. The managed-key proxy has shipped and onboarding now requires the
+/// BAA/EULA acknowledgment as a blocking step, so `require_ack` rejects note
+/// generation with `AppError::BaaRequired` whenever the ack is missing or stale.
 ///
-/// MUST be flipped back to `true` before any real PHI reaches this build —
-/// either once the managed-key proxy lands, or sooner if beta scope changes.
-/// This is a single choke-point flag, not a deletion: re-enabling is a
-/// one-line change plus restoring the onboarding step (see the ADR).
+/// The `resolve_ack` disabled-gate branch is retained (and unit-tested) only as
+/// a single choke-point kill switch; production runs with this `true`.
 pub(crate) const GATE_ENABLED: bool = true;
 
 /// Attestation schema version. Bumping this forces the user through the
@@ -139,10 +139,10 @@ fn resolve_ack(stored: Option<BaaAck>, gate_enabled: bool) -> Result<BaaAck, App
 }
 
 /// The single choke point every PHI-egress command must call before doing
-/// network I/O. Returns `AppError::BaaRequired` if the ack is missing or
-/// stale AND `GATE_ENABLED` is true, so the JS side can surface a specific
-/// "open BAA modal" CTA. See `GATE_ENABLED`'s doc comment for why this is
-/// currently non-blocking.
+/// network I/O. With `GATE_ENABLED` true (the production state), returns
+/// `AppError::BaaRequired` whenever the ack is missing or stale, so the JS side
+/// can surface a specific "review your agreements in Settings" CTA. See
+/// `GATE_ENABLED`'s doc comment and ADR 0006.
 pub(crate) fn require_ack(state: &State<DbState>) -> Result<BaaAck, AppError> {
     resolve_ack(read_ack(state)?, GATE_ENABLED)
 }
@@ -326,7 +326,7 @@ mod tests {
         // is un-acknowledged — the app must NOT crash.
     }
 
-    // ── resolve_ack: gate enabled/disabled decision logic (ADR 0003) ────────
+    // ── resolve_ack: gate enabled/disabled decision logic (ADR 0006) ────────
 
     fn sample_ack(provider_id: &str) -> BaaAck {
         BaaAck {

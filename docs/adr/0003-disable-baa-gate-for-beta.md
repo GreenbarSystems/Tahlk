@@ -1,7 +1,14 @@
 # ADR 0003 — Disable the BAA acknowledgment gate for the test-data-only beta
 
-- **Status:** Accepted — 2026-07-06
+- **Status:** Superseded by [ADR 0006](0006-enforce-baa-gate-managed-key.md) — 2026-07-23
 - **Deciders:** product owner + engineering
+
+> **Superseded (2026-07-23).** The managed-key proxy has shipped (BYOK retired)
+> and unfreeze criterion #1 below is met. `baa::GATE_ENABLED` is now `true`, the
+> gate blocks note generation until the BAA/EULA is acknowledged, and onboarding
+> collects that acknowledgment as a blocking step. This ADR is retained as a
+> historical record; see ADR 0006 for the current decision. Everything below
+> describes the prior (beta) state and no longer reflects the code.
 
 ## Context
 

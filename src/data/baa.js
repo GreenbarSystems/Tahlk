@@ -1,8 +1,9 @@
 // BAA acknowledgment repository — thin JS wrapper over the Rust `baa_ack_*`
-// commands. The gate itself is enforced in Rust (see src-tauri/src/baa.rs)
-// before any Anthropic network I/O; this file exists so the onboarding
-// modal and Settings pane can *reflect* and *update* that state without
-// touching the KV table directly.
+// commands. The gate is enabled and enforced in Rust (see src-tauri/src/baa.rs,
+// GATE_ENABLED = true) before any note-generation network I/O; this file exists
+// so the onboarding step and Settings pane can *reflect* and *update* that
+// state without touching the KV table directly. Onboarding records the ack
+// (blocking), and Settings re-confirms or revokes it.
 //
 // The write-only contract lives in Rust: JS supplies `acknowledged`,
 // `acknowledged_at` (ISO-8601 string), and `provider_id`. Rust stamps
