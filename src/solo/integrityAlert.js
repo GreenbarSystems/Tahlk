@@ -17,9 +17,16 @@ export const INTEGRITY_FAILURE_MESSAGE =
   'This signed note may have been changed on disk. Contact support before relying on it.';
 
 // Record the technical detail (opt-in, PHI-scrubbed) and show the plain-language toast.
+//
+// The verifier's `reason` is a fixed, developer-controlled discriminator
+// ("entryHash mismatch", "prevHash mismatch", …) with no PHI, so it is passed
+// through recordError's allowlisted `code` channel — the one field it persists
+// for exactly this kind of bounded, non-free-text detail. It is deliberately
+// NOT passed as a raw error message: recordError drops free-text messages to
+// keep PHI out of the exportable diagnostics log.
 export function reportIntegrityFailure(integrity) {
   const reason = integrity && integrity.reason ? integrity.reason : 'integrity check failed';
   const at = integrity && Number.isFinite(integrity.brokenAt) ? ` (entry ${integrity.brokenAt})` : '';
-  telemetry.recordError('integrity', `${reason}${at}`);
+  telemetry.recordError('integrity', { name: 'IntegrityFailure', code: `${reason}${at}` });
   toast(INTEGRITY_FAILURE_MESSAGE, 6000);
 }

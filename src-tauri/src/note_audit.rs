@@ -233,7 +233,7 @@ pub(crate) fn audit_log_records_listed(
     scope: String,
     count: i64,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     records_listed_conn(&mut conn, &scope, count)
 }
 

@@ -57,14 +57,30 @@ export function track(event, props) {
   append({ t: nowISO(), event: String(event), ...scrubProps(props) });
 }
 
-// Record an error. Stores a stable kind + the error name + a truncated message
-// (the log is local and user-reviewed; these are system-level errors).
+// Record an error. Stores ONLY bounded, non-free-text fields:
+//   - `kind`: the caller-supplied category ('audio' | 'transcription' | …)
+//   - `name`: the error's class ('AppError', 'TypeError', 'TimeoutError', …)
+//   - `code`: the stable machine-readable discriminator from the Rust IPC
+//             boundary (e.g. 'secure_service_unreachable'), when present.
+//
+// The raw `error.message` is deliberately NOT stored. An exception thrown
+// mid-operation can splice PHI (a patient alias, a note fragment, a DOB) into
+// its free-text message, and this path previously persisted that message
+// verbatim while bypassing the SAFE_STRING_KEYS allowlist that track() applies
+// for exactly this reason. Restricting to the error's type/code closes that
+// gap; the 200-char cap is retained as a secondary safeguard on every field.
 export function recordError(kind, errOrMessage) {
-  const name = errOrMessage && errOrMessage.name ? String(errOrMessage.name) : 'Error';
-  const raw = typeof errOrMessage === 'string'
-    ? errOrMessage
-    : (errOrMessage && errOrMessage.message) || '';
-  append({ t: nowISO(), event: 'error', kind: String(kind), name, message: String(raw).slice(0, 200) });
+  const isObj = errOrMessage && typeof errOrMessage === 'object';
+  const record = {
+    t: nowISO(),
+    event: 'error',
+    kind: String(kind).slice(0, 200),
+    name: (isObj && errOrMessage.name ? String(errOrMessage.name) : 'Error').slice(0, 200),
+  };
+  if (isObj && typeof errOrMessage.code === 'string') {
+    record.code = errOrMessage.code.slice(0, 200);
+  }
+  append(record);
 }
 
 export function getEvents() {
