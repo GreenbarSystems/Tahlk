@@ -164,13 +164,11 @@ export function wireNoteSection(ctx) {
         noteArea.classList.remove('generating');
       }
       clearStatus();
-      // If Anthropic isn't configured OR the BAA hasn't been affirmed, point
-      // the user at Settings. These two cases share the same fix (“open
-      // Settings”) but are distinguished so the toast can name the reason.
+      // The BAA gate is the one failure with a Settings-based fix, so it keeps
+      // a dedicated toast. Everything else — including an unreachable secure
+      // processing service — funnels through userMessage, which owns the copy.
       const err = fromInvoke(e);
-      if (err.code === 'no_api_key') {
-        toast('No Anthropic API key. Open Settings to add one.');
-      } else if (err.code === 'baa_required') {
+      if (err.code === 'baa_required') {
         toast('Confirm your agreements in Settings before generating notes.');
       } else {
         toast(userMessage(err, 'Note generation failed.'));

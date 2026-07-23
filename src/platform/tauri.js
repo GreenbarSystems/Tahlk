@@ -20,7 +20,7 @@
 // scripts loaded via XSS run after app scripts and cannot rewind imports.
 //
 // Rejection shape contract: `invoke` promises reject with an `AppError`
-// ({ code, message }). Callers can branch on `code` (e.g. `no_api_key`) or
+// ({ code, message }). Callers can branch on `code` (e.g. `secure_service_unreachable`) or
 // pass the error to `userMessage()` for a display string. See `appError.js`.
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';

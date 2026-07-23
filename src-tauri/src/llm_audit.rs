@@ -2,14 +2,15 @@
 //!
 //! 45 CFR §164.312(b) requires "hardware, software, and procedural
 //! mechanisms that record and examine activity in information systems
-//! that contain or use ePHI." Every note generation transmits PHI to
-//! Anthropic, so every one of those calls needs an audit-log entry.
+//! that contain or use ePHI." Every note generation transmits PHI through
+//! Greenbar's managed proxy to Anthropic, so every one of those calls needs
+//! an audit-log entry.
 //!
 //! We log METADATA ONLY — never transcript, never response text. Enough
 //! for a compliance officer to reconstruct WHO called WHAT model WHEN and
 //! how many bytes went out / came back, plus the upstream `request-id`
-//! header so Anthropic support can correlate incidents. Content stays out
-//! of the audit log so it doesn't turn into a second copy of PHI to protect.
+//! header so support can correlate incidents. Content stays out of the audit
+//! log so it doesn't turn into a second copy of PHI to protect.
 //!
 //! Table is intentionally SEPARATE from `note_history`:
 //!   * `note_history` is a hash-chained tamper-evident log of note edits;
@@ -57,18 +58,22 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// A single row about to be appended. Fields are all "safe": no content,
-/// no API key, no patient identifiers beyond the (opaque) encounter_id.
+/// no credential, no patient identifiers beyond the (opaque) encounter_id.
 #[derive(Debug, Clone)]
 pub(crate) struct LlmCallEntry {
     /// ISO-8601 UTC timestamp. Captured Rust-side (`chrono`-free using the
     /// SQLite datetime function on insert would be simpler, but we want
     /// deterministic tests and unified timezone handling).
     pub created_at: String,
-    /// Encounter this call belongs to, if any. May be None for a future
-    /// standalone "test the API key" flow that's not tied to a session.
+    /// Encounter this call belongs to, if any. May be None for a call not
+    /// tied to a specific session.
     pub encounter_id: Option<String>,
-    /// Provider identity for cross-referencing with `provider profile`.
-    /// Kept as free-text since providers only ever look at their own rows.
+    /// Local clinician display name from the provider profile — the audit
+    /// actor, NOT an account owner. In managed mode the Anthropic account is
+    /// always Greenbar's (the proxy holds the single BAA/ZDR-covered key), so
+    /// this field has no relationship to billing or key ownership; it only
+    /// answers "which local clinician ran this generation". Kept as free-text
+    /// since providers only ever look at their own rows.
     pub provider_id: String,
     /// Model identifier from the request body (e.g. "claude-haiku-4-5-…").
     pub model: String,
@@ -84,7 +89,8 @@ pub(crate) struct LlmCallEntry {
     /// support answers with this. Missing on transport-level failures.
     pub upstream_reqid: Option<String>,
     /// "ok", "auth_failed", "rate_limited", "upstream_api", "network",
-    /// "upstream_empty", or "internal". Mirrors the AppError code.
+    /// "upstream_empty", "secure_service_unreachable", "baa_required", or
+    /// "internal". Mirrors the AppError code.
     pub outcome: String,
     /// Same code as `outcome` when `outcome != "ok"`. Null on success.
     pub error_code: Option<String>,

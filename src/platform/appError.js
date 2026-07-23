@@ -13,7 +13,7 @@
 //
 // `fromInvoke` normalizes all four into an `AppError` whose `code` is a
 // stable machine-readable string and whose `message` remains human-readable.
-// Every catch site downstream (`userMessage`, branch-on-`no_api_key`) can
+// Every catch site downstream (`userMessage`, branch-on-`secure_service_unreachable`) can
 // then rely on the same shape — no runtime typeof/instanceof gymnastics.
 
 /**
@@ -63,8 +63,12 @@ export function fromInvoke(e) {
 export function userMessage(err, fallback = 'Something went wrong.') {
   const e = fromInvoke(err);
   switch (e.code) {
-    case 'no_api_key':
-      return 'No Anthropic API key. Open Settings to add one.';
+    case 'secure_service_unreachable':
+      // Managed mode: note generation goes through Greenbar's secure proxy on
+      // a per-device token. This code means we couldn't reach that service or
+      // register the device — there is deliberately no direct-to-Anthropic
+      // fallback (that path isn't BAA-covered), so we fail closed.
+      return 'Unable to reach Tahlk\'s secure processing service. Check your internet connection and try again.';
     case 'baa_required':
       // The Rust gate refuses to generate notes until the provider has
       // confirmed their agreements (BAA + EULA with Greenbar). Point them at
@@ -75,7 +79,9 @@ export function userMessage(err, fallback = 'Something went wrong.') {
     case 'network':
       return 'Network error. Check your connection and try again.';
     case 'auth_failed':
-      return 'Anthropic rejected the API key. Check it in Settings.';
+      // The proxy rejected this device's token. It re-registers automatically
+      // on the next attempt, so this is transient from the clinician's view.
+      return 'Secure processing service rejected this device. Try again in a moment.';
     case 'rate_limited':
       return 'Anthropic rate limit hit. Wait a moment and try again.';
     case 'upstream_api':

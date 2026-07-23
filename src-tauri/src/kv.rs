@@ -316,7 +316,7 @@ mod tests {
     fn kv_list_hides_keychain_only_keys() {
         use rusqlite::Connection;
         use crate::baa::BAA_ACK_KEY;
-        use crate::secrets::API_KEY_KV;
+        use crate::device::DEVICE_TOKEN_KV;
 
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -328,13 +328,13 @@ mod tests {
         )
         .unwrap();
 
-        // Two ordinary rows plus the legacy plaintext-key row and the BAA ack
+        // Two ordinary rows plus the device bearer-token row and the BAA ack
         // row (audit finding H3) — neither must ever surface through
         // enumeration.
         for (k, v) in [
             ("note_settings_v1::onboarded", "true"),
             ("note_provider_v1::profile", "{}"),
-            (API_KEY_KV, "\"sk-ant-should-not-leak\""),
+            (DEVICE_TOKEN_KV, "{\"token\":\"jwt-should-not-leak\",\"expires_at\":0}"),
             (BAA_ACK_KEY, "{\"acknowledged\":true}"),
         ] {
             conn.execute(
@@ -346,7 +346,7 @@ mod tests {
 
         let listed = kv_list_conn(&conn, "").unwrap();
         let keys: Vec<&str> = listed.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(!keys.contains(&API_KEY_KV), "secret key leaked into kv_list: {keys:?}");
+        assert!(!keys.contains(&DEVICE_TOKEN_KV), "device token leaked into kv_list: {keys:?}");
         assert!(!keys.contains(&BAA_ACK_KEY), "BAA ack row leaked into kv_list: {keys:?}");
         assert!(keys.contains(&"note_settings_v1::onboarded"));
         assert!(keys.contains(&"note_provider_v1::profile"));
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn kv_list_prefix_filter_still_hides_secret_keys() {
         use rusqlite::Connection;
-        use crate::secrets::API_KEY_KV;
+        use crate::device::DEVICE_TOKEN_KV;
 
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -371,12 +371,15 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
-            params![API_KEY_KV, "\"sk-ant-should-not-leak\""],
+            params![DEVICE_TOKEN_KV, "{\"token\":\"jwt-should-not-leak\",\"expires_at\":0}"],
         )
         .unwrap();
 
-        let listed = kv_list_conn(&conn, "secret_").unwrap();
-        assert!(listed.is_empty(), "secret_ prefix leaked rows: {listed:?}");
+        // Filter by the device token's own namespace prefix — the row must
+        // still be hidden by the is_secret_key post-filter, not merely by a
+        // non-matching prefix.
+        let listed = kv_list_conn(&conn, "device_").unwrap();
+        assert!(listed.is_empty(), "device_ prefix leaked rows: {listed:?}");
     }
 
     // The escape helper must convert LIKE wildcards to their escaped forms and

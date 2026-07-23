@@ -1,5 +1,5 @@
 // Idle-lock PIN repository — the one place that knows the lock command
-// names and argument shapes. Mirrors secretsRepo.js: the PIN itself is
+// names and argument shapes. The PIN itself is
 // write-only from here (set/verify/clear), never read back — Rust owns the
 // hash comparison so the plaintext PIN never needs to round-trip through
 // JS state after the moment it's typed.

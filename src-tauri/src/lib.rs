@@ -3,7 +3,8 @@
 //! Modules are split by concern:
 //!   - `db`            — SQLite bootstrap, encounter row projection, at-rest encryption.
 //!   - `db_key`        — DEK loader (keychain-held 256-bit key for SQLCipher).
-//!   - `secrets`       — Anthropic API key in the OS keychain + legacy migration.
+//!   - `device`        — device identity + managed-proxy bearer token (mint/refresh).
+//!   - `secrets`       — guarded KV namespaces + provider-profile write path.
 //!   - `kv`            — generic key/value store commands (secret_* namespace blocked).
 //!   - `baa`           — Anthropic BAA acknowledgment gate (audit finding C2).
 //!   - `encounters`    — encounter CRUD, sign-off, stats.
@@ -15,7 +16,7 @@
 //!   - `whisper`       — local whisper.cpp sidecar transcription.
 //!   - `log_safety`    — filename/error redaction for the (unencrypted) app log.
 //!   - `lock`           — idle-lock PIN hash storage (OS keychain, never the SQLite kv table).
-//!   - `notes`         — Anthropic streaming note generation (BAA-gated).
+//!   - `notes`         — managed-proxy streaming note generation (device-token auth, BAA-gated).
 //!   - `export`        — data-location lookup + save-as export.
 //!   - `patients`       — patient roster CRUD + cascade PHI destruction.
 //!   - `patient_audit`  — append-only audit log for patient roster CRUD.
@@ -38,6 +39,7 @@ mod config_audit;
 mod db;
 mod db_key;
 mod destruction_log;
+mod device;
 mod encounters;
 mod errors;
 mod export;
@@ -193,9 +195,6 @@ pub fn run() {
             kv::kv_set,
             kv::kv_remove,
             kv::kv_list,
-            secrets::set_api_key,
-            secrets::clear_api_key,
-            secrets::has_api_key,
             secrets::set_provider_profile,
             baa::baa_ack_status,
             baa::baa_ack_set,

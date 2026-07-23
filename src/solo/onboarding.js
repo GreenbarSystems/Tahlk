@@ -1,8 +1,12 @@
-// First-run onboarding — collect provider info and API key.
+// First-run onboarding — collect the provider profile.
+//
+// Note generation runs through Greenbar's managed proxy using a per-device
+// token minted transparently on first use (see src-tauri/src/device.rs), so
+// there is deliberately no API-key step here and no user-visible sign of the
+// device registration.
 
 import { kvGet, kvSet, kvSetCacheOnly } from '../core/storageBackend.js';
 import { invoke } from '../platform/tauri.js';
-import { secretsRepo } from '../data/secretsRepo.js';
 import { keys } from '../data/keys.js';
 import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
@@ -50,36 +54,6 @@ export function renderOnboarding() {
             </div>
           </div>
 
-          <!-- Step 2: Anthropic API key -->
-          <div class="onboarding-step" id="step-apikey">
-            <div class="step-num">2</div>
-            <div class="step-body">
-              <h3>Note generation API key</h3>
-              <p class="step-desc">Tahlk uses Anthropic's AI (Claude) to turn what you say into clinical notes.
-              You'll need your own Anthropic account and API key so your data goes directly to Anthropic under
-              your own agreement with them — Tahlk itself never sees or stores your key on any server. The key
-              is saved in your operating system's secure credential store (the same place your computer keeps
-              other app passwords), not in Tahlk's database.</p>
-              <details class="onboarding-help" id="ob-apikey-help">
-                <summary>How do I get one?</summary>
-                <div class="onboarding-help-body">
-                  <p>An API key is a private password that lets Tahlk send transcripts to Anthropic on your behalf. To create one:</p>
-                  <ol>
-                    <li>Go to <a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener">console.anthropic.com</a> and sign in (or create a free account).</li>
-                    <li>Open <strong>API Keys</strong> and choose <strong>Create Key</strong>.</li>
-                    <li>Copy the key (it starts with <code>sk-ant-</code>) and paste it in the box below.</li>
-                  </ol>
-                  <p class="onboarding-help-note">Anthropic bills you directly for usage. You can revoke or rotate the key from the same page at any time.</p>
-                </div>
-              </details>
-              <div class="field-row">
-                <label>Anthropic API key <span class="req">*</span></label>
-                <input id="ob-apikey" type="password" placeholder="sk-ant-…" autocomplete="off" />
-              </div>
-              <p class="step-hint"><a href="https://console.anthropic.com" target="_blank" rel="noreferrer noopener" id="ob-apikey-link">Get a key at console.anthropic.com →</a></p>
-            </div>
-          </div>
-
         </div>
 
         <div class="onboarding-footer">
@@ -96,9 +70,6 @@ export async function wireOnboarding(onComplete) {
     const name = document.getElementById('ob-name')?.value.trim();
     if (!name) { toast('Provider name is required.'); return; }
 
-    const apiKey = document.getElementById('ob-apikey')?.value.trim();
-    if (!apiKey) { toast('Anthropic API key is required.'); return; }
-
     // Use the dedicated set_provider_profile command (C3 fix). Generic kv_set
     // is write-blocked for this key; sync the in-memory cache afterwards so
     // synchronous kvGet(keys.provider()) reads work for the rest of this session.
@@ -112,13 +83,6 @@ export async function wireOnboarding(onComplete) {
       kvSetCacheOnly(PROVIDER_KEY, profile);
     } catch (e) {
       toast(`Could not save profile: ${userMessage(e, 'unknown error')}`);
-      return;
-    }
-    // Store the API key write-only — it never round-trips back to JS.
-    try {
-      await secretsRepo.setApiKey(apiKey);
-    } catch (e) {
-      toast(`Could not save API key: ${userMessage(e, 'unknown error')}`);
       return;
     }
 
