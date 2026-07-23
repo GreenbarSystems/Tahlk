@@ -89,32 +89,38 @@ test('disabled telemetry writes nothing even under attack (opt-in gate holds)', 
   assert.equal(telemetry.getEvents().length, 0, 'opt-in gate must suppress all writes');
 });
 
-// ── KNOWN GAP: recordError bypasses scrubProps ────────────────────────────
+// ── Protection: recordError no longer stores the raw message (L4 fix) ──────
 
-test('GAP recordError-message: an error message is stored verbatim (capped), NOT allowlist-scrubbed', () => {
-  // recordError() calls append() directly with { message }, bypassing
-  // scrubProps entirely. Its `message` is only slice(0,200)'d, not
-  // key-allowlisted. So if any upstream ever throws an Error whose message
-  // embeds PHI — e.g. an API/DB error that echoes note text, a validation
-  // error that quotes a patient field — that PHI lands in the exportable diag
-  // log. This test DEMONSTRATES the gap (it asserts the PHI is present) so the
-  // behavior is explicit and the fix can be verified against it later.
+test('recordError-message: a PHI-bearing error message is dropped, not stored', () => {
+  // recordError() used to call append() directly with { message }, bypassing
+  // the allowlist track() applies to every other string. It now stores only a
+  // stable kind + the error type name (+ an allowlisted machine code when
+  // present); the raw free-text message — where an upstream API/DB error could
+  // echo note text or a patient field — is dropped entirely.
   telemetry.recordError('note_generation', new Error(PHI));
   const rec = lastEvent();
   assert.equal(rec.event, 'error');
-  assert.ok(rec.message.includes('Patient'),
-    'documents current behavior: recordError stores the raw message, PHI included');
-  // Fix lever: recordError should treat `message` as untrusted and either drop
-  // it, hash it, or route it through the same redaction policy as the Rust
-  // log_safety layer (path-strip + a PHI-token denylist), rather than storing
-  // an arbitrary upstream string. The 200-char cap bounds size, not content.
+  assert.equal(rec.name, 'Error');
+  assert.ok(!('message' in rec), 'the raw message must not be persisted at all');
+  assertNoPhi(rec);
 });
 
-test('GAP boundary: a 300-char PHI error message is truncated but the leading PHI survives', () => {
+test('recordError-boundary: even a long PHI message never lands in the log', () => {
   const long = PHI + ' ' + 'x'.repeat(400);
   telemetry.recordError('audio', new Error(long));
   const rec = lastEvent();
-  assert.ok(rec.message.length <= 200, 'message must be size-capped');
-  assert.ok(rec.message.includes('John Q. Patient'),
-    'the cap is on length only — leading PHI is retained within the first 200 chars');
+  assert.ok(!('message' in rec), 'no message field survives, capped or otherwise');
+  assertNoPhi(rec, 'John Q. Patient');
+});
+
+test('recordError-code-smuggle: a free-text "code" is rejected by the token shape', () => {
+  // The only string recordError will store off an error object is `code`, and
+  // only when it matches the short machine-token shape. A code stuffed with
+  // free text (where PHI would hide) fails that shape and is dropped.
+  const err = new Error('boom');
+  err.code = PHI;
+  telemetry.recordError('db', err);
+  const rec = lastEvent();
+  assert.equal(rec.code, undefined, 'a non-token code must be dropped');
+  assertNoPhi(rec);
 });

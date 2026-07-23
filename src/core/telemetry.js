@@ -24,6 +24,16 @@ const MAX_EVENTS = 500;
 // they're length-capped. None of these can carry PHI.
 const SAFE_STRING_KEYS = new Set(['code', 'kind', 'template', 'status', 'os', 'appVersion']);
 
+// The shape of a machine-generated error code we're willing to record: a short,
+// bounded token (e.g. "ENOENT", "ETIMEDOUT", "429", an app-internal category).
+// It structurally cannot hold a sentence of free text, so no PHI fits.
+const SAFE_ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+// Secondary size safeguard on every recorded error field, carried over from the
+// original 200-char message cap. The PRIMARY safeguard is the allowlist in
+// recordError(): the raw error.message is never stored at all.
+const MAX_ERROR_FIELD = 200;
+
 export function isEnabled() {
   return kvGet(keys.telemetryEnabled()) === true;
 }
@@ -57,14 +67,30 @@ export function track(event, props) {
   append({ t: nowISO(), event: String(event), ...scrubProps(props) });
 }
 
-// Record an error. Stores a stable kind + the error name + a truncated message
-// (the log is local and user-reviewed; these are system-level errors).
+// Record an error. Stores a stable caller-supplied `kind`, the error's type
+// name, and — when present and safely shaped — a machine error `code`.
+//
+// The raw error.message is deliberately NOT stored. recordError() used to write
+// it directly via append(), bypassing the SAFE_STRING_KEYS allowlist that
+// track() applies to every other string; an exception message can embed
+// fragments of whatever operation failed (a patient alias, note text, a DB
+// value echoed back), so free-text messages are dropped here the same way
+// track() drops non-allowlisted strings. `kind` and `name` are structural
+// enums/class names, not free text, and are length-capped as a backstop.
 export function recordError(kind, errOrMessage) {
-  const name = errOrMessage && errOrMessage.name ? String(errOrMessage.name) : 'Error';
-  const raw = typeof errOrMessage === 'string'
-    ? errOrMessage
-    : (errOrMessage && errOrMessage.message) || '';
-  append({ t: nowISO(), event: 'error', kind: String(kind), name, message: String(raw).slice(0, 200) });
+  const name = errOrMessage && errOrMessage.name
+    ? String(errOrMessage.name).slice(0, MAX_ERROR_FIELD)
+    : 'Error';
+  const record = {
+    t: nowISO(),
+    event: 'error',
+    kind: String(kind).slice(0, MAX_ERROR_FIELD),
+    name,
+  };
+  const code = errOrMessage && typeof errOrMessage === 'object' ? errOrMessage.code : undefined;
+  if (typeof code === 'string' && SAFE_ERROR_CODE.test(code)) record.code = code.slice(0, MAX_ERROR_FIELD);
+  else if (typeof code === 'number' && Number.isFinite(code)) record.code = code;
+  append(record);
 }
 
 export function getEvents() {

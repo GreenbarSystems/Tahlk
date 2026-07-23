@@ -19,7 +19,11 @@ export const INTEGRITY_FAILURE_MESSAGE =
 // Record the technical detail (opt-in, PHI-scrubbed) and show the plain-language toast.
 export function reportIntegrityFailure(integrity) {
   const reason = integrity && integrity.reason ? integrity.reason : 'integrity check failed';
-  const at = integrity && Number.isFinite(integrity.brokenAt) ? ` (entry ${integrity.brokenAt})` : '';
-  telemetry.recordError('integrity', `${reason}${at}`);
+  const brokenAt = integrity && Number.isFinite(integrity.brokenAt) ? integrity.brokenAt : undefined;
+  // Carry the detail in recordError's safe fields — `name` is the verifier's
+  // static reason category (chain math, never patient data) and `code` is the
+  // failing entry index — rather than a free-text message. recordError no
+  // longer stores raw messages, so a hand-built string would just be dropped.
+  telemetry.recordError('integrity', { name: reason, code: brokenAt });
   toast(INTEGRITY_FAILURE_MESSAGE, 6000);
 }

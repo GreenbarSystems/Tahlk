@@ -70,18 +70,37 @@ test('log is capped at 500 events (oldest dropped)', () => {
   assert.equal(events[0].i, 10); // first 10 dropped
 });
 
-test('recordError stores kind + name + truncated message', () => {
+test('recordError stores kind + name, never the raw message', () => {
   telemetry.setEnabled(true);
   telemetry.recordError('generation', new Error('boom'));
   let ev = telemetry.getEvents().at(-1);
   assert.equal(ev.event, 'error');
   assert.equal(ev.kind, 'generation');
   assert.equal(ev.name, 'Error');
-  assert.equal(ev.message, 'boom');
+  // The free-text message is dropped, not truncated — it never reaches the log.
+  assert.ok(!('message' in ev), 'raw error message must not be stored');
 
+  // A bare string "error" carries no safe fields at all → only kind + name.
   telemetry.recordError('audio', 'm'.repeat(300));
   ev = telemetry.getEvents().at(-1);
-  assert.equal(ev.message.length, 200);
+  assert.ok(!('message' in ev));
+  assert.equal(ev.name, 'Error');
+});
+
+test('recordError keeps a safely-shaped machine error code', () => {
+  telemetry.setEnabled(true);
+  const err = new Error('connection to 10.0.0.1 failed for patient Jane Doe');
+  err.code = 'ETIMEDOUT';
+  telemetry.recordError('network', err);
+  const ev = telemetry.getEvents().at(-1);
+  assert.equal(ev.code, 'ETIMEDOUT');
+  assert.ok(!('message' in ev), 'the PHI-bearing message is still dropped');
+
+  // A free-text "code" (fails the token shape) is rejected, not stored.
+  const err2 = new Error('boom');
+  err2.code = 'patient Jane Doe not found';
+  telemetry.recordError('db', err2);
+  assert.equal(telemetry.getEvents().at(-1).code, undefined);
 });
 
 test('clear empties the log', () => {
