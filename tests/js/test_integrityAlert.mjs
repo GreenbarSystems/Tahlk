@@ -53,12 +53,15 @@ test('the technical detail is preserved in the diagnostics log, not the toast', 
   // Toast stays plain; the jargon/technical detail is NOT surfaced to the user.
   assert.ok(!shownToast.toLowerCase().includes('mismatch'));
 
-  // ...but support can still see exactly what failed in the opt-in log.
+  // ...but support can still see exactly what failed in the opt-in log —
+  // carried in recordError's safe fields (name = reason category, code = the
+  // failing entry index), not a free-text message.
   const ev = telemetry.getEvents().at(-1);
   assert.equal(ev.event, 'error');
   assert.equal(ev.kind, 'integrity');
-  assert.match(ev.message, /entryHash mismatch/);
-  assert.match(ev.message, /entry 2/);
+  assert.match(ev.name, /entryHash mismatch/);
+  assert.equal(ev.code, 2);
+  assert.ok(!('message' in ev), 'no free-text message is stored');
 });
 
 test('a missing reason still records a sensible diagnostic and shows the toast', () => {
@@ -67,5 +70,5 @@ test('a missing reason still records a sensible diagnostic and shows the toast',
   assert.equal(shownToast, INTEGRITY_FAILURE_MESSAGE);
   const ev = telemetry.getEvents().at(-1);
   assert.equal(ev.kind, 'integrity');
-  assert.match(ev.message, /integrity check failed/);
+  assert.match(ev.name, /integrity check failed/);
 });
