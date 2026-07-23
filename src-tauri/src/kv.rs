@@ -46,7 +46,7 @@ fn check_key_size(key: &str) -> Result<(), AppError> {
 pub(crate) fn kv_get(state: State<DbState>, key: String) -> Result<Option<Value>, AppError> {
     guard_key(&key)?;
     check_key_size(&key)?;
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let row: Option<String> = conn
         .query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| r.get(0))
         .optional()?;
@@ -70,7 +70,7 @@ pub(crate) fn kv_set(state: State<DbState>, key: String, value: Value) -> Result
     if json.len() > MAX_KV_VALUE_BYTES {
         return Err(AppError::invalid("kv value too large"));
     }
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     // C1: block writes to note_content_v1::<id> / note_content_v1::transcript::<id>
     // when the encounter is already signed. The signed_hash must remain verifiable
     // against immutable content — allowing a post-sign overwrite via generic kv_set
@@ -86,7 +86,7 @@ pub(crate) fn kv_remove(state: State<DbState>, key: String) -> Result<(), AppErr
     // C3: same write-guard as kv_set (see comment there).
     guard_write_key(&key)?;
     check_key_size(&key)?;
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     // C1 applied to deletion. kv_set refuses to OVERWRITE a signed encounter's
     // note content so signed_hash stays verifiable — but kv_remove could
     // DELETE it outright, which defeats the same guarantee more completely: a
@@ -101,7 +101,7 @@ pub(crate) fn kv_remove(state: State<DbState>, key: String) -> Result<(), AppErr
 
 #[tauri::command]
 pub(crate) fn kv_list(state: State<DbState>, prefix: String) -> Result<Vec<(String, Value)>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     kv_list_conn(&conn, &prefix)
 }
 

@@ -194,7 +194,7 @@ pub(crate) fn llm_audit_list(
         100,
         crate::db::AUDIT_LIST_LIMIT_MAX,
     );
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     list_recent(&conn, encounter_id.as_deref(), limit)
 }
 

@@ -75,7 +75,7 @@ pub(crate) fn destruction_log_note_exported(
     state: State<'_, DbState>,
     row_count: i64,
 ) -> Result<(), AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let provider_id = crate::kv_ops::provider_id(&conn);
     append(&conn, &provider_id, "system", "destlog_csv_export", "", "export", row_count)
 }
@@ -87,7 +87,7 @@ pub(crate) fn destruction_log_list(
     state: State<'_, DbState>,
     limit: Option<i64>,
 ) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     let n = crate::db::clamp_list_limit_to(limit, 50, crate::db::AUDIT_LIST_LIMIT_MAX);
     let mut stmt = conn.prepare(
         "SELECT id, created_at, provider_id, entity_type, entity_id, \

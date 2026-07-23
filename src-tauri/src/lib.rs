@@ -29,7 +29,10 @@
 //! `crate::DbState` without cyclic imports; this file only wires setup and
 //! the `generate_handler!` list.
 
+use std::sync::Mutex;
 use tauri::Manager;
+
+use crate::errors::AppError;
 
 mod audio;
 mod audio_crypto;
@@ -63,13 +66,69 @@ mod throttle;
 mod whisper;
 
 /// Shared SQLite pool state. Every #[tauri::command] that touches the DB
-/// checks out a pooled connection via `state.0.get()?` — the old
+/// checks out a pooled connection via `state.conn()?` — the old
 /// `Mutex<Connection>` chokepoint (audit P2) is gone. The pool's
 /// `KeyingCustomizer` (see db.rs) guarantees each fresh connection is
 /// SQLCipher-keyed before it reaches user code, so this state can be handed
 /// out freely across the invoke handler without any keying invariant leaking
 /// into every callsite.
-pub(crate) struct DbState(pub(crate) db::SqlitePool);
+///
+/// The pool is held in a `Mutex<Option<_>>` (M4, idle-lock hardening): idle
+/// lock zeroes the in-memory session DEK and drops the pool here, so that once
+/// the screen locks there is no live pool and no key in memory to reach PHI.
+/// The pool is re-installed by `auth_unlock_password` after the provider
+/// re-enters their password, which re-derives the DEK and reopens the DB. This
+/// is preferred over Tauri's `unmanage` (deprecated / unsound — leaves dangling
+/// `State` refs); interior mutability lets the single managed instance flip
+/// between locked (`None`) and unlocked (`Some(pool)`) safely.
+pub(crate) struct DbState(pub(crate) Mutex<Option<db::SqlitePool>>);
+
+impl DbState {
+    /// Locked state — no pool. Managed at setup on an auth-configured install
+    /// so DB commands return a clean "session locked" precondition (rather than
+    /// a Tauri "state not managed" error) until the first unlock.
+    pub(crate) fn empty() -> Self {
+        DbState(Mutex::new(None))
+    }
+
+    /// Unlocked state carrying a live pool. Used on the fresh-install path where
+    /// the DB is opened during setup via the keychain DEK.
+    pub(crate) fn from_pool(pool: db::SqlitePool) -> Self {
+        DbState(Mutex::new(Some(pool)))
+    }
+
+    /// Clone out the live pool (an `Arc` bump, cheap), or a precondition error
+    /// if the session is locked. The lock guard is released before returning,
+    /// so callers may hold the pool across `.await` without pinning the mutex.
+    pub(crate) fn pool(&self) -> Result<db::SqlitePool, AppError> {
+        self.0
+            .lock()
+            .expect("DbState mutex poisoned")
+            .clone()
+            .ok_or_else(|| {
+                AppError::precondition(
+                    "Your session is locked. Enter your password to unlock and continue.",
+                )
+            })
+    }
+
+    /// Check out a pooled connection, or a precondition error if locked.
+    pub(crate) fn conn(&self) -> Result<db::PooledConn, AppError> {
+        Ok(self.pool()?.get()?)
+    }
+
+    /// Install the pool after an unlock (`auth_unlock_password`).
+    pub(crate) fn set_pool(&self, pool: db::SqlitePool) {
+        *self.0.lock().expect("DbState mutex poisoned") = Some(pool);
+    }
+
+    /// Drop the pool on idle lock. Our reference goes away immediately; any
+    /// connection a command is still mid-flight with keeps the underlying pool
+    /// alive only until it finishes, after which the pool fully closes.
+    pub(crate) fn lock_session(&self) {
+        *self.0.lock().expect("DbState mutex poisoned") = None;
+    }
+}
 
 /// Ceiling on the free-text `provider_id` identity field, so a compromised
 /// WebView can't stash arbitrary data in a compliance record under the guise
@@ -160,9 +219,17 @@ pub fn run() {
                     Err(e) => log::error!("audio at-rest migration skipped: {}", log_safety::cap_len(&e.to_string())),
                 }
 
-                app.manage(db::new_state(pool));
+                app.manage(DbState::from_pool(pool));
+            } else {
+                // Auth IS configured — the DB stays locked until the JS auth
+                // screen collects the password and calls auth_unlock_password,
+                // which installs the pool via DbState::set_pool. Manage an empty
+                // (locked) DbState now so DB commands return a "session locked"
+                // precondition instead of a Tauri "state not managed" error, and
+                // so the same slot can be re-locked/re-unlocked by the idle-lock
+                // path for the rest of the process's life.
+                app.manage(DbState::empty());
             }
-            // else: auth IS configured — DbState is managed later by auth_unlock_password.
 
             // Content protection (audit finding: "no window content-protection
             // flag — screen sharing/recording/remote-desktop tools can capture
@@ -244,6 +311,7 @@ pub fn run() {
             auth::auth_change_password,
             auth::auth_generate_recovery_codes,
             auth::auth_nuke_and_reinstall,
+            auth::auth_lock_session,
             destruction_log::destruction_log_list,
             destruction_log::destruction_log_note_exported,
             config_audit::config_audit_list,

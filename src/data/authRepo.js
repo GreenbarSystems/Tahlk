@@ -36,4 +36,10 @@ export const authRepo = {
   // Requires the current password or a valid recovery code (C4 fix) — Rust
   // verifies the credential before any deletion occurs.
   nukeAndReinstall: credential => invoke('auth_nuke_and_reinstall', { credential }),
+
+  // Idle lock (M4): zero the in-memory session DEK and drop the DB connection
+  // pool in Rust. After this every DB command fails "session locked" until the
+  // provider re-enters their password via unlockWithPassword, which re-derives
+  // the DEK and reopens the pool.
+  lockSession: () => invoke('auth_lock_session'),
 };

@@ -25,8 +25,13 @@ const MAX_TIMEOUT_MINUTES = 60;
 // DOM the same way (e.g. some WebView configurations).
 const ACTIVITY_EVENTS = ['mousemove', 'mousedown', 'pointerdown', 'keydown', 'scroll', 'touchstart'];
 
+// ON by default (M4). The stored value is only ever `false` when the provider
+// has explicitly turned the lock off in Settings; an absent/unset value means
+// enabled. A laptop left unattended between patients must lock on its own
+// rather than depend on the provider having opted in — the idle lock is a
+// compliance control, not a convenience feature.
 export function isLockEnabled() {
-  return kvGet(keys.lockEnabled()) === true;
+  return kvGet(keys.lockEnabled()) !== false;
 }
 
 export function setLockEnabled(enabled) {

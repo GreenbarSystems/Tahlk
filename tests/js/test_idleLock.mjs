@@ -41,6 +41,8 @@ function installFakeDocument() {
 
 const idleLock = await import('../../src/core/idleLock.js');
 const { emit, _resetBus } = await import('../../src/core/eventBus.js');
+const { kvRemove } = await import('../../src/core/storageBackend.js');
+const { keys } = await import('../../src/data/keys.js');
 
 const {
   DEFAULT_TIMEOUT_MINUTES,
@@ -55,6 +57,22 @@ beforeEach(() => {
   setLockEnabled(false);
   setLockTimeoutMinutes(DEFAULT_TIMEOUT_MINUTES);
   _resetBus();
+});
+
+test('isLockEnabled defaults to ON when the setting was never set (M4)', () => {
+  // An unset value must read as enabled — the lock ships on, not opt-in.
+  kvRemove(keys.lockEnabled());
+  assert.equal(isLockEnabled(), true, 'idle lock must be ON by default when unconfigured');
+});
+
+test('isLockEnabled is only OFF when explicitly disabled (M4)', () => {
+  // A stored `false` (the provider's explicit choice) is the sole way off.
+  setLockEnabled(false);
+  assert.equal(isLockEnabled(), false);
+  // Any other stored value — including a stale/garbage one — still reads ON,
+  // failing safe toward locked rather than silently disabling the control.
+  kvRemove(keys.lockEnabled());
+  assert.equal(isLockEnabled(), true);
 });
 
 test('isLockEnabled/setLockEnabled round-trip through storage', () => {

@@ -50,7 +50,9 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::hkdf;
 use ring::pbkdf2;
 use rusqlite::{params, Connection, OptionalExtension};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
+
+use crate::DbState;
 
 use crate::errors::AppError;
 use crate::hex::{from_hex, to_hex};
@@ -491,6 +493,15 @@ pub(crate) fn session_dek_hex() -> Option<String> {
     SESSION_DEK_HEX.read().ok().and_then(|s| s.clone())
 }
 
+/// Zero the in-memory session DEK. Called by the idle-lock path (M4) so the
+/// key no longer lives in process memory once the screen locks; re-unlock
+/// (`auth_unlock_password`) re-derives and re-publishes it.
+pub(crate) fn clear_session_dek() {
+    if let Ok(mut slot) = SESSION_DEK_HEX.write() {
+        *slot = None;
+    }
+}
+
 /// Returns true if the `auth_password_hash` keychain item exists.
 pub(crate) fn is_auth_configured() -> bool {
     keyring_entry()
@@ -792,12 +803,18 @@ pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<
     Ok(codes.iter().map(|c| c.display()).collect())
 }
 
-/// Startup unlock via master password. Verifies the password, unwraps the DEK,
-/// opens `tahlk.db` with that key, runs post-open migrations, and registers
-/// the pool as `DbState`. After this command returns `Ok`, all DB-backed
-/// commands become available for the session.
+/// Startup (and idle-lock re-)unlock via master password. Verifies the
+/// password, unwraps the DEK, opens `tahlk.db` with that key, runs post-open
+/// migrations, and installs the pool into the managed `DbState`. After this
+/// command returns `Ok`, all DB-backed commands become available for the
+/// session. This is also the path the idle-lock overlay drives to re-open the
+/// DB after `auth_lock_session` dropped the pool and zeroed the DEK.
 #[tauri::command]
-pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(), AppError> {
+pub(crate) fn auth_unlock_password(
+    app: AppHandle,
+    state: State<DbState>,
+    password: String,
+) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
     crate::throttle::check(THROTTLE_UNLOCK)?;
     let dek = unlock_with_password(&password, &path).inspect_err(|_| {
@@ -841,8 +858,20 @@ pub(crate) fn auth_unlock_password(app: AppHandle, password: String) -> Result<(
         );
     }
 
-    app.manage(crate::db::new_state(pool));
+    state.set_pool(pool);
     Ok(())
+}
+
+/// Idle-lock trigger (M4). Drops the DB connection pool and zeroes the
+/// in-memory session DEK so that, once the screen locks, no live pool and no
+/// key remain in the process to reach PHI. The provider must re-enter their
+/// password (via `auth_unlock_password`) to re-derive the DEK and reopen the
+/// DB — the JS overlay drives exactly that flow. Ordered pool-first so a
+/// caller mid-checkout can't grab a connection after the DEK is gone.
+#[tauri::command]
+pub(crate) fn auth_lock_session(state: State<DbState>) {
+    state.lock_session();
+    clear_session_dek();
 }
 
 /// Unlock via a recovery code (forgot-password flow). Returns nothing to JS;
@@ -1510,6 +1539,20 @@ mod tests {
         nuke_and_reinstall(&wraps_path, &main_path).unwrap();
         assert!(!wraps_path.exists(), "wraps DB must be deleted");
         assert!(!main_path.exists(), "main DB must be deleted");
+    }
+
+    // ── Session DEK lifecycle (M4 idle-lock) ─────────────────────────────────
+
+    #[test]
+    fn clear_session_dek_removes_the_in_memory_key() {
+        // Serialized implicitly: this is the only test touching SESSION_DEK_HEX.
+        set_session_dek_hex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        assert!(session_dek_hex().is_some(), "DEK must be present after publish");
+        clear_session_dek();
+        assert!(
+            session_dek_hex().is_none(),
+            "idle lock must zero the in-memory session DEK so it cannot be read until re-unlock"
+        );
     }
 
     #[test]

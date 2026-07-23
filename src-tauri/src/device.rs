@@ -274,7 +274,7 @@ pub(crate) async fn current_token(
     base_url: &str,
 ) -> Result<String, AppError> {
     let (device_id, cached) = {
-        let conn = state.0.get()?;
+        let conn = state.conn()?;
         (load_or_generate_device_id(&conn)?, read_token(&conn)?)
     };
     if !token_needs_refresh(cached.as_ref(), now_unix_secs(), REFRESH_MARGIN_SECS) {
@@ -287,7 +287,7 @@ pub(crate) async fn current_token(
     };
     let fresh = fetcher.fetch(&device_id).await?;
     {
-        let conn = state.0.get()?;
+        let conn = state.conn()?;
         store_token(&conn, &fresh)?;
     }
     Ok(fresh.token)

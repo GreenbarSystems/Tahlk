@@ -156,7 +156,7 @@ fn cutoff_date(today: &str, years: i64) -> Option<String> {
 /// provider has not explicitly configured it.
 #[tauri::command]
 pub(crate) fn retention_get_years(state: State<'_, DbState>) -> Result<i64, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     Ok(retention_years(&conn))
 }
 
@@ -171,7 +171,7 @@ pub(crate) fn retention_set_years(
             "retention_years must be between {MIN_RETENTION_YEARS} and {MAX_RETENTION_YEARS}"
         )));
     }
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     set_policy_value(
         &mut conn,
         KV_RETENTION_YEARS,
@@ -216,7 +216,7 @@ pub(crate) fn set_policy_value(
 /// automated retention-based destruction.
 #[tauri::command]
 pub(crate) fn retention_hold_get(state: State<'_, DbState>) -> Result<bool, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
     litigation_hold_is_active(&conn)
 }
 
@@ -227,7 +227,7 @@ pub(crate) fn retention_hold_set(
     state: State<'_, DbState>,
     active: bool,
 ) -> Result<(), AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
     // The more dangerous of the two: under the old non-atomic code a failed
     // audit append left the hold LIFTED while the UI reported failure — the
     // provider believes records are preserved, the trail shows no change was
@@ -254,7 +254,7 @@ pub(crate) fn retention_hold_set(
 pub(crate) fn retention_list_candidates(
     state: State<'_, DbState>,
 ) -> Result<Vec<Value>, AppError> {
-    let conn = state.0.get()?;
+    let conn = state.conn()?;
 
     // Listing, not destroying — a hold means "nothing is eligible", not an
     // error. Still routed through the fail-closed reader so an unreadable hold
@@ -310,7 +310,7 @@ pub(crate) async fn retention_destroy_eligible(
     app: AppHandle,
     state: State<'_, DbState>,
 ) -> Result<Value, AppError> {
-    let mut conn = state.0.get()?;
+    let mut conn = state.conn()?;
 
     // Checked up front for a clearer message than the per-encounter guard
     // inside delete_encounter_in_tx would give, and to fail before any work.
@@ -364,8 +364,9 @@ pub(crate) async fn retention_destroy_eligible(
     // Audio cleanup after the SQL commit. Each unremovable file is recorded as
     // `disposal_incomplete` rather than only logged — see
     // audio::purge_after_destruction.
+    let pool = state.pool()?;
     for id in &ids {
-        crate::audio::purge_after_destruction(&app, &state.0, id, &provider_id).await;
+        crate::audio::purge_after_destruction(&app, &pool, id, &provider_id).await;
     }
 
     Ok(json!({ "destroyed": ids.len() as i64 }))

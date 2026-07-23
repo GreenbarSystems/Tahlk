@@ -22,13 +22,17 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
-use crate::{config_audit, db_key, destruction_log, errors::AppError, llm_audit, note_audit, note_history, patient_audit, DbState};
+use crate::{config_audit, db_key, destruction_log, errors::AppError, llm_audit, note_audit, note_history, patient_audit};
 
 /// Alias for the desktop-wide SQLite pool type. Every command that used to
 /// take a `Mutex<Connection>` guard now takes a `PooledConnection` handed out
 /// by this pool; the `KeyingCustomizer` below guarantees every fresh checkout
 /// is SQLCipher-keyed before it reaches user code.
 pub(crate) type SqlitePool = Pool<SqliteConnectionManager>;
+
+/// A connection checked out of the pool. Named so `DbState::conn` can return it
+/// without every caller spelling out the r2d2/manager generics.
+pub(crate) type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
 
 // SQLite file magic ("SQLite format 3\0"). SQLCipher-encrypted files start
 // with random-looking ciphertext; plaintext files always begin with this
@@ -554,12 +558,6 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     Ok(pool)
 }
 
-// Convenience wrapper so `run()` in lib.rs doesn't need to know how DbState
-// is constructed from a Pool.
-pub(crate) fn new_state(pool: SqlitePool) -> DbState {
-    DbState(pool)
-}
-
 #[cfg(test)]
 mod tests {
     //! Encryption round-trip tests. These do NOT touch the OS keychain —
@@ -833,5 +831,54 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
             .unwrap();
         assert_eq!(fk, 1, "foreign_keys must be ON on every pooled connection");
+    }
+
+    // M4 (idle-lock hardening): once the session is locked, DbState must hand
+    // out no connection and no pool — a locked screen means PHI is unreachable
+    // until re-unlock re-installs the pool. Builds a real keyed pool, proves DB
+    // access works unlocked, locks, and proves access is refused with a
+    // precondition error (the message shown verbatim to the provider).
+    #[test]
+    fn locked_dbstate_refuses_connections_until_repooled() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("locktest.db");
+        let key = fixed_key();
+
+        let build_pool = || {
+            let manager = SqliteConnectionManager::file(&path);
+            let customizer = KeyingCustomizer {
+                hex_key: Arc::new(key.clone()),
+            };
+            Pool::builder()
+                .max_size(2)
+                .min_idle(Some(1))
+                .connection_customizer(Box::new(customizer))
+                .build(manager)
+                .unwrap()
+        };
+
+        // Unlocked: a connection is available and usable.
+        let state = crate::DbState::from_pool(build_pool());
+        {
+            let conn = state.conn().expect("unlocked DbState must yield a connection");
+            conn.execute_batch("CREATE TABLE t (v TEXT);").unwrap();
+        }
+
+        // Lock: pool dropped, DEK-bearing access gone.
+        state.lock_session();
+        match state.conn() {
+            Err(AppError::PreconditionFailed(_)) => {}
+            other => panic!("locked DbState must refuse a connection, got {:?}", other.map(|_| "conn")),
+        }
+        assert!(
+            state.pool().is_err(),
+            "locked DbState must not expose the pool"
+        );
+
+        // Re-unlock: installing a fresh pool restores access.
+        state.set_pool(build_pool());
+        let conn = state.conn().expect("re-unlocked DbState must yield a connection again");
+        let n: i64 = conn.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "the same encrypted DB is reachable after re-unlock");
     }
 }
