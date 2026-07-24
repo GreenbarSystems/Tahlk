@@ -424,15 +424,19 @@ pub(crate) fn history_note_edited(
     Ok(entry)
 }
 
-/// Verify the KEYED MAC anchor for one encounter's note-history chain
-/// (audit_mac.rs). This is the authoritative, forgery-resistant integrity check:
-/// unlike `verifyHistoryChain` in JS (which only proves the stored rows are
-/// internally self-consistent), this recomputes each row's `chain_mac` with the
-/// keychain-derived MAC key, so a wholesale-substituted or edited chain — which
-/// a self-referential hash chain cannot detect — fails here.
+/// Verify one encounter's note-history chain: the KEYED MAC anchor (audit_mac.rs)
+/// AND the external tail-truncation anchor (audit_tip.rs).
 ///
-/// Returns `{ ok, brokenAt, reason, legacySkipped }`, shaped to match what
-/// `reportIntegrityFailure` (integrityAlert.js) consumes.
+/// Unlike `verifyHistoryChain` in JS (which only proves the stored rows are
+/// internally self-consistent), this recomputes each row's `chain_mac` with the
+/// keychain-derived MAC key — catching a wholesale-substituted or edited chain
+/// that a self-referential hash chain cannot — and then, if that passes,
+/// compares the chain's current tip against the sign-off tip recorded outside
+/// the database, catching a tail-truncation that per-entry MACs alone cannot.
+///
+/// Returns `{ ok, brokenAt, reason, legacySkipped, tipStatus }`, shaped so a
+/// non-`ok` result feeds `reportIntegrityFailure` (integrityAlert.js) directly.
+/// A tip mismatch flips `ok` to false; a missing/unavailable anchor does not.
 #[tauri::command]
 pub(crate) fn verify_history_macs(
     state: State<'_, DbState>,
@@ -449,11 +453,41 @@ pub(crate) fn verify_history_macs(
         .collect::<Result<_, _>>()?;
     let verdict =
         crate::audit_mac::verify_chain(&key, rows.iter().map(|(s, h, m)| (*s, h.as_str(), m.as_deref())));
+
+    // Tail-truncation check against the external sidecar anchor (audit_tip.rs).
+    // Only meaningful once the per-entry MAC chain itself verifies — otherwise
+    // the in-chain break is the finding. A tip mismatch means the chain was
+    // truncated (or modified) after sign-off; NoAnchor/Unavailable can't
+    // conclude either way and must not be reported as tampering.
+    let tip_status = if verdict.ok {
+        match rows.last() {
+            Some((seq, _, mac)) => match crate::audit_tip::check_tip(&encounter_id, *seq, mac.as_deref()) {
+                crate::audit_tip::TipCheck::Match => "match",
+                crate::audit_tip::TipCheck::Mismatch => "mismatch",
+                crate::audit_tip::TipCheck::NoAnchor => "no_anchor",
+                crate::audit_tip::TipCheck::Unavailable => "unavailable",
+            },
+            None => "no_rows",
+        }
+    } else {
+        "not_checked"
+    };
+    let tip_mismatch = tip_status == "mismatch";
+
+    let ok = verdict.ok && !tip_mismatch;
+    let reason = if !verdict.ok {
+        verdict.reason
+    } else if tip_mismatch {
+        Some("chain tip does not match the sign-off anchor (possible tail-truncation or post-sign modification)".to_string())
+    } else {
+        None
+    };
     Ok(json!({
-        "ok": verdict.ok,
+        "ok": ok,
         "brokenAt": verdict.broken_at,
-        "reason": verdict.reason,
+        "reason": reason,
         "legacySkipped": verdict.legacy_skipped,
+        "tipStatus": tip_status,
     }))
 }
 
