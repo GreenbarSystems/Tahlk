@@ -593,8 +593,8 @@ export function wireSettings() {
 
   document.getElementById('s-diag-export')?.addEventListener('click', async () => {
     try {
-      await telemetry.exportLog();
-      toast('Exported.');
+      // Confirm only a save that happened — a dismissed dialog wrote nothing.
+      if (await telemetry.exportLog()) toast('Exported.');
     } catch (err) {
       toast(`Export failed: ${userMessage(err, 'unknown error')}`);
     }

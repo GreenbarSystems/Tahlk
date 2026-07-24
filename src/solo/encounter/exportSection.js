@@ -61,8 +61,12 @@ export function wireExportSection(ctx) {
     try {
       if (!(await confirmUnencryptedExport())) return;
       const fmt = document.getElementById('export-format')?.value || 'plain';
-      await saveToFile(getFormattedNote(), ctx.currentEncounter, fmt);
-      toast('Note saved to file.');
+      // Only confirm a save that happened. saveToFile returns false when the
+      // provider dismissed the Save dialog; telling them "saved" then is a
+      // plainly false statement about where their patient's note is.
+      if (await saveToFile(getFormattedNote(), ctx.currentEncounter, fmt)) {
+        toast('Note saved to file.');
+      }
     } catch (e) {
       toast(userMessage(e, 'Could not save note to file.'));
     }
@@ -74,8 +78,9 @@ export function wireExportSection(ctx) {
     try {
       if (!(await confirmUnencryptedExport())) return;
       const note = document.getElementById('note-area')?.value || '';
-      await saveToPdf(note, ctx.currentEncounter);
-      toast('Note saved as PDF.');
+      if (await saveToPdf(note, ctx.currentEncounter)) {
+        toast('Note saved as PDF.');
+      }
     } catch (e) {
       toast(userMessage(e, 'Could not save note as PDF.'));
     }

@@ -140,12 +140,19 @@ function toBase64(buf) {
 // Build the PDF and save it via the native Save-As dialog. After a successful
 // local save, the optional cloud-archive hook is invoked best-effort (see
 // archivePdfHook above) — it never blocks or fails the local save.
+// Returns true only if a file was actually written; false means the provider
+// dismissed the dialog. Everything downstream is gated on that — see
+// exportFormatter.saveToFile for why the audit entry must not fire on a cancel.
+// The archive hook especially: it sends the PDF onward, so running it after a
+// cancelled local save would push PHI out of the app on the strength of an
+// action the provider just declined (M-1).
 export async function saveToPdf(note, encounter) {
   const buf = buildPdf(note, encounter);
-  await invoke('export_note_pdf_to_file', {
+  const saved = await invoke('export_note_pdf_to_file', {
     dataBase64: await toBase64(buf),
     suggestedName: exportFilenamePdf(encounter),
   });
+  if (!saved) return false;
 
   await logNoteExported(encounter.id, 'pdf', 'file');
   emit('scribe:note_exported', { encounterId: encounter.id, format: 'pdf' });
@@ -154,4 +161,5 @@ export async function saveToPdf(note, encounter) {
     try { await archivePdfHook(buf, encounter); }
     catch { /* archival is best-effort, never blocks the local save */ }
   }
+  return true;
 }

@@ -17,12 +17,25 @@ pub(crate) fn data_location(app: AppHandle) -> Result<String, AppError> {
         .map_err(AppError::storage_from)
 }
 
+/// Save `content` through the native Save-As dialog.
+///
+/// Returns **`true` only when bytes were actually written**, `false` when the
+/// user dismissed the dialog. Both are successful outcomes — cancelling is a
+/// choice, not an error — but they are not interchangeable, and this used to
+/// return `()` for both. Callers could not tell them apart, so a cancelled
+/// export still recorded a `note_exported` audit entry, still toasted "Note
+/// saved to file", and in the recovery-code flow still marked a credential as
+/// saved that was never written. See `M-1` in the HITECH audit.
+///
+/// Deliberately a `bool` rather than the chosen path: the WebView needs to know
+/// *whether* a write happened, never *where*. Handing a filesystem path back to
+/// the renderer would disclose more than the decision requires.
 #[tauri::command]
 pub(crate) async fn export_note_to_file(
     app: AppHandle,
     content: String,
     suggested_name: String,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     // L8: blocking_save_file() parks the calling thread on a sync_channel
     // recv() until the user closes the native Save dialog — the dialog
     // plugin's own doc comment says this "should NOT be used when running
@@ -49,9 +62,10 @@ pub(crate) async fn export_note_to_file(
             let path_str = p.to_string();
             tokio::fs::write(&path_str, content.as_bytes())
                 .await
-                .map_err(AppError::storage_from)
+                .map_err(AppError::storage_from)?;
+            Ok(true)
         }
-        None => Ok(()), // user cancelled
+        None => Ok(false), // user cancelled — no file was written
     }
 }
 
@@ -59,12 +73,14 @@ pub(crate) async fn export_note_to_file(
 // base64-encoded from JS (jsPDF's `.output('arraybuffer')` → base64). We decode
 // once and write the raw bytes. Same dialog pattern, same Storage error class,
 // and the same user-cancel-returns-Ok(()) behavior as the text path.
+/// PDF counterpart to [`export_note_to_file`]. Same `true` = written /
+/// `false` = cancelled contract — see there for why the distinction matters.
 #[tauri::command]
 pub(crate) async fn export_note_pdf_to_file(
     app: AppHandle,
     data_base64: String,
     suggested_name: String,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let bytes = BASE64
         .decode(data_base64.as_bytes())
         .map_err(|e| AppError::invalid(format!("malformed base64 PDF payload: {}", e)))?;
@@ -85,8 +101,9 @@ pub(crate) async fn export_note_pdf_to_file(
             let path_str = p.to_string();
             tokio::fs::write(&path_str, &bytes)
                 .await
-                .map_err(AppError::storage_from)
+                .map_err(AppError::storage_from)?;
+            Ok(true)
         }
-        None => Ok(()), // user cancelled
+        None => Ok(false), // user cancelled — no file was written
     }
 }

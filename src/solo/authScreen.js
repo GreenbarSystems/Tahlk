@@ -524,8 +524,9 @@ function runRecoveryCodeScreen(appEl, codes, onComplete) {
       // with no prompt — a location that is often synced to cloud storage and
       // is the first place anyone with the device would look. Every other
       // export in the app already goes through this dialog.
+      let saved;
       try {
-        await invoke('export_note_to_file', {
+        saved = await invoke('export_note_to_file', {
           content: text,
           suggestedName: `tahlk-recovery-code-${idx + 1}.txt`,
         });
@@ -534,6 +535,13 @@ function runRecoveryCodeScreen(appEl, codes, onComplete) {
         errorEl.hidden = false;
         return;
       }
+      // A dismissed dialog wrote nothing. Marking the code saved anyway is the
+      // worst version of this bug: the summary then reads "saved ✓" for a
+      // credential that exists nowhere, and losing all three codes plus the
+      // password leaves the encrypted database permanently unrecoverable.
+      // No error message — cancelling is a deliberate choice, not a failure;
+      // the button simply stays available (M-1).
+      if (!saved) return;
       markSaved();
     });
 
@@ -787,8 +795,9 @@ function renderRegenCodesStep(card, modal, codes) {
         'Any one of your three codes recovers access to your Tahlk records.',
       ].join('\n');
       // Native Save-As, same reasoning as the first-run path above.
+      let saved;
       try {
-        await invoke('export_note_to_file', {
+        saved = await invoke('export_note_to_file', {
           content: text,
           suggestedName: `tahlk-recovery-code-${idx + 1}.txt`,
         });
@@ -797,6 +806,9 @@ function renderRegenCodesStep(card, modal, codes) {
         errEl.hidden = false;
         return;
       }
+      // Same lockout hazard as the first-run path: never mark a code saved
+      // that was not written (M-1).
+      if (!saved) return;
       markSaved();
     });
 

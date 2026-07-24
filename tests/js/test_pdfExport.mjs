@@ -13,8 +13,13 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 const calls = [];
+// export_note_pdf_to_file resolves `true` when a file was written and `false`
+// when the provider dismissed the Save dialog (see export.rs — both are
+// successful outcomes). Defaults to a real save; the cancel tests flip it.
+let pdfSaveResult = true;
 function invokeMock(cmd, args) {
   calls.push({ cmd, args });
+  if (cmd === 'export_note_pdf_to_file') return Promise.resolve(pdfSaveResult);
   return Promise.resolve(null);
 }
 
@@ -56,6 +61,7 @@ const encounter = {
 
 beforeEach(() => {
   calls.length = 0;
+  pdfSaveResult = true;
   setArchivePdfHook(null);
 });
 
@@ -104,4 +110,22 @@ test('saveToPdf calls the archive hook after a successful save when one is set',
 test('a throwing archive hook never fails the local save', async () => {
   setArchivePdfHook(async () => { throw new Error('archive backend down'); });
   await assert.doesNotReject(saveToPdf('Body', encounter));
+});
+
+// ── M-1: a dismissed Save dialog is not a save ─────────────────────────────
+
+test('cancelling the Save dialog records no export and does not archive', async () => {
+  pdfSaveResult = false; // provider dismissed the dialog — nothing written
+  let hookCalled = false;
+  setArchivePdfHook(async () => { hookCalled = true; });
+
+  assert.equal(await saveToPdf('Body', encounter), false, 'saveToPdf must report the cancel');
+  assert.ok(
+    !calls.some(c => c.cmd === 'audit_log_note_exported'),
+    'a cancelled export is not a disclosure and must not reach the audit trail',
+  );
+  // The sharper half: the archive hook sends the PDF onward. Running it after
+  // a cancelled local save would push PHI out of the app on the strength of an
+  // action the provider had just declined.
+  assert.ok(!hookCalled, 'PHI must not be archived off the back of a cancelled save');
 });

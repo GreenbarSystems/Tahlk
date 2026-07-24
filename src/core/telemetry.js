@@ -102,10 +102,12 @@ export function clear() {
 }
 
 // Write the log to a user-chosen file (explicit egress, reviewed by the user).
+// Returns true only if a file was written, false if the dialog was dismissed,
+// so callers can avoid confirming a save that did not happen (M-1).
 export async function exportLog() {
   const events = getEvents();
   const content = JSON.stringify({ exportedAt: nowISO(), count: events.length, events }, null, 2);
-  await invoke('export_note_to_file', {
+  return invoke('export_note_to_file', {
     content,
     suggestedName: `tahlk-diagnostics-${todayISO()}.txt`,
   });
