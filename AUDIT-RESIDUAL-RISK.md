@@ -49,11 +49,25 @@ Both are the actual patient-conversation content — the transcript scratch file
 
 ### Why this is accepted as residual risk, not fully eliminated
 
-This is inherent to integrating a file-based external CLI tool; eliminating it entirely would require either a named-pipe/FIFO-based rewrite of the whisper integration (Unix-only, no reliable Windows/macOS equivalent) or switching to an in-process Whisper binding (a materially larger engineering change than the exposure justifies). The window is bounded by transcription time — typically seconds, not persistent — and is already defended in depth:
+This is inherent to integrating a file-based external CLI tool; eliminating it entirely would require either a named-pipe/FIFO-based rewrite of the whisper integration (Unix-only, no reliable Windows/macOS equivalent) or switching to an in-process Whisper binding (a materially larger engineering change than the exposure justifies). On a **graceful** exit the window is bounded by transcription time — seconds — and is already defended in depth:
 
 - Both scratch files are clamped to **owner-only `chmod 0600`** immediately after creation (`crate::perms::chmod_0600_unix`, called at `whisper.rs:141` for the audio and `whisper.rs:178` for the transcript).
 - Both are wrapped in `Drop`-based RAII guards that unlink the file on **every exit path** — success, error, and panic alike — not just the happy path.
 - Filenames use a random suffix (`getrandom`) so concurrent transcriptions cannot collide or have their cleanup clobbered.
+
+### Correction — the RAII guards do not cover an unclean shutdown (HITECH audit H-1)
+
+This section previously read *"the window is bounded by transcription time — typically seconds, **not persistent**."* **That was wrong for the crash case, and the acceptance above rested on it.**
+
+`Drop` does not run on `SIGKILL`, `taskkill /F`, an OOM kill, or a power cut. Anything left by one of those persists indefinitely: the decrypted `.wav`, the transcript `.txt`, and the `.json` (which carries the same transcript text). That is **unsecured PHI at rest** under §164.402, and its presence forfeits the breach-notification safe harbor for the whole device — the encrypted database stops mattering once a plaintext copy of the same conversation sits beside it. A device loss that would otherwise be exempt becomes notifiable under §164.404.
+
+The prior `reconcile_orphaned_audio` sweep could not help: it only considers files ending `.wav.enc` and `continue`s past everything else by construction.
+
+**Closed by** `audio::purge_transcription_scratch` — a startup sweep that removes all three artifact kinds, records one `destruction_log` row (`legal_basis = "unclean_shutdown"`) with the count, and logs a warning, since a non-zero result is itself evidence an incident review needs. It runs on **both** startup paths (`lib.rs::setup` for fresh installs, `auth_unlock_password` for auth-configured ones) and before the at-rest migration, so a scratch `.wav` can never be mistaken for legacy session audio.
+
+Matching is deliberately tight — exact prefix, exactly 16 hex chars, known extension — because the sweep deletes unconditionally in the directory that also holds encrypted session audio. `whisper::is_scratch_artifact` owns the predicate next to the code that constructs the names, and two tests pin both directions.
+
+**The residual risk that remains** is the in-flight window on a graceful run, which the original defenses (0600, RAII, random suffixes) still bound to seconds. The crash case is no longer accepted risk — it is closed.
 
 ### Conditions for this to remain an accepted risk
 
@@ -63,6 +77,7 @@ This item stays accepted **only** as long as all of the following remain true:
 2. Both scratch files continue to receive `chmod 0600` before any read occurs.
 3. No new code path writes transcript or raw audio content to disk **without** an equivalent guaranteed-cleanup guard.
 4. The CI log-PHI guardrail (`scripts/check_log_phi.sh`, added in `065b7ff`) continues to run and pass — it is the regression backstop that prevents the *content* of these scratch files from also leaking into the unencrypted OS-level app log via an incautious future `log::` call.
+5. `audio::purge_transcription_scratch` still runs on **both** startup paths, and `whisper::is_scratch_artifact` still recognizes every name `transcribe_audio` constructs. If the scratch naming or the sidecar's output extensions change, the predicate and its tests must change in the same commit — otherwise the sweep silently stops finding the files it exists to remove, and this item reverts to an open gap rather than an accepted risk.
 
 If whisper.cpp integration is ever rewritten (e.g., moved to an in-process binding, or a named-pipe approach), this item should be re-audited — the risk may shrink to zero, and this document should be updated accordingly rather than left stale.
 
@@ -113,6 +128,8 @@ Run through this before every production release. Each item should be checked by
 - [x] `cargo test --manifest-path src-tauri/Cargo.toml --locked` passes, specifically including `whisper::tests::wav_cleanup_removes_file_on_panic`, `whisper::tests::wav_cleanup_removes_file_on_drop`, `whisper::tests::txt_cleanup_removes_file_on_drop`, and `whisper::tests::txt_cleanup_ignores_missing_file` — re-ran all 4 individually (pass) and the full suite (134 passed, 1 failed — the known pre-existing sandbox-only `secrets::tests::keyring_roundtrip` D-Bus/X11 limitation, unrelated to app code, consistent across every phase of this project) as of this check.
 - [x] `scripts/check_log_phi.sh` passes clean (run it directly: `bash scripts/check_log_phi.sh`) — this is also enforced by the `log-phi-guard` CI job, but confirm it locally before a release cut too — re-ran: clean pass (exit 0). Also re-verified the guardrail actually catches a real violation by injecting a canary `log::info!("transcript: {}", ...)` line (correctly failed, exit 1, flagged the exact line) then restored the file with a confirmed zero-diff. Confirmed as of this check.
 - [x] No new call site writes raw audio or transcript content to disk without an equivalent RAII cleanup guard (spot-check: `grep -rn "tokio::fs::write\|std::fs::write" src-tauri/src/*.rs` against the known-accounted-for list from the last full audit) — re-ran: every production call site is accounted for (`audio.rs:83` and `audio_crypto.rs:227` write ciphertext only; `export.rs:36/68` are the two known disclosed export commands; `whisper.rs:134` is the guarded `.wav` scratch write); all other matches are inside `#[cfg(test)]` fixtures, not production paths. No new unaccounted-for site as of this check.
+- [ ] `audio::purge_transcription_scratch` is still called from BOTH `lib.rs::setup` and `auth::auth_unlock_password`, and still runs BEFORE `migrate_plaintext_audio_at_rest` on each — verify by reading both call sites, not by trusting this box. The sweep is what keeps the §164.402 safe harbor across a crash; a silently-dropped call site restores the gap with no test failure, since the unit tests exercise the function directly rather than its wiring.
+- [ ] `whisper::is_scratch_artifact` still matches every extension the sidecar emits — currently `.wav` (ours), `.txt` and `.json` (from `--output-txt` / `--output-json-full`). If a whisper.cpp upgrade adds an output format, add its extension and a test in the same commit.
 - [x] If the whisper.cpp integration architecture changed since the last release (e.g., in-process binding, named pipes), re-open this document and re-assess — do not just re-check the boxes above unchanged — confirmed via `git log 065b7ff..HEAD -- src-tauri/src/whisper.rs` returning zero commits: the file, and therefore the external-sidecar/file-based architecture (`app.shell().sidecar("whisper-cpp")`), is unchanged since the last audit. Re-audit not triggered.
 
 ### General

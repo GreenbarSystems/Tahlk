@@ -203,6 +203,21 @@ pub fn run() {
                         .app_data_dir()
                         .map_err(errors::AppError::internal_from)?
                         .join("audio");
+                    let provider = crate::kv_ops::provider_id(&conn);
+
+                    // Plaintext transcription scratch first — before anything
+                    // else touches the directory. These are the only artifacts
+                    // here that are unencrypted, so they are what costs the
+                    // §164.402 safe harbor if a crash left them behind, and
+                    // sweeping first also means a scratch `.wav` can never be
+                    // mistaken for legacy session audio by the migration below.
+                    let scratch = audio::purge_transcription_scratch(&conn, &audio_dir, &provider)?;
+                    if scratch > 0 {
+                        log::warn!(
+                            "removed {scratch} plaintext transcription scratch file(s) left by an unclean shutdown"
+                        );
+                    }
+
                     let key = audio_crypto::audio_key()?;
                     let n = audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)?;
                     // Reconcile AFTER the migration, which renames legacy
@@ -210,7 +225,6 @@ pub fn run() {
                     // Finds PHI audio whose encounter row is gone, including
                     // the case where a prior destruction died mid-cleanup and
                     // left no record at all.
-                    let provider = crate::kv_ops::provider_id(&conn);
                     let orphans = audio::reconcile_orphaned_audio(&conn, &audio_dir, &provider)?;
                     if orphans > 0 {
                         log::warn!("reconciled {orphans} orphaned audio file(s) after prior destruction");

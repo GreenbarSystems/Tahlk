@@ -169,6 +169,83 @@ pub(crate) async fn purge_after_destruction(
     }
 }
 
+/// Startup sweep for transient plaintext transcription artifacts left behind
+/// by an unclean shutdown.
+///
+/// `whisper::transcribe_audio` decrypts session audio to a plaintext `.wav` and
+/// the sidecar writes a `.txt` + `.json` beside it. All three are unlinked by
+/// RAII guards on every graceful exit path — but `Drop` does not run on
+/// SIGKILL, `taskkill /F`, an OOM kill, or a power cut. What survives is the
+/// patient conversation as audio AND as text, in the clear, indefinitely.
+///
+/// That is unsecured PHI at rest under 45 CFR §164.402, and its presence
+/// forfeits the breach-notification safe harbor for the entire device: the
+/// SQLCipher database being encrypted stops mattering once a plaintext copy of
+/// the same content sits next to it. A device loss that would otherwise be
+/// exempt becomes notifiable under §164.404. So this sweep is not tidying —
+/// it is what keeps the safe harbor intact across a crash.
+///
+/// Unconditional, unlike [`reconcile_orphaned_audio`]: a scratch file has no
+/// legitimate reason to exist at startup, so there is no DB state to consult
+/// and no ambiguous case to resolve. The two sweeps are deliberately opposite
+/// on doubt — that one deletes encrypted audio and must never guess wrong, so
+/// it keeps the file; this one deletes plaintext PHI, where the standing
+/// hazard is the file continuing to exist.
+///
+/// Nothing is thrown away silently: every removal is counted into one
+/// `destruction_log` row, and the count is logged, because a non-zero result
+/// is evidence of an unclean shutdown that a later breach assessment needs.
+///
+/// (No single-instance lock is enforced, so a second concurrent process could
+/// in principle have an in-flight scratch file removed here. Two instances
+/// already cannot safely share the SQLCipher database, so this adds no new
+/// failure class — and a retryable failed transcription is plainly preferable
+/// to plaintext PHI persisting on disk.)
+pub(crate) fn purge_transcription_scratch(
+    conn: &Connection,
+    audio_dir: &Path,
+    provider_id: &str,
+) -> Result<usize, AppError> {
+    let entries = match std::fs::read_dir(audio_dir) {
+        Ok(e) => e,
+        // No audio directory yet — nothing has ever been transcribed.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(AppError::Storage(e.to_string())),
+    };
+
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let raw = entry.file_name();
+        let Some(name) = raw.to_str() else { continue };
+        if !crate::whisper::is_scratch_artifact(name) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            // Keep going: one undeletable file must not strand the others,
+            // and each one left behind is independently exposed PHI.
+            Err(e) => log::error!(
+                "plaintext transcription scratch file could not be removed: {} ({})",
+                crate::log_safety::redact_filename(name),
+                crate::log_safety::cap_len(&e.to_string())
+            ),
+        }
+    }
+
+    if removed > 0 {
+        crate::destruction_log::append(
+            conn,
+            provider_id,
+            "system",
+            "orphaned_transcription_scratch",
+            "",
+            "unclean_shutdown",
+            removed as i64,
+        )?;
+    }
+    Ok(removed)
+}
+
 /// Startup sweep for encrypted audio whose encounter row no longer exists.
 ///
 /// Closes the failure mode no per-call handler can: if the process dies
@@ -313,6 +390,95 @@ mod orphan_tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect()
+    }
+
+    // ── purge_transcription_scratch (HITECH H-1) ─────────────────────────
+    //
+    // A crash mid-transcription leaves plaintext PHI on disk that no RAII
+    // guard can reach. These pin that the sweep removes all three artifact
+    // kinds, evidences the removal, and — critically — cannot be tricked into
+    // deleting real session audio.
+
+    #[test]
+    fn crash_orphaned_scratch_files_are_all_removed_and_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("audio");
+        // Exactly what a SIGKILL mid-transcription leaves: the decrypted
+        // audio plus both sidecar outputs, all sharing one random suffix.
+        write_audio(&dir, "transcribe-0123456789abcdef.wav");
+        write_audio(&dir, "transcribe-0123456789abcdef.txt");
+        write_audio(&dir, "transcribe-0123456789abcdef.json");
+        let conn = db_with(&[]);
+
+        let n = purge_transcription_scratch(&conn, &dir, "Dr. Chen").unwrap();
+
+        assert_eq!(n, 3, "every plaintext artifact must be swept, not just the .wav");
+        for name in [
+            "transcribe-0123456789abcdef.wav",
+            "transcribe-0123456789abcdef.txt",
+            "transcribe-0123456789abcdef.json",
+        ] {
+            assert!(!dir.join(name).exists(), "{name} is plaintext PHI and must not survive");
+        }
+        assert_eq!(
+            log_rows(&conn),
+            vec![(
+                "orphaned_transcription_scratch".to_string(),
+                "unclean_shutdown".to_string()
+            )],
+            "a breach assessment needs the evidence that plaintext PHI was found and destroyed"
+        );
+    }
+
+    // The sweep runs in the same directory as encrypted session audio and
+    // deletes unconditionally, so a predicate that is even slightly too broad
+    // destroys patient recordings. This is the test that fails if someone
+    // loosens `is_scratch_artifact` to a bare prefix or extension match.
+    #[test]
+    fn the_sweep_never_touches_session_audio_or_near_misses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("audio");
+        let keep = [
+            "enc-l9k3a-x7q2.wav.enc",           // real session audio
+            "transcribe-0123456789abcdef.enc",  // right shape, unknown extension
+            "transcribe-nothex0123456789.wav",  // right length, not hex
+            "transcribe-0123abcd.wav",          // hex, wrong length
+            "transcribe.wav",                   // prefix without a suffix
+            "my-transcribe-0123456789abcdef.wav", // prefix not at the start
+        ];
+        for name in keep {
+            write_audio(&dir, name);
+        }
+        let conn = db_with(&[]);
+
+        assert_eq!(purge_transcription_scratch(&conn, &dir, "Dr. Chen").unwrap(), 0);
+        for name in keep {
+            assert!(dir.join(name).exists(), "{name} must not be deleted by the scratch sweep");
+        }
+        assert!(log_rows(&conn).is_empty(), "a no-op sweep must not write a disposal row");
+    }
+
+    #[test]
+    fn a_clean_shutdown_leaves_nothing_to_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("audio");
+        write_audio(&dir, "enc-l9k3a-x7q2.wav.enc");
+        let conn = db_with(&["enc-l9k3a-x7q2"]);
+
+        assert_eq!(purge_transcription_scratch(&conn, &dir, "Dr. Chen").unwrap(), 0);
+        assert!(log_rows(&conn).is_empty());
+    }
+
+    #[test]
+    fn the_scratch_sweep_tolerates_a_missing_audio_directory() {
+        // First launch: nothing has ever been transcribed. Must not fail the
+        // startup path it runs on.
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = db_with(&[]);
+        assert_eq!(
+            purge_transcription_scratch(&conn, &tmp.path().join("nope"), "Dr. Chen").unwrap(),
+            0
+        );
     }
 
     #[test]
