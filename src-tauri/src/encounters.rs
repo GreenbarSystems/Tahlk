@@ -1451,4 +1451,127 @@ mod tests {
             "llm_audit and note_audit must carry the same blind so they stay correlatable"
         );
     }
+
+    // ── Multi-encounter destroy cascade (M7) ────────────────────────────────
+    //
+    // destroy_patient_records and retention_destroy_eligible both destroy every
+    // eligible encounter through delete_encounter_in_tx inside ONE outer
+    // transaction, then commit. These drive that exact shape to pin the two
+    // properties that matter and were previously untested: the full per-store
+    // destruction contract, and all-or-nothing atomicity (a mid-batch failure
+    // must undo every earlier encounter's partial destruction).
+
+    fn seed_note_history(conn: &Connection, enc_id: &str) {
+        conn.execute(
+            "INSERT INTO note_history (encounter_id, seq, action, actor, timestamp, content_hash, entry_hash) \
+             VALUES (?1, 1, 'signed', 'provider-1', '2026-07-04T10:00:00Z', 'ch', 'eh')",
+            params![enc_id],
+        )
+        .unwrap();
+    }
+
+    // Mirror the production cascade: each encounter destroyed via
+    // delete_encounter_in_tx inside one transaction, committed only if all
+    // succeed (a `?` failure drops the tx → rollback).
+    fn destroy_batch(conn: &mut Connection, ids: &[&str]) -> Result<(), AppError> {
+        let tx = conn.transaction()?;
+        for &id in ids {
+            delete_encounter_in_tx(&tx, id, "test-provider", "patient_request")?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn cascade_destroys_every_encounter_and_scrubs_all_trails() {
+        let mut conn = fresh_db();
+        for id in ["enc-1", "enc-2", "enc-3"] {
+            insert_row(&conn, id, "signed", "2026-07-04");
+            seed_kv(&conn, &format!("note_content_v1::{id}"), "\"note\"");
+            seed_kv(&conn, &format!("note_content_v1::transcript::{id}"), "\"transcript\"");
+            seed_note_audit(&conn, id);
+            seed_note_history(&conn, id);
+            seed_llm_audit(&conn, id);
+        }
+        // An unrelated encounter + setting must be untouched.
+        insert_row(&conn, "enc-keep", "draft", "2026-07-04");
+        seed_kv(&conn, "note_settings_v1::onboarded", "true");
+
+        destroy_batch(&mut conn, &["enc-1", "enc-2", "enc-3"]).unwrap();
+
+        for id in ["enc-1", "enc-2", "enc-3"] {
+            assert!(get_encounter_conn(&conn, id).unwrap().is_none(), "{id} row must be gone");
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM note_history WHERE encounter_id = ?1", params![id], |r| r.get::<_, i64>(0)).unwrap(),
+                0, "{id} note_history must be hard-deleted"
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM note_audit WHERE encounter_id = ?1", params![id], |r| r.get::<_, i64>(0)).unwrap(),
+                0, "{id} note_audit must be blinded off the raw id"
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM llm_audit WHERE encounter_id = ?1", params![id], |r| r.get::<_, i64>(0)).unwrap(),
+                0, "{id} llm_audit must be blinded off the raw id"
+            );
+        }
+        // note_audit rows are SCRUBBED, not deleted — count preserved, all tombstoned.
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM note_audit"), 3, "audit rows retained (scrubbed)");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM note_audit WHERE scrubbed = 1"), 3, "every audit row tombstoned");
+        // One disposal record per destroyed encounter.
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM destruction_log WHERE entity_type = 'encounter'"), 3);
+        // The three encounters' content kv rows are gone; the setting survives.
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM kv WHERE key LIKE 'note_content_v1::%'"), 0);
+        assert!(get_encounter_conn(&conn, "enc-keep").unwrap().is_some());
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM kv WHERE key = 'note_settings_v1::onboarded'"), 1);
+    }
+
+    #[test]
+    fn cascade_rolls_back_atomically_when_one_encounter_is_missing() {
+        let mut conn = fresh_db();
+        for id in ["enc-1", "enc-2"] {
+            insert_row(&conn, id, "signed", "2026-07-04");
+            seed_kv(&conn, &format!("note_content_v1::{id}"), "\"note\"");
+            seed_note_audit(&conn, id);
+            seed_note_history(&conn, id);
+            seed_llm_audit(&conn, id);
+        }
+
+        // enc-1 destroys, then "ghost" fails ("not found") mid-batch → the whole
+        // transaction must roll back, leaving enc-1 fully intact.
+        let err = destroy_batch(&mut conn, &["enc-1", "ghost"]).unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+
+        assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_some(), "enc-1 must survive the rollback");
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM note_audit WHERE encounter_id = 'enc-1'"),
+            1, "enc-1's note_audit row must not be blinded (rolled back)"
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM note_audit WHERE scrubbed = 1"), 0, "no row left scrubbed");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM note_history WHERE encounter_id = 'enc-1'"), 1, "enc-1 history survives");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM destruction_log"), 0, "no disposal record for a rolled-back batch");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM kv WHERE key = 'note_content_v1::enc-1'"), 1, "enc-1 content survives");
+    }
+
+    #[test]
+    fn cascade_under_active_hold_destroys_nothing() {
+        let mut conn = fresh_db();
+        for id in ["enc-1", "enc-2", "enc-3"] {
+            insert_row(&conn, id, "signed", "2026-07-04");
+            seed_note_audit(&conn, id);
+        }
+        set_hold(&conn, true);
+
+        let err = destroy_batch(&mut conn, &["enc-1", "enc-2", "enc-3"]).unwrap_err();
+        assert!(matches!(err, AppError::PreconditionFailed(_)));
+        assert!(format!("{err}").to_lowercase().contains("litigation hold"));
+
+        for id in ["enc-1", "enc-2", "enc-3"] {
+            assert!(get_encounter_conn(&conn, id).unwrap().is_some(), "{id} must survive under a hold");
+        }
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM destruction_log"), 0);
+    }
 }
