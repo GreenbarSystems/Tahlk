@@ -74,4 +74,7 @@ closes).
 This ADR does not change the attestation storage schema, the `AppError::BaaRequired`
 wire shape, or `ATTESTATION_VERSION` (still `1`). It only flips enforcement on,
 adds the onboarding step, and corrects copy/comments. ADR 0004 (first-open
-authentication) is a separate, still-proposed control and is unaffected.
+authentication) is a separate control on its own track — since shipped and
+enforced (ADR 0004 status "Accepted (partial)", 2026-07-24; the "still-proposed"
+description here reflected the state on this ADR's acceptance date and is
+superseded by that note).
