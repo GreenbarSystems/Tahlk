@@ -516,6 +516,9 @@ fn check_status(status: &str) -> Result<(), AppError> {
 
 #[tauri::command]
 pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Result<(), AppError> {
+    // M-3: see auth::require_auth_configured. An encounter row is PHI, and
+    // must not be created while the DEK still sits in the OS keychain.
+    crate::auth::require_auth_configured()?;
     // Fail loudly on missing required fields BEFORE taking the DB lock so a
     // shape-invalid payload can't tie up the connection. `status` retains a
     // legitimate default of "draft" because callers reasonably omit it on

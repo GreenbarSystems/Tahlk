@@ -83,6 +83,39 @@ If whisper.cpp integration is ever rewritten (e.g., moved to an in-process bindi
 
 ---
 
+## Item 2b — The pre-auth window is now closed for PHI creation (HITECH audit M-3)
+
+Before `auth_set_password` runs, the DEK lives in the OS keychain in plaintext
+and `lib.rs::setup` opens the database with it. PHI written in that window is
+encrypted under a key sitting on the same device, unlocked by the OS login.
+HHS conditions the §164.402 safe harbor on the decryption key not having been
+breached, so this was the one place in the app where the safe harbor rested on
+the OS keychain alone.
+
+The app already avoided it — `entry-solo.js` forces first-open password setup
+before the UI is usable — but that gate lived in the **renderer**, on the
+untrusted side of the boundary this codebase defends everywhere else.
+
+`auth::require_auth_configured` now enforces the same rule server-side on the
+three PHI-creating commands: `upsert_patient`, `upsert_encounter`,
+`save_session_audio`.
+
+**Deliberately gates creation, not access.** Reads stay open, and so do
+deletes. A provider mid-migration — data from before auth existed, password not
+yet set — must not be locked out of their own records, and blocking reads would
+strand them. Deleting PHI before setup is not a confidentiality risk, so it is
+out of scope for this control.
+
+Nothing legitimate writes PHI before setup: onboarding writes only the provider
+profile and the BAA ack, both settings, neither gated.
+
+**Residual:** an install that already holds PHI created before this shipped is
+unaffected — the guard prevents new writes, it cannot retroactively re-key old
+ones. Those records are re-protected the moment the provider sets a password,
+which the app forces on next launch.
+
+---
+
 ## Item 3 — Audit-chain tail-truncation is not cryptographically detected (accepted)
 
 ### What it is

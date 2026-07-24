@@ -619,6 +619,56 @@ pub(crate) fn is_auth_configured() -> bool {
         .is_ok()
 }
 
+/// Refuse a PHI-creating operation while first-open authentication has not
+/// been set up (HITECH audit M-3).
+///
+/// Until `auth_set_password` runs, the DEK lives in the OS keychain in
+/// plaintext (see `db_key`'s module doc) and the database is opened with it at
+/// startup. PHI written in that window is encrypted under a key sitting on the
+/// same device, unlocked by the OS login — which is thin separation against
+/// device theft, and exactly the residual ADR 0004 was written to close
+/// everywhere else. HHS conditions the §164.402 breach-notification safe
+/// harbor on the decryption key not having been breached, so that window is
+/// the one place in the app where the safe harbor rests on the OS keychain
+/// alone.
+///
+/// The app already avoids it: `entry-solo.js` forces first-open password setup
+/// before the UI is usable. But that gate lives in the **renderer**, on the
+/// untrusted side of the boundary this codebase defends carefully everywhere
+/// else — a WebView compromise, or any future entry point that forgets the
+/// check, would write PHI into the weaker window with nothing to stop it.
+/// This makes the same rule a server-side one.
+///
+/// Deliberately gates **creation of PHI, not access to it**. Reads stay open:
+/// a provider mid-migration (data from before auth existed, password not yet
+/// set) must not be locked out of their own records, and blocking reads would
+/// strand them. Nothing legitimate writes PHI before setup — onboarding writes
+/// only the provider profile and the BAA ack, both settings, neither gated
+/// here.
+pub(crate) fn require_auth_configured() -> Result<(), AppError> {
+    resolve_auth_gate(is_auth_configured())
+}
+
+/// The decision half of [`require_auth_configured`], split out so it is
+/// testable: `is_auth_configured` reads the machine-global OS keychain, so a
+/// test calling it directly would pass or fail depending on whether the
+/// developer running it happens to have Tahlk set up.
+///
+/// Note the trap this creates, because this codebase has been bitten by it
+/// before (`baa::the_gate_is_enabled_in_shipped_builds`): tests that only
+/// exercise this function prove nothing about the shipped wiring. The value of
+/// the parameter is what matters, so `require_auth_configured` above must keep
+/// passing the real probe.
+fn resolve_auth_gate(configured: bool) -> Result<(), AppError> {
+    if configured {
+        return Ok(());
+    }
+    Err(AppError::precondition(
+        "Set your password before creating patient records — records created \
+         beforehand would not be protected by it.",
+    ))
+}
+
 
 /// Set the master password for the first time (or after a full reset).
 ///
@@ -1191,6 +1241,27 @@ pub(crate) fn nuke_authorization(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ── M-3: PHI creation is gated on first-open auth existing ───────────
+
+    #[test]
+    fn phi_creation_is_refused_until_a_password_exists() {
+        // Before setup the DEK sits in the OS keychain in plaintext, so PHI
+        // written then is protected only by the OS login. The refusal must be
+        // a PreconditionFailed the UI can act on, not an opaque internal error.
+        let err = resolve_auth_gate(false).unwrap_err();
+        assert!(
+            matches!(err, AppError::PreconditionFailed(_)),
+            "expected a precondition the caller can surface, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("password"),
+            "the message must tell the provider what to do, got: {msg}"
+        );
+        // And it must not block once setup is done, or the app is unusable.
+        assert!(resolve_auth_gate(true).is_ok());
+    }
 
     fn test_dek() -> [u8; DEK_BYTES] {
         [0x42u8; DEK_BYTES]
