@@ -33,18 +33,17 @@
 //!
 //! Per-entry MACs defeat SUBSTITUTION and EDIT (authenticity) — the residual
 //! High from the audit. Like any append chain, they do not by themselves detect
-//! TRUNCATION of the newest entries (a MAC-valid prefix is still MAC-valid);
-//! catching a dropped tail needs an external anchor stored outside the database,
-//! which [`crate::audit_tip`] provides for signed encounters (the note-history
-//! tip is recorded at sign-off in a keychain-authenticated sidecar file and
-//! checked on open). A NULL `chain_mac` is treated as legacy ONLY as an
-//! unbroken prefix; once any anchored row is seen, a later NULL is reported as
-//! tamper (F2), so stripping the MAC off a row — including the tail row, which
-//! otherwise has no following row to catch it — cannot launder an edit past
-//! verification. Note that flipping an interior row's stored MAC to NULL does NOT
-//! help an attacker: [`verify_chain`] then verifies the following row against a
-//! `None` predecessor, which no longer matches its stored MAC — so the tamper
-//! surfaces at the next row.
+//! TRUNCATION of the newest entries (a MAC-valid prefix is still MAC-valid). On
+//! this single-user local-first app that truncation residual is an ACCEPTED
+//! RISK (see `AUDIT-RESIDUAL-RISK.md`): an external tip anchor was prototyped
+//! and then removed as over-engineered for this deployment model, because the
+//! only party who can truncate the decrypted database is the DEK holder — who
+//! could equally re-forge any external anchor keyed off that same DEK.
+//!
+//! A NULL `chain_mac` is treated as legacy ONLY as an unbroken prefix; once any
+//! anchored row is seen, a later NULL is reported as tamper (F2), so stripping
+//! the MAC off a row — including the tail row, which has no following row to
+//! catch it — cannot launder an edit past verification.
 
 use ring::hkdf;
 use ring::hmac;

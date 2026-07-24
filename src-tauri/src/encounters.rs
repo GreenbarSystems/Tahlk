@@ -162,22 +162,7 @@ pub(crate) fn mark_encounter_signed(
 ) -> Result<(), AppError> {
     let mut conn = state.conn()?;
     let signed_at = crate::time::utc_now_iso();
-    mark_signed(&mut conn, &id, &signed_at, &signed_hash)?;
-    // Record this now-signed encounter's note-history tip to the external
-    // sidecar anchor so a later tail-truncation of its chain is detectable
-    // (audit_tip.rs). Runs post-commit; best-effort, so a sidecar-write failure
-    // never fails the sign-off itself.
-    if let Ok(Some((seq, mac))) = conn
-        .query_row(
-            "SELECT seq, chain_mac FROM note_history WHERE encounter_id = ?1 ORDER BY seq DESC LIMIT 1",
-            params![id],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
-        )
-        .optional()
-    {
-        crate::audit_tip::record_signed_tip(&id, seq, mac.as_deref());
-    }
-    Ok(())
+    mark_signed(&mut conn, &id, &signed_at, &signed_hash)
 }
 
 /// Pure DB helper for `mark_encounter_signed` — takes any `rusqlite::Connection`
@@ -388,12 +373,6 @@ pub(crate) fn delete_encounter_in_tx(
     // no PHI. Removing it keeps the DB clean; the destruction_log records
     // that this history existed and was destroyed.
     conn.execute("DELETE FROM note_history WHERE encounter_id = ?1", params![id])?;
-
-    // Drop this encounter's external tip anchor (audit_tip.rs) so its now-legit
-    // absence isn't later read as a truncated chain. Best-effort; on a rollback
-    // of this transaction the anchor is merely lost (downgrades to "no anchor",
-    // never a false tamper alarm).
-    crate::audit_tip::remove_tip(id);
 
     // Append to the append-only destruction log (HIPAA PHI disposal record).
     crate::destruction_log::append(
