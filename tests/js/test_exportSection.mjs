@@ -114,13 +114,27 @@ globalThis.FileReader = globalThis.FileReader || class {
 let invokeResponders = {};
 let clipboardWriteImpl = null; // null => falls through to "Clipboard unavailable" throw
 
+// Every invoke, in order — lets a test assert that a command was NOT issued
+// (e.g. no audit row for a cancelled export), which a responder map alone
+// cannot express.
+const calls = [];
+
 function invokeMock(cmd, args) {
+  calls.push({ cmd, args });
   const r = invokeResponders[cmd];
   if (r instanceof Error || (r && typeof r === 'object' && typeof r.code === 'string')) {
     return Promise.reject(r);
   }
   if (typeof r === 'function') return Promise.resolve(r(args));
   if (r !== undefined) return Promise.resolve(r);
+  // The two Save-As commands resolve `true` when a file was actually written
+  // and `false` when the provider dismissed the dialog (see export.rs — both
+  // are successful outcomes, neither is an error). Default the fake to `true`
+  // so an unconfigured test exercises the real save path; a cancel test opts
+  // in explicitly with `invokeResponders[cmd] = false`.
+  if (cmd === 'export_note_to_file' || cmd === 'export_note_pdf_to_file') {
+    return Promise.resolve(true);
+  }
   return Promise.resolve(null);
 }
 
@@ -156,6 +170,7 @@ beforeEach(() => {
   resetDom();
   invokeResponders = {};
   clipboardWriteImpl = null;
+  calls.length = 0;
 });
 
 test('copy failure shows a failure toast instead of throwing silently', async () => {
@@ -189,7 +204,7 @@ test('save-to-file failure shows a failure toast instead of throwing silently', 
 });
 
 test('save-to-file success still shows the success toast', async () => {
-  invokeResponders['export_note_to_file'] = null;
+  invokeResponders['export_note_to_file'] = true; // a file was written
   wireExportSection(makeCtx());
   await clickFileExport('btn-save-file', 'confirm');
 
@@ -207,18 +222,60 @@ test('save-to-pdf failure shows a failure toast instead of throwing silently', a
 });
 
 test('save-to-pdf success still shows the success toast', async () => {
-  invokeResponders['export_note_pdf_to_file'] = null;
+  invokeResponders['export_note_pdf_to_file'] = true; // a file was written
   wireExportSection(makeCtx());
   await clickFileExport('btn-save-pdf', 'confirm');
 
   assert.match(els.get('toast-msg').textContent, /saved as pdf/i);
 });
 
+// ── M-1: dismissing the Save dialog is not a disclosure ────────────────────
+//
+// export_note_to_file / export_note_pdf_to_file resolve `false` when the
+// provider dismissed the native Save dialog. Nothing was written, so nothing
+// downstream may act as though it was: no success toast claiming the note is
+// on disk, and — the reason this is a compliance issue rather than a polish
+// one — no `note_exported` audit row. That log is what a breach assessment
+// reads to decide who to notify under §164.404, so a phantom row means
+// notifying an individual about a disclosure that never happened.
+
+test('a dismissed Save dialog shows no success toast and records no export', async () => {
+  invokeResponders['export_note_to_file'] = false; // user cancelled
+  wireExportSection(makeCtx());
+  await clickFileExport('btn-save-file', 'confirm');
+
+  assert.doesNotMatch(
+    els.get('toast-msg').textContent || '',
+    /saved to file/i,
+    'the app must not claim a file was saved when the dialog was dismissed',
+  );
+  assert.ok(
+    !calls.some(c => c.cmd === 'audit_log_note_exported'),
+    'a cancelled export is not a disclosure and must not reach the audit trail',
+  );
+});
+
+test('a dismissed PDF Save dialog shows no success toast and records no export', async () => {
+  invokeResponders['export_note_pdf_to_file'] = false; // user cancelled
+  wireExportSection(makeCtx());
+  await clickFileExport('btn-save-pdf', 'confirm');
+
+  assert.doesNotMatch(
+    els.get('toast-msg').textContent || '',
+    /saved as pdf/i,
+    'the app must not claim a PDF was saved when the dialog was dismissed',
+  );
+  assert.ok(
+    !calls.some(c => c.cmd === 'audit_log_note_exported'),
+    'a cancelled export is not a disclosure and must not reach the audit trail',
+  );
+});
+
 // ── H4: the unencrypted-PHI warning must gate every file export ────────────
 
 test('save-to-file shows the unencrypted-PHI warning and does not write until confirmed', async () => {
   let wrote = false;
-  invokeResponders['export_note_to_file'] = () => { wrote = true; return null; };
+  invokeResponders['export_note_to_file'] = () => { wrote = true; return true; };
   wireExportSection(makeCtx());
 
   // Open the export; the warning must be up and nothing written yet.
@@ -235,7 +292,7 @@ test('save-to-file shows the unencrypted-PHI warning and does not write until co
 
 test('cancelling the warning blocks the file export entirely', async () => {
   let wrote = false;
-  invokeResponders['export_note_to_file'] = () => { wrote = true; return null; };
+  invokeResponders['export_note_to_file'] = () => { wrote = true; return true; };
   wireExportSection(makeCtx());
 
   await clickFileExport('btn-save-file', 'cancel');
@@ -245,7 +302,7 @@ test('cancelling the warning blocks the file export entirely', async () => {
 
 test('cancelling the warning blocks the PDF export entirely', async () => {
   let wrote = false;
-  invokeResponders['export_note_pdf_to_file'] = () => { wrote = true; return null; };
+  invokeResponders['export_note_pdf_to_file'] = () => { wrote = true; return true; };
   wireExportSection(makeCtx());
 
   await clickFileExport('btn-save-pdf', 'cancel');

@@ -114,9 +114,22 @@ export function exportFilename(encounter, ext = 'txt') {
 }
 
 // Save to a .txt file via the native save dialog.
+//
+// Returns true only if a file was actually written; false means the provider
+// dismissed the dialog. The audit entry and the event are gated on that: a
+// cancelled export is not a disclosure, and recording one puts a note_exported
+// row in the trail for PHI that never left the app. That matters beyond
+// tidiness — the export log is what a breach assessment reads to decide who to
+// notify under §164.404, so a phantom row means notifying an individual about a
+// disclosure that did not happen (M-1).
 export async function saveToFile(text, encounter, format) {
-  await invoke('export_note_to_file', { content: text, suggestedName: exportFilename(encounter) });
+  const saved = await invoke('export_note_to_file', {
+    content: text,
+    suggestedName: exportFilename(encounter),
+  });
+  if (!saved) return false;
 
   await logNoteExported(encounter.id, format, 'file');
   emit('scribe:note_exported', { encounterId: encounter.id, format });
+  return true;
 }
