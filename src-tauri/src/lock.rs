@@ -28,10 +28,11 @@
 use std::num::NonZeroU32;
 
 use ring::pbkdf2;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
 use crate::errors::AppError;
 use crate::hex::{from_hex, to_hex};
+use crate::DbState;
 
 /// This module's own keychain item name. Deliberately distinct from
 /// `secrets`'s and `db_key`'s — see `keychain.rs`'s module doc.
@@ -52,6 +53,21 @@ const HASH_LEN: usize = 32;
 /// existing shorter PIN keeps working until the provider changes it.
 const PIN_MIN_LEN: usize = 6;
 const PIN_MAX_LEN: usize = 64;
+
+/// KV keys for the idle-lock policy settings. Mirrored in JS as
+/// `keys.lockEnabled()` / `keys.lockTimeoutMinutes()` (src/data/keys.js).
+/// Writes go through the audited `lock_enabled_set` / `lock_timeout_set`
+/// commands below, never the generic `kv_set` — `secrets::guard_write_key`
+/// blocks those keys on the write path — so a change to the auto-logoff
+/// safeguard always lands a `config_audit` row (§164.312(b), audit finding M2).
+/// Reads stay open, so the JS warmup → synchronous `kvGet()` path is unchanged.
+pub(crate) const KV_LOCK_ENABLED: &str = "note_settings_v1::lock_enabled";
+pub(crate) const KV_LOCK_TIMEOUT: &str = "note_settings_v1::lock_timeout_minutes";
+
+/// Idle-lock timeout bounds (minutes). Mirrors idleLock.js's MIN/MAX so the
+/// server-side validation matches the client's clamp.
+const MIN_TIMEOUT_MINUTES: i64 = 1;
+const MAX_TIMEOUT_MINUTES: i64 = 60;
 
 fn keyring_entry() -> Result<keyring::Entry, AppError> {
     crate::keychain::entry(KEYRING_USER)
@@ -129,8 +145,16 @@ pub(crate) fn is_pin_set() -> bool {
 }
 
 #[tauri::command]
-pub(crate) fn lock_pin_set(pin: String) -> Result<(), AppError> {
-    set_pin(&pin)
+pub(crate) fn lock_pin_set(app: AppHandle, pin: String) -> Result<(), AppError> {
+    // Setting/changing the idle-lock PIN is a credential-lifecycle event —
+    // record it in the auth trail alongside pin_verify (H1 / M2, §164.312(b)).
+    let r = set_pin(&pin);
+    crate::auth::record_auth_event(
+        &app,
+        "pin_set",
+        if r.is_ok() { "success" } else { "failure" },
+    );
+    r
 }
 
 /// Throttle scope for the idle-lock PIN. The sharpest case for rate limiting
@@ -158,14 +182,54 @@ pub(crate) fn lock_pin_verify(app: AppHandle, pin: String) -> Result<bool, AppEr
 }
 
 #[tauri::command]
-pub(crate) fn lock_pin_clear() -> Result<(), AppError> {
+pub(crate) fn lock_pin_clear(app: AppHandle) -> Result<(), AppError> {
     clear_pin();
+    // Removing the PIN also disables the idle lock (see settingsModal.js), so
+    // this is a safeguard-weakening event worth recording.
+    crate::auth::record_auth_event(&app, "pin_cleared", "success");
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn lock_pin_is_set() -> Result<bool, AppError> {
     Ok(is_pin_set())
+}
+
+/// Enable or disable the idle auto-logoff (§164.312(a)(2)(iii)). Routes through
+/// the shared `set_policy_value` helper so the KV write and its `config_audit`
+/// row (`lock_enabled_changed`, with old→new value and server-derived actor)
+/// land in one transaction — disabling a required safeguard must be provable,
+/// and "changed but not logged" must not be a reachable state (audit M2).
+#[tauri::command]
+pub(crate) fn lock_enabled_set(state: State<DbState>, enabled: bool) -> Result<(), AppError> {
+    let mut conn = state.conn()?;
+    crate::retention::set_policy_value(
+        &mut conn,
+        KV_LOCK_ENABLED,
+        if enabled { "true" } else { "false" },
+        "lock_enabled_changed",
+    )
+}
+
+/// Set the idle auto-logoff timeout in minutes (1–60, matching idleLock.js).
+/// Same atomic KV-write + `config_audit` (`lock_timeout_changed`) as
+/// `lock_enabled_set`; validation lives here so a compromised WebView can't
+/// stash an out-of-range value via the generic `kv_set` (which is now blocked
+/// for this key).
+#[tauri::command]
+pub(crate) fn lock_timeout_set(state: State<DbState>, minutes: i64) -> Result<(), AppError> {
+    if !(MIN_TIMEOUT_MINUTES..=MAX_TIMEOUT_MINUTES).contains(&minutes) {
+        return Err(AppError::invalid(format!(
+            "lock timeout must be between {MIN_TIMEOUT_MINUTES} and {MAX_TIMEOUT_MINUTES} minutes"
+        )));
+    }
+    let mut conn = state.conn()?;
+    crate::retention::set_policy_value(
+        &mut conn,
+        KV_LOCK_TIMEOUT,
+        &minutes.to_string(),
+        "lock_timeout_changed",
+    )
 }
 
 #[cfg(test)]
@@ -220,5 +284,58 @@ mod tests {
         let h1 = hash_pin("same-pin-1234", &[1u8; SALT_LEN], 1000).unwrap();
         let h2 = hash_pin("same-pin-1234", &[2u8; SALT_LEN], 1000).unwrap();
         assert_ne!(h1, h2, "salting must actually vary the derived hash");
+    }
+
+    // ── Idle-lock policy settings (M2, §164.312(a)(2)(iii) + (b)) ─────────────
+
+    #[test]
+    fn lock_kv_keys_match_the_js_side() {
+        // These MUST equal src/data/keys.js's keys.lockEnabled() /
+        // keys.lockTimeoutMinutes(); if they drift, the audited Rust write
+        // targets a different row than the JS idle watcher reads.
+        assert_eq!(KV_LOCK_ENABLED, "note_settings_v1::lock_enabled");
+        assert_eq!(KV_LOCK_TIMEOUT, "note_settings_v1::lock_timeout_minutes");
+    }
+
+    #[test]
+    fn lock_timeout_bounds_match_the_client_clamp() {
+        // idleLock.js clamps to [1, 60]; the server-side validation must agree,
+        // or a value the client accepts gets rejected (or vice versa).
+        assert_eq!((MIN_TIMEOUT_MINUTES, MAX_TIMEOUT_MINUTES), (1, 60));
+    }
+
+    #[test]
+    fn setting_the_lock_writes_kv_and_a_config_audit_row_atomically() {
+        // End-to-end: the audited path (shared with retention) must land BOTH
+        // the kv row the JS reads AND a config_audit row, in one unit.
+        use rusqlite::Connection;
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);",
+        )
+        .unwrap();
+        crate::config_audit::init_schema(&conn).unwrap();
+
+        crate::retention::set_policy_value(&mut conn, KV_LOCK_ENABLED, "false", "lock_enabled_changed")
+            .unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key = ?1",
+                rusqlite::params![KV_LOCK_ENABLED],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "false", "the JS-readable kv row must reflect the change");
+
+        let (action, new_value): (String, String) = conn
+            .query_row(
+                "SELECT action, new_value FROM config_audit ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(action, "lock_enabled_changed");
+        assert_eq!(new_value, "false");
     }
 }

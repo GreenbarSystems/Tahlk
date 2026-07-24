@@ -11,9 +11,11 @@
 // threat this control targets is walking away BETWEEN patients, not mid-
 // session silence.
 
-import { kvGet, kvSet } from './storageBackend.js';
+import { kvGet, kvSet, kvSetCacheOnly } from './storageBackend.js';
 import { keys } from '../data/keys.js';
 import { on } from './eventBus.js';
+import { invoke, isTauri } from '../platform/tauri.js';
+import { toast } from '../utils/format.js';
 
 export const DEFAULT_TIMEOUT_MINUTES = 2;
 const MIN_TIMEOUT_MINUTES = 1;
@@ -35,7 +37,7 @@ export function isLockEnabled() {
 }
 
 export function setLockEnabled(enabled) {
-  kvSet(keys.lockEnabled(), !!enabled);
+  persistLockSetting(keys.lockEnabled(), !!enabled, 'lock_enabled_set', { enabled: !!enabled });
 }
 
 export function getLockTimeoutMinutes() {
@@ -52,7 +54,33 @@ export function setLockTimeoutMinutes(minutes) {
   const raw = Number(minutes);
   const base = Number.isFinite(raw) ? raw : DEFAULT_TIMEOUT_MINUTES;
   const n = Math.min(MAX_TIMEOUT_MINUTES, Math.max(MIN_TIMEOUT_MINUTES, Math.round(base)));
-  kvSet(keys.lockTimeoutMinutes(), n);
+  persistLockSetting(keys.lockTimeoutMinutes(), n, 'lock_timeout_set', { minutes: n });
+}
+
+// Persist a lock setting through its dedicated, audited Rust command
+// (lock_enabled_set / lock_timeout_set), which writes the KV row AND a
+// config_audit entry in one transaction. The generic kv_set is blocked for
+// these keys server-side (secrets::guard_write_key), so a change to the
+// auto-logoff safeguard can't be made without a tamper-evident record (M2).
+//
+// The cache is updated synchronously first so the idle watcher and the
+// settings pane's immediate read-back (getLockTimeoutMinutes right after a set)
+// see the new value without waiting on the round-trip; a failed write reverts
+// the cache and warns, mirroring storageBackend's optimistic kvSet. In the
+// non-Tauri web preview there is no Rust command, so fall back to the plain KV
+// write (localStorage) — that dev-only mode has no server-side audit anyway.
+function persistLockSetting(key, value, command, args) {
+  if (!isTauri) {
+    kvSet(key, value);
+    return;
+  }
+  const prior = kvGet(key);
+  kvSetCacheOnly(key, value);
+  invoke(command, args).catch(e => {
+    console.error(`${command} failed`, e);
+    kvSetCacheOnly(key, prior);
+    toast('Change was not saved — reverted', 4500);
+  });
 }
 
 // Starts watching for inactivity. `onLock` fires once when the idle window

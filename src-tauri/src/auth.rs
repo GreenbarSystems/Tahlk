@@ -466,6 +466,8 @@ pub(crate) const AUTH_AUDIT_EVENTS: &[&str] = &[
     "password_reset_recovery",  // forgot-password: reset via recovery code
     "recovery_codes_regenerated", // Settings: regenerate all three codes
     "pin_verify",               // idle-lock PIN verification
+    "pin_set",                  // idle-lock PIN set / changed
+    "pin_cleared",              // idle-lock PIN removed (also disables the lock)
     "session_locked",           // idle-lock activation (auto-logoff)
     "nuke_reinstall",           // irreversible wipe attempt
 ];
@@ -1783,6 +1785,9 @@ mod tests {
             ("password_reset_recovery", "success"),
             ("recovery_codes_regenerated", "success"),
             ("pin_verify", "failure"),
+            ("pin_set", "success"),
+            ("pin_set", "failure"),
+            ("pin_cleared", "success"),
             ("session_locked", "success"),
             ("nuke_reinstall", "refused"),
         ] {
