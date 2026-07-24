@@ -42,7 +42,7 @@ call the provider explicitly triggers.
 | A | Session audio recording | Patient conversation audio | At rest (device) | Yes — AES-256-GCM (`0e32611`) |
 | B | Transcription (whisper.cpp sidecar) | Patient conversation, audio + text | Transient at rest (device) | No — bounded-window plaintext, see [§2 Flow B](#flow-b--transcript-and-audio-scratch-files-transient-plaintext) |
 | C | Note export (.txt / .pdf) | Full clinical note | At rest (device, provider-chosen path) | No — by design, see [§2 Flow C](#flow-c--provider-directed-note-pdftxt-export-unencrypted) |
-| D | Note generation (Anthropic; managed-key model, BYOK during beta) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; **managed-key model — provider↔Greenbar BAA+EULA and Greenbar↔Anthropic BAA both required before real-PHI use; Greenbar↔Anthropic BAA executed 2026-07-18 (ZDR provisioning pending Anthropic approval); provider↔Greenbar BAA + EULA in attorney drafting week of 2026-07-13, not yet executed with any practice** — see [§2 Flow D](#flow-d--note-generation-via-anthropic-managed-key-model-byok-during-beta) |
+| D | Note generation (Anthropic; managed-key proxy) | Patient conversation transcript | In transit (network) | Yes (TLS) in transit; **managed-key proxy shipped (ADR 0006) and BAA gate enforced, but the executed-contract prerequisites are still pending: Greenbar↔Anthropic BAA executed 2026-07-18 with ZDR provisioning pending Anthropic approval; provider↔Greenbar BAA + EULA not yet executed with any practice. Real-PHI use is gated procedurally until both land** — see [§2 Flow D](#flow-d--note-generation-via-anthropic-managed-key-proxy) |
 | E | Signed note, transcript, audit log, provider/patient records | Everything above, persisted | At rest (device, app-managed SQLite) | Yes — SQLCipher (confirmed clean in the prior PHI-at-rest audit) |
 | F | Diagnostics log export | App diagnostics only | At rest (device, provider-chosen path) | No, but confirmed non-PHI, see [§2 Flow F](#flow-f--diagnostics-log-export-unencrypted-file-no-phi-content) |
 
@@ -150,7 +150,7 @@ treatment (checked via `grep -n "export_note|fs::write" src-tauri/src/export.rs`
 
 ---
 
-### Flow D — Note generation via Anthropic (managed-key model; BYOK during beta)
+### Flow D — Note generation via Anthropic (managed-key proxy)
 
 **What it is.** `generate_note` (`src-tauri/src/notes.rs`) sends the session
 transcript — PHI — to Anthropic's API to produce the structured clinical note.
@@ -161,17 +161,34 @@ practice — holds the relationship with Anthropic, which is Greenbar's
 **subcontractor**. The provider's agreements are with Greenbar: a Business
 Associate Agreement (BAA) and an End User License Agreement (EULA).
 
-**Current implementation, stated plainly to avoid overclaiming the model:** the
-managed-key proxy (`MANAGED-KEY-PROXY-CONTRACT.md`, a v1 draft) is **not built**.
-During the current test-data-only beta the transcript is sent using a
-provider-supplied Anthropic key entered in the app (bring-your-own-key) — a
-**transitional mechanism**, not the end-state. The compliance model above is the
-target the product is built around; the implementation has not caught up to it.
+**Current implementation, stated plainly to avoid overclaiming in either
+direction:** the managed-key proxy is now **built and shipped** ([ADR 0006](../adr/0006-enforce-baa-gate-managed-key.md),
+2026-07-23). BYOK is **fully retired** — the desktop app holds no Anthropic key
+of its own and routes every `generate_note` call through Greenbar's server-side
+proxy, which uses Greenbar's own key (`notes.rs`, `device.rs`,
+`MANAGED-KEY-ROLLOUT.md`). The BAA acknowledgment gate is **enforced in
+production** (`baa::GATE_ENABLED = true`), and onboarding now blocks on the
+BAA/EULA acknowledgment. **The code has caught up to the compliance model; the
+executed contracts have not** (see status below).
 
 **Risk classification:** Conditionally permitted third-party PHI disclosure —
-gated, not blanket-accepted. **Condition currently unmet:** the managed model's
-prerequisites are not in place (see status below), so real-PHI use is not yet
-supported. Treat this as an open item.
+gated, not blanket-accepted. **The unmet condition has moved from code to
+paper.** The technical prerequisites are in place — proxy live, gate enforced,
+BYOK gone — so nothing in the software now restricts transmission to test data
+the way the ADR-0003 beta (gate disabled, test-data-only) did. What is *not* yet
+in place is the executed BAA chain and ZDR provisioning. This is the material
+open item, and it cuts the opposite way from before:
+
+> **The test-data-only guardrail is now PROCEDURAL, not technical.** Under
+> ADR 0003 the gate was disabled and the arrangement was BYOK-beta; real PHI
+> simply wasn't wired to flow. Under ADR 0006 it is: a provider who completes
+> onboarding and checks the acknowledgment box **will** transmit real
+> transcripts through the managed proxy. The in-app acknowledgment is a local
+> flag, **not** evidence that the legal BAA + EULA are executed or that ZDR is
+> active upstream. Until the contracts below are executed, the only thing
+> keeping real PHI out of an unbacked disclosure chain is the operational
+> decision not to invite real-PHI practices — hold that line, and do not read
+> the enforced gate as if it were that safeguard.
 
 **Why sending PHI to Anthropic is not an automatic compliance violation:**
 HIPAA permits a Covered Entity to disclose PHI to a Business Associate under a
@@ -200,14 +217,17 @@ technical gate, not a policy statement:
 confirm the state of a legal agreement):**
 
 - **Greenbar ↔ Anthropic BAA:** **executed 2026-07-18.** Zero-Data-Retention
-  (ZDR) provisioning on the dedicated Anthropic organization behind the future
-  managed-key proxy is **pending Anthropic approval** — the BAA is signed, but
-  ZDR must be provisioned on the org before the `TAHLK_ANTHROPIC_KEY` in
-  `MANAGED-KEY-PROXY-CONTRACT.md` §3 is usable for real-PHI traffic (see that
-  contract's §3 and §7, which require the upstream Anthropic org to have ZDR
-  enabled). Update this line — with the Anthropic-provided approval date — the
-  moment ZDR is confirmed active on the org; do not treat the signed BAA alone
-  as sufficient to route real PHI through the managed proxy.
+  (ZDR) provisioning on the dedicated Anthropic organization behind the
+  now-shipped managed-key proxy is **still pending Anthropic approval** — the BAA
+  is signed, but ZDR must be provisioned on the org before the
+  `TAHLK_ANTHROPIC_KEY` in `MANAGED-KEY-PROXY-CONTRACT.md` §3 is usable for
+  real-PHI traffic (see that contract's §3 and §7, which require the upstream
+  Anthropic org to have ZDR enabled). **This is now the binding constraint:** the
+  proxy code is deployed and the gate is enforced, so ZDR provisioning — not the
+  proxy build — is what stands between the current state and compliant real-PHI
+  traffic. Update this line — with the Anthropic-provided approval date — the
+  moment ZDR is confirmed active on the org; do not treat the signed BAA alone,
+  or the shipped proxy, as sufficient to route real PHI.
 - **Provider ↔ Greenbar BAA + EULA:** **in attorney drafting, week of
   2026-07-13.** A licensed healthcare attorney is drafting both agreements —
   see the required-contract-elements list in `MANAGED-KEY-ROLLOUT.md` §2
@@ -218,23 +238,27 @@ confirm the state of a legal agreement):**
 
 **Action items (not code concerns):** Tahlk's technical gate only enforces that
 *some* confirmation exists in the local database — it does not itself constitute
-or replace the signed agreements. Track to completion: (1) confirm ZDR
-provisioning on the Anthropic org and record the approval date on the status
-line above; (2) finalize the attorney-drafted provider↔Greenbar BAA and EULA,
-then execute them with each practice before that practice uses real patient
-information; (3) build the managed-key proxy and re-assess this flow under this
-document before release; (4) keep the in-app confirmation (`baa_ack_set`) in
-sync with those real-world agreements — the gate trusts the local flag; it
-cannot verify the underlying paperwork.
+or replace the signed agreements. **Item (3) — build the managed-key proxy — is
+now done** (ADR 0006); the remaining items are contractual/operational and are
+what now gate real-PHI use: (1) confirm ZDR provisioning on the Anthropic org
+and record the approval date on the status line above; (2) finalize the
+attorney-drafted provider↔Greenbar BAA and EULA, then execute them with each
+practice before that practice uses real patient information; (3) **do not send
+real-PHI beta invitations until (1) and (2) are complete** — with the gate now
+enforced and BYOK gone, this is the only remaining barrier and it is procedural,
+so it must be held deliberately; (4) keep the in-app confirmation
+(`baa_ack_set`) in sync with those real-world agreements — the gate trusts the
+local flag; it cannot verify the underlying paperwork.
 
 **Conditions to remain accepted:** `require_ack` must remain the first statement
 in `generate_note` (before any key read, client build, or transcript handling);
 the confirmation flow must remain a hard `Result` gate (`AppError::BaaRequired`),
-not a soft warning; the managed-key proxy, when built, must be re-assessed under
-this document before release — it moves the Anthropic API key server-side to
+not a soft warning; and the managed-key proxy — now shipped and re-assessed
+under this document per ADR 0006 — moves the Anthropic API key server-side to
 Greenbar (per `MANAGED-KEY-PROXY-CONTRACT.md` §1's own banner: *"The proxy is a
 HIPAA Business Associate... MUST NOT log, persist, or cache request/response
-bodies."*).
+bodies."*), so the proxy's own no-retention behavior must be verified as an
+operational control, not assumed from the contract text.
 
 ---
 
@@ -544,8 +568,10 @@ obligations to their own patients under §164.404/408 for an incident
 confined to their own device. Greenbar Systems' role above is to support that
 obligation by promptly disclosing anything discovered about the software
 itself, and to independently evaluate its own notification duties as a
-business associate where that role applies (e.g., the Anthropic-relay flow in
-Flow D, or a future managed-key proxy).
+business associate where that role applies — now including the shipped
+managed-key proxy in Flow D, for which Greenbar holds the business-associate
+role directly (ADR 0006). See the incident-response runbook §6 for how this
+splits device-confined vs. note-generation-flow notification duties.
 
 **Audit-trail forgery vectors — closed (relevant to breach notification).**
 Two Tauri invoke commands (`audit_append`, `note_history_append`) previously
@@ -716,3 +742,15 @@ This document should be re-reviewed:
   Rust transaction. §4 and §6 updated to document both fixes and the
   breach-notification relevance of reliable audit-trail evidence. Updated
   "As of commit" to `abc176c`.
+- (2026-07-24 update) — Flow D reconciled with [ADR 0006](../adr/0006-enforce-baa-gate-managed-key.md):
+  the managed-key proxy is now **built and shipped** and BYOK is **retired**
+  (`baa::GATE_ENABLED = true`, gate enforced in production), correcting the
+  prior "not built / BYOK-during-beta" framing. The **executed contracts remain
+  pending** (Greenbar↔Anthropic ZDR provisioning; provider↔Greenbar BAA + EULA),
+  so the material open item flipped from *code* to *paper*, and the test-data-only
+  guardrail is now **procedural, not technical** — flagged prominently because the
+  enforced gate must not be mistaken for that safeguard. Updated: §2 Flow D heading
+  + anchor, the §2 table row, the Flow D body (current implementation / risk
+  classification / status / action items / conditions), and §6's business-associate
+  language. Resolves the ADR-0006 ↔ risk-assessment inconsistency flagged in the
+  incident-response runbook §6.
