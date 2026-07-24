@@ -34,8 +34,10 @@
 //! Per-entry MACs defeat SUBSTITUTION and EDIT (authenticity) — the residual
 //! High from the audit. Like any append chain, they do not by themselves detect
 //! TRUNCATION of the newest entries (a MAC-valid prefix is still MAC-valid);
-//! catching a dropped tail needs an external monotonic tip anchor and is tracked
-//! separately. Note that flipping an interior row's stored MAC to NULL does NOT
+//! catching a dropped tail needs an external anchor stored outside the database,
+//! which [`crate::audit_tip`] provides for signed encounters (the note-history
+//! tip is recorded at sign-off in a keychain-authenticated sidecar file and
+//! checked on open). Note that flipping an interior row's stored MAC to NULL does NOT
 //! help an attacker: [`verify_chain`] then verifies the following row against a
 //! `None` predecessor, which no longer matches its stored MAC — so the tamper
 //! surfaces at the next row.
