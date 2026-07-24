@@ -50,15 +50,6 @@ use crate::errors::AppError;
 use crate::DbState;
 
 /// SHA-256 of `data` returned as a 64-char lowercase hex string.
-/// Matches JS's `sha256Hex(str)` in contentHash.js (same algorithm, same
-/// encoding), so hashes computed here and hashes computed in JS are identical
-/// for the same input bytes — which is required for `verifyAuditChain` to
-/// pass on entries written by the narrow server-side commands below.
-fn sha256_hex(data: &[u8]) -> String {
-    use ring::digest::{digest, SHA256};
-    let hash = digest(&SHA256, data);
-    hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
-}
 
 /// Internal append used by all narrow server-side audit commands.
 ///
@@ -115,7 +106,7 @@ fn server_append(
     }
 
     let hash_json = serde_json::to_string(&payload).map_err(AppError::internal_from)?;
-    let entry_hash = sha256_hex(hash_json.as_bytes());
+    let entry_hash = crate::crypto::sha256_hex(hash_json.as_bytes());
 
     // Add entryHash to produce the full stored entry (superset of what was
     // hashed — callers can round-trip this JSON and re-derive the hash,
@@ -540,70 +531,18 @@ pub(crate) fn audit_archive_list(state: State<DbState>, encounter_id: String) ->
 #[tauri::command]
 pub(crate) fn verify_audit_macs(state: State<DbState>, encounter_id: String) -> Result<Value, AppError> {
     let conn = state.conn()?;
-    let key = crate::audit_mac::mac_key()?;
-    let mut stmt = conn.prepare(
-        "SELECT seq, entry_hash, chain_mac FROM note_audit \
-         WHERE encounter_id = ?1 ORDER BY seq",
-    )?;
-    let rows: Vec<(i64, String, Option<String>)> = stmt
-        .query_map(params![encounter_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<Result<_, _>>()?;
-    let verdict =
-        crate::audit_mac::verify_chain(&key, rows.iter().map(|(s, h, m)| (*s, h.as_str(), m.as_deref())));
-    Ok(json!({
-        "ok": verdict.ok,
-        "brokenAt": verdict.broken_at,
-        "reason": verdict.reason,
-        "legacySkipped": verdict.legacy_skipped,
-    }))
+    crate::audit_mac::verify_table_chain(&conn, "note_audit", &encounter_id)
 }
 
-// Removed from the invoke handler — callers must use the narrow audit_log_*
-// commands above so that actor identity is derived server-side and cannot be
-// forged by a compromised WebView.
-#[allow(dead_code)]
-pub(crate) fn audit_append(
-    state: State<DbState>,
-    encounter_id: String,
-    entry: Value,
-    evicted_count: i64,
-) -> Result<i64, AppError> {
-    if !(0..=MAX_EVICT_PER_APPEND).contains(&evicted_count) {
-        return Err(AppError::invalid("evicted_count out of range"));
-    }
-    let prev_hash = match entry.get("prevHash") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => {
-            if s.len() > 128 {
-                return Err(AppError::invalid("prevHash exceeds 128 bytes"));
-            }
-            Some(s.clone())
-        }
-        Some(_) => return Err(AppError::invalid("prevHash must be string or null")),
-    };
-    let entry_hash = entry
-        .get("entryHash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::invalid("missing string field: entryHash"))?;
-    if entry_hash.len() > 128 {
-        return Err(AppError::invalid("entryHash exceeds 128 bytes"));
-    }
-    let entry_hash = entry_hash.to_string();
-    let entry_json = serde_json::to_string(&entry).map_err(AppError::internal_from)?;
-    if entry_json.len() > MAX_ENTRY_JSON_BYTES {
-        return Err(AppError::invalid("audit entry exceeds 16 KiB"));
-    }
-
-    let mut conn = state.conn()?;
-    append_audit_row(&mut conn, &encounter_id, prev_hash.as_deref(), &entry_hash, &entry_json, evicted_count)
-}
-
-// Transactional core of audit_append, split out so it can be driven
-// directly against a plain `Connection` in unit tests — same pattern as
-// note_history::append_history_row, including its exact race-safety
-// characteristics: the prev_hash check below catches a diverged local
-// chain (InvalidInput); the UNIQUE(encounter_id, seq) constraint is what
-// actually stops a genuine concurrent-append race (Storage).
+// Transactional core of the note_audit append: opens a transaction for the
+// race-safe seq/prev_hash check, the INSERT, and the optional archive eviction.
+// Driven by `server_append` (the live path) and by unit tests against a plain
+// `Connection`. Race-safety: the prev_hash check catches a diverged local chain
+// (InvalidInput); the UNIQUE(encounter_id, seq) constraint is what actually
+// stops a genuine concurrent-append race (Storage). The old open `audit_append`
+// command that wrapped this — forgeable actor, removed from the invoke handler —
+// has now been deleted (M3); the narrow audit_log_* commands are the only
+// append path.
 fn append_audit_row(
     conn: &mut Connection,
     encounter_id: &str,

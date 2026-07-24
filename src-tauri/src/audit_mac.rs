@@ -47,6 +47,8 @@
 
 use ring::hkdf;
 use ring::hmac;
+use rusqlite::{params, Connection};
+use serde_json::{json, Value};
 
 use crate::errors::AppError;
 
@@ -202,6 +204,36 @@ pub(crate) fn verify_chain<'a>(
         prev_mac = stored.map(|s| s.to_string());
     }
     MacVerdict { ok: true, broken_at: None, reason: None, legacy_skipped }
+}
+
+/// Verify one encounter's keyed-MAC chain in `table` and return the verdict as
+/// JSON shaped for `reportIntegrityFailure` (integrityAlert.js):
+/// `{ ok, brokenAt, reason, legacySkipped }`.
+///
+/// `table` MUST be a trusted, compile-time table name — the two callers pass
+/// the literals `"note_history"` and `"note_audit"`; it is interpolated into
+/// the query and never taken from input. Shared by `verify_history_macs` and
+/// `verify_audit_macs`, which were byte-identical apart from that name (M1).
+pub(crate) fn verify_table_chain(
+    conn: &Connection,
+    table: &str,
+    encounter_id: &str,
+) -> Result<Value, AppError> {
+    let key = mac_key()?;
+    let sql = format!(
+        "SELECT seq, entry_hash, chain_mac FROM {table} WHERE encounter_id = ?1 ORDER BY seq"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<(i64, String, Option<String>)> = stmt
+        .query_map(params![encounter_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let verdict = verify_chain(&key, rows.iter().map(|(s, h, m)| (*s, h.as_str(), m.as_deref())));
+    Ok(json!({
+        "ok": verdict.ok,
+        "brokenAt": verdict.broken_at,
+        "reason": verdict.reason,
+        "legacySkipped": verdict.legacy_skipped,
+    }))
 }
 
 #[cfg(test)]

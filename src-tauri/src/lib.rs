@@ -40,6 +40,7 @@ mod audit_mac;
 mod auth;
 mod baa;
 mod config_audit;
+mod crypto;
 mod db;
 mod db_key;
 mod destruction_log;

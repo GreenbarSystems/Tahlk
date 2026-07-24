@@ -14,14 +14,6 @@ use crate::errors::AppError;
 use crate::retention;
 use crate::DbState;
 
-/// SHA-256 hex digest of `input` — used to blind encounter_id in note_audit
-/// rows after PHI destruction so the orphaned ID cannot be treated as a
-/// CCPA "unique identifier" at rest.
-fn sha256_hex(input: &str) -> String {
-    let d = ring::digest::digest(&ring::digest::SHA256, input.as_bytes());
-    crate::hex::to_hex(d.as_ref())
-}
-
 /// The columns `enforce_signed_immutability` freezes once a row is signed, in
 /// SELECT order: status, signed_at, signed_hash, created_at, provider_id,
 /// encounter_date, audio_path.
@@ -363,7 +355,7 @@ pub(crate) fn delete_encounter_in_tx(
     // Blind the encounter_id column (SHA-256 of id+timestamp, non-reversible)
     // so the orphaned identifier cannot be used to re-link rows to a deleted
     // subject — satisfying CCPA's "unique identifier" disposal requirement.
-    let blinded = sha256_hex(&format!("{id}{now}"));
+    let blinded = crate::crypto::sha256_hex(format!("{id}{now}").as_bytes());
     conn.execute(
         "UPDATE note_audit SET encounter_id = ?1 WHERE encounter_id = ?2",
         params![blinded, id],
