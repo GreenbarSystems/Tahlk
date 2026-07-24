@@ -255,23 +255,14 @@ pub(crate) fn note_history_list(state: State<DbState>, encounter_id: String) -> 
     Ok(rows)
 }
 
-// SHA-256 of `data` as a 64-char lowercase hex string.
-// Matches JS's sha256Hex in contentHash.js — same algorithm, same encoding —
-// so hashes computed here are identical to those verified by verifyHistoryChain.
-fn sha256_hex(data: &[u8]) -> String {
-    use ring::digest::{digest, SHA256};
-    let hash = digest(&SHA256, data);
-    hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
-}
-
 // Actor is derived server-side via `kv_ops::provider_id` — this module used to
 // carry its own copy of that read (`provider_name_from_kv`).
 
 /// Raw INSERT of one note_history row inside the caller's transaction.
 /// Does NOT open its own transaction — must be called from within an
-/// already-open transaction or a plain Connection (auto-commit).
-/// Factored out of `append_history_row` so `server_history_append` can reuse
-/// it inside a caller-supplied transaction without nesting BEGIN/COMMIT.
+/// already-open transaction or a plain Connection (auto-commit) — so
+/// `server_history_append` can reuse it inside its caller-supplied transaction
+/// without nesting BEGIN/COMMIT.
 // One parameter per history column. These are the fields the hash chain
 // covers, so a struct that could be partially populated would let a caller
 // omit one and produce an entry whose hash no longer describes what was
@@ -365,7 +356,7 @@ fn server_history_append(
     payload.insert("timestamp".to_string(), json!(timestamp));
 
     let hash_json = serde_json::to_string(&payload).map_err(AppError::internal_from)?;
-    let entry_hash = sha256_hex(hash_json.as_bytes());
+    let entry_hash = crate::crypto::sha256_hex(hash_json.as_bytes());
 
     insert_history_row(
         conn, encounter_id, action, actor, &timestamp,
@@ -445,151 +436,21 @@ pub(crate) fn verify_history_macs(
     encounter_id: String,
 ) -> Result<Value, AppError> {
     let conn = state.conn()?;
-    let key = crate::audit_mac::mac_key()?;
-    let mut stmt = conn.prepare(
-        "SELECT seq, entry_hash, chain_mac FROM note_history \
-         WHERE encounter_id = ?1 ORDER BY seq",
-    )?;
-    let rows: Vec<(i64, String, Option<String>)> = stmt
-        .query_map(params![encounter_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<Result<_, _>>()?;
-    let verdict =
-        crate::audit_mac::verify_chain(&key, rows.iter().map(|(s, h, m)| (*s, h.as_str(), m.as_deref())));
-    Ok(json!({
-        "ok": verdict.ok,
-        "brokenAt": verdict.broken_at,
-        "reason": verdict.reason,
-        "legacySkipped": verdict.legacy_skipped,
-    }))
-}
-
-// Removed from the invoke handler — callers must use the narrow commands above
-// (history_note_generated, history_note_edited) or the mark_encounter_signed
-// path (for the signed entry) so actor identity is always derived server-side.
-#[allow(dead_code)]
-pub(crate) fn note_history_append(
-    state: State<DbState>,
-    encounter_id: String,
-    entry: Value,
-) -> Result<i64, AppError> {
-    // All fields required except notes/prev_hash. entry_hash is opaque data
-    // computed by JS; Rust does not re-derive it. Length caps guard against
-    // pathological payloads from a compromised WebView. Validation failures
-    // map to `InvalidInput` (frontend bug), not `Storage`.
-    fn take_str(v: &Value, k: &str, max: usize) -> Result<String, AppError> {
-        let s = v
-            .get(k)
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| AppError::invalid(format!("missing string field: {}", k)))?;
-        if s.len() > max {
-            return Err(AppError::invalid(format!("{} exceeds {} bytes", k, max)));
-        }
-        Ok(s.to_string())
-    }
-    fn opt_str(v: &Value, k: &str, max: usize) -> Result<Option<String>, AppError> {
-        match v.get(k) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(s)) => {
-                if s.len() > max {
-                    return Err(AppError::invalid(format!("{} exceeds {} bytes", k, max)));
-                }
-                Ok(Some(s.clone()))
-            }
-            Some(_) => Err(AppError::invalid(format!("{} must be string or null", k))),
-        }
-    }
-
-    let action = take_str(&entry, "action", 32)?;
-    let actor = take_str(&entry, "actor", 256)?;
-    let timestamp = take_str(&entry, "timestamp", 64)?;
-    let content_hash = take_str(&entry, "contentHash", 128)?;
-    // notes may be missing / empty; default to "".
-    let notes = entry
-        .get("notes")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if notes.len() > 4096 {
-        return Err(AppError::invalid("notes exceeds 4096 bytes"));
-    }
-    let prev_hash = opt_str(&entry, "prevHash", 128)?;
-    let entry_hash = take_str(&entry, "entryHash", 128)?;
-
-    let mut conn = state.conn()?;
-    append_history_row(
-        &mut conn, &encounter_id, &action, &actor, &timestamp, &content_hash,
-        &notes, prev_hash.as_deref(), &entry_hash,
-    )
-}
-
-// Transactional core of note_history_append, split out so it can be driven
-// directly against a plain `Connection` in unit tests (no Tauri State
-// harness needed) — same pattern as encounters::upsert_encounter_row.
-//
-// Race-safety note: the prev_hash check below does NOT by itself close the
-// "two panels racing an append" hole. Both concurrent transactions can read
-// the same last_hash before either has written (SQLite's default DEFERRED
-// transaction takes no lock until the first write), so both can pass the
-// prev_hash check identically and then both attempt to INSERT the same
-// (encounter_id, seq). The actual guarantee against a silent seq collision
-// is the `UNIQUE (encounter_id, seq)` table constraint (see init_schema
-// above): the loser's INSERT fails at the SQL layer with a constraint
-// violation, surfaced here as `AppError::Storage` via the blanket
-// `From<rusqlite::Error>` impl. The prev_hash check instead catches a
-// different, non-concurrent case: a caller whose local chain has genuinely
-// diverged from what's committed (e.g. it appended against a stale/cached
-// view of the history), which correctly maps to `InvalidInput` since that's
-// a client-side logic mismatch, not a storage failure.
-// Same reasoning as insert_history_row: every hashed field is an explicit
-// parameter so none can be silently omitted.
-#[allow(clippy::too_many_arguments)]
-fn append_history_row(
-    conn: &mut Connection,
-    encounter_id: &str,
-    action: &str,
-    actor: &str,
-    timestamp: &str,
-    content_hash: &str,
-    notes: &str,
-    prev_hash: Option<&str>,
-    entry_hash: &str,
-) -> Result<i64, AppError> {
-    // Open a transaction for the race-safe seq/prev_hash check + INSERT.
-    // insert_history_row handles the actual check and write; the transaction
-    // wrapper here is what makes the check+insert atomic.
-    //
-    // Race-safety note: the prev_hash check does NOT by itself close the
-    // "two panels racing an append" hole. Both concurrent transactions can
-    // read the same last_hash before either has written (SQLite's default
-    // DEFERRED transaction takes no lock until the first write), so both
-    // can pass the check identically and then both attempt to INSERT the
-    // same (encounter_id, seq). The actual guarantee against a silent seq
-    // collision is the `UNIQUE (encounter_id, seq)` table constraint: the
-    // loser's INSERT fails with a constraint violation, surfaced as
-    // `AppError::Storage`. The prev_hash check instead catches a different,
-    // non-concurrent case: a caller whose local chain has genuinely diverged
-    // from what's committed (stale/cached view), correctly mapped to
-    // `AppError::InvalidInput`.
-    let tx = conn.transaction()?;
-    let seq = insert_history_row(
-        &tx, encounter_id, action, actor, timestamp,
-        content_hash, notes, prev_hash, entry_hash,
-    )?;
-    tx.commit()?;
-    Ok(seq)
+    crate::audit_mac::verify_table_chain(&conn, "note_history", &encounter_id)
 }
 
 #[cfg(test)]
 mod tests {
-    //! Unit-level coverage for append_history_row, driven directly against a
-    //! raw in-memory SQLite (same pattern as encounters::tests) so we don't
-    //! need a Tauri State harness.
+    //! Unit-level coverage for the note-history insert path (insert_history_row
+    //! wrapped in a transaction), driven directly against a raw in-memory
+    //! SQLite (same pattern as encounters::tests) so we don't need a Tauri
+    //! State harness.
     //!
     //! The key thing pinned here is which mechanism actually stops a
     //! concurrent-append race from silently corrupting the seq ordering: NOT
     //! the prev_hash check (both racing writers can read the same prior
     //! state and pass it identically), but the UNIQUE(encounter_id, seq)
-    //! table constraint. See the race-safety note on append_history_row.
+    //! table constraint.
 
     use super::*;
 
@@ -599,16 +460,24 @@ mod tests {
         conn
     }
 
+    // The old `append_history_row` (deleted with the dead `note_history_append`
+    // command, M3) was just insert_history_row wrapped in a transaction — which
+    // is exactly what the live `server_history_append` does inside its own tx.
+    // Reproduce that wrapper here so these race-safety tests keep exercising the
+    // real insert path.
     fn append(
         conn: &mut Connection,
         encounter_id: &str,
         prev_hash: Option<&str>,
         entry_hash: &str,
     ) -> Result<i64, AppError> {
-        append_history_row(
-            conn, encounter_id, "note_saved", "provider-1", "2026-07-11T10:00:00Z",
+        let tx = conn.transaction()?;
+        let seq = insert_history_row(
+            &tx, encounter_id, "note_saved", "provider-1", "2026-07-11T10:00:00Z",
             "content-hash", "", prev_hash, entry_hash,
-        )
+        )?;
+        tx.commit()?;
+        Ok(seq)
     }
 
     #[test]
