@@ -406,16 +406,19 @@ function wireAsyncActionButton({ id, resultId, busyLabel, idleLabel, failPrefix,
 function renderDestructionLogTable(rows) {
   // Static header written inline (not via a variable) so the HTML-escape build
   // guard can see it is a literal, not an interpolated value to escape.
+  // patient_alias is now a one-way SHA-256 blind (see destruction_log.rs), not a
+  // readable name — show a short prefix as a compact correlation token (the full
+  // blind is in the CSV export). System rows carry no alias; fall back to entity_id.
   const body = rows.map(r => `<tr>
     <td>${escapeHtml(r.created_at.slice(0, 10))}</td>
     <td>${escapeHtml(r.provider_id)}</td>
     <td>${escapeHtml(r.entity_type)}</td>
-    <td>${escapeHtml(r.patient_alias || r.entity_id)}</td>
+    <td>${escapeHtml(r.patient_alias ? r.patient_alias.slice(0, 12) : r.entity_id)}</td>
     <td>${escapeHtml(r.legal_basis)}</td>
     <td>${Number(r.records_scrubbed)}</td>
   </tr>`).join('');
   return `<div class="destlog-table-wrap"><table class="destlog-table"><tr>
-    <th>Date</th><th>Provider</th><th>Type</th><th>Patient</th><th>Basis</th><th>Records</th>
+    <th>Date</th><th>Provider</th><th>Type</th><th>Patient (blinded)</th><th>Basis</th><th>Records</th>
   </tr>${body}</table></div>`;
 }
 
