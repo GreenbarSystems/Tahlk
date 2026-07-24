@@ -27,8 +27,14 @@ use crate::DbState;
 
 /// Valid `action` values. Same discipline as `patient_audit::VALID_ACTIONS` —
 /// a compliance record must not accept an arbitrary string.
-pub(crate) const VALID_ACTIONS: &[&str] =
-    &["retention_years_changed", "litigation_hold_changed"];
+pub(crate) const VALID_ACTIONS: &[&str] = &[
+    "retention_years_changed",
+    "litigation_hold_changed",
+    // Idle auto-logoff (§164.312(a)(2)(iii)) — disabling it or lengthening the
+    // window weakens a required safeguard, so each change is audited (M2).
+    "lock_enabled_changed",
+    "lock_timeout_changed",
+];
 
 pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     migrate_legacy_schema(conn)?;
@@ -200,6 +206,20 @@ mod tests {
         let err = append(&conn, "sneaky_untracked_action", None, "x", "Dr. Chen").unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
         assert!(rows(&conn).is_empty(), "a rejected action must leave no row");
+    }
+
+    #[test]
+    fn idle_lock_setting_actions_are_accepted() {
+        // M2: disabling auto-logoff / changing its timeout must be recordable
+        // in the same trail as the retention/hold settings.
+        let conn = fresh_db();
+        append(&conn, "lock_enabled_changed", Some("true"), "false", "Dr. Chen").unwrap();
+        append(&conn, "lock_timeout_changed", Some("2"), "10", "Dr. Chen").unwrap();
+        let r = rows(&conn);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].0, "lock_enabled_changed");
+        assert_eq!(r[0].2, "false");
+        assert_eq!(r[1].0, "lock_timeout_changed");
     }
 
     #[test]

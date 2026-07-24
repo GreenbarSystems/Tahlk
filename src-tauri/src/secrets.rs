@@ -92,6 +92,15 @@ pub(crate) const WRITE_ONLY_PROTECTED_KEYS: &[&str] = &[
     // retention_hold_set, which validate and audit. Reads stay open.
     crate::retention::KV_RETENTION_YEARS,
     crate::retention::KV_LITIGATION_HOLD,
+    // The idle auto-logoff settings (§164.312(a)(2)(iii)). A generic write to
+    // either bypasses lock_enabled_set / lock_timeout_set — which validate the
+    // timeout range AND write a config_audit row — so a compromised WebView
+    // could silently disable the screen lock, or set a 9999-minute timeout,
+    // with nothing in the tamper-evident trail. Writes now go only through
+    // those two audited commands (audit finding M2). Reads stay open so the JS
+    // warmup → kvGet() idle-watcher path is unchanged.
+    crate::lock::KV_LOCK_ENABLED,
+    crate::lock::KV_LOCK_TIMEOUT,
 ];
 
 /// True when `key` names a value that must live in the OS keychain and is
@@ -263,9 +272,25 @@ mod tests {
                 NOTE_PROVIDER_PROFILE_KEY,
                 crate::retention::KV_RETENTION_YEARS,
                 crate::retention::KV_LITIGATION_HOLD,
+                crate::lock::KV_LOCK_ENABLED,
+                crate::lock::KV_LOCK_TIMEOUT,
             ],
             "WRITE_ONLY_PROTECTED_KEYS changed — review carefully and update this pin."
         );
+    }
+
+    // M2: the idle-lock settings must be blocked on the generic write path
+    // (so a change can't bypass lock_enabled_set/lock_timeout_set and their
+    // config_audit row) while staying readable for the JS warmup → kvGet path.
+    #[test]
+    fn idle_lock_setting_keys_are_write_blocked_but_readable() {
+        for key in [crate::lock::KV_LOCK_ENABLED, crate::lock::KV_LOCK_TIMEOUT] {
+            assert!(
+                guard_write_key(key).is_err(),
+                "{key} must not be writable via generic kv_set — it would skip the config_audit row"
+            );
+            assert!(guard_key(key).is_ok(), "{key} must stay readable for the idle watcher");
+        }
     }
 
     // A forged blob under a legacy migration prefix is imported as genuine

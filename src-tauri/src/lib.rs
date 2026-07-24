@@ -290,6 +290,8 @@ pub fn run() {
             lock::lock_pin_verify,
             lock::lock_pin_clear,
             lock::lock_pin_is_set,
+            lock::lock_enabled_set,
+            lock::lock_timeout_set,
             note_history::note_history_list,
             note_history::note_history_list_encounter_ids,
             note_history::history_note_generated,
