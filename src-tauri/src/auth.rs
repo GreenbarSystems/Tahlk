@@ -928,9 +928,8 @@ pub(crate) fn auth_unlock_password(
     password: String,
 ) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    crate::throttle::check(THROTTLE_UNLOCK).map_err(|e| {
+    crate::throttle::check(THROTTLE_UNLOCK).inspect_err(|_| {
         record_auth_event(&app, "unlock_password", "throttled");
-        e
     })?;
     let dek = unlock_with_password(&password, &path).inspect_err(|_| {
         crate::throttle::record_failure(THROTTLE_UNLOCK);
@@ -1001,9 +1000,8 @@ pub(crate) fn auth_lock_session(app: AppHandle, state: State<DbState>) {
 #[tauri::command]
 pub(crate) fn auth_unlock_recovery(app: AppHandle, code: String) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    crate::throttle::check(THROTTLE_UNLOCK).map_err(|e| {
+    crate::throttle::check(THROTTLE_UNLOCK).inspect_err(|_| {
         record_auth_event(&app, "unlock_recovery", "throttled");
-        e
     })?;
     let dek = unlock_with_recovery_code(&code, &path).inspect_err(|_| {
         crate::throttle::record_failure(THROTTLE_UNLOCK);
@@ -1091,9 +1089,8 @@ pub(crate) fn auth_nuke_and_reinstall(app: AppHandle, credential: String) -> Res
             // sharpest brute-force target in the app, and it must not share a
             // counter with the ordinary unlock screen (locking one should not
             // lock the other).
-            crate::throttle::check(THROTTLE_NUKE).map_err(|e| {
+            crate::throttle::check(THROTTLE_NUKE).inspect_err(|_| {
                 record_auth_event(&app, "nuke_reinstall", "throttled");
-                e
             })?;
             let pass_ok = unlock_with_password(&credential, &wraps).is_ok();
             let code_ok = !pass_ok && unlock_with_recovery_code(&credential, &wraps).is_ok();
