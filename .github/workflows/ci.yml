@@ -12,9 +12,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Every job below sets `timeout-minutes`. GitHub's default is 360 (six
+  # hours), which is not a timeout so much as a billing event: on 2026-07-24
+  # the `desktop` job hung at "Run Rust tests" on two separate runs and would
+  # have burned the full six hours each time before failing. Both passed on a
+  # plain re-run, so the hang is intermittent and its cause is still unknown.
+  #
+  # These values do not fix that. They convert a silent multi-hour stall into a
+  # fast, visible failure you can re-run — which is the difference between
+  # noticing a flake and waiting out a workday for one.
+  #
+  # Each limit is roughly 5-10x the observed warm-cache runtime, so a cold
+  # cache (the legitimate slow case — a full Tauri dependency build) still has
+  # generous headroom. If a job starts timing out for real, raise it
+  # deliberately; do not raise it reflexively to make a hang go away.
+
   web:
     name: web (build + guard + tests)
     runs-on: ubuntu-latest
+    timeout-minutes: 15   # ~2 min warm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,6 +50,7 @@ jobs:
     # straight at the offending log:: line. See scripts/check_log_phi.sh for
     # what it enforces and its (intentional) bluntness.
     runs-on: ubuntu-latest
+    timeout-minutes: 5    # ~5 s warm; a grep that runs for minutes is broken
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/check_log_phi.sh
@@ -41,6 +58,7 @@ jobs:
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10   # ~20 s warm; the registry is the only slow part
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -70,6 +88,7 @@ jobs:
   server:
     name: server (tahlk-sync)
     runs-on: ubuntu-latest
+    timeout-minutes: 25   # ~25 s warm, but a cold Rust build is the slow case
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -83,6 +102,10 @@ jobs:
     # Pinned to 22.04 because libwebkit2gtk-4.1-dev is straightforward here;
     # 24.04 needs extra steps for that package.
     runs-on: ubuntu-22.04
+    # ~3.5 min warm. This is the job that hung twice on 2026-07-24 at the
+    # "Run Rust tests" step; 40 minutes leaves room for a genuinely cold Tauri
+    # dependency build while still failing a hang inside the hour.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
