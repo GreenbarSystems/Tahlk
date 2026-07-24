@@ -172,7 +172,7 @@ pub(crate) fn record_signed_tip(encounter_id: &str, seq: i64, mac: Option<&str>)
         store_to(path, key, &tips)
     });
     if done != Some(true) {
-        log::error!("audit-tip: signed-note tip not anchored (truncation detection unavailable for this note)");
+        log::error!("audit-tip: sign-off tip not anchored (truncation detection unavailable for this record)");
     }
 }
 
