@@ -313,6 +313,21 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              WHERE scrubbed = 0 AND entry_json LIKE '%\"destroyed\":true%';",
         )?;
     }
+
+    // Keyed MAC anchor column (audit_mac.rs). MAC'd over `entry_hash`, which
+    // scrubbing PRESERVES — so a scrubbed (tombstoned) row still verifies while
+    // a maliciously rewritten one does not. Nullable: legacy/unanchored rows
+    // carry NULL and are legacy-skipped by `audit_mac::verify_chain`.
+    let has_chain_mac: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('note_audit') WHERE name = 'chain_mac'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_chain_mac == 0 {
+        conn.execute_batch("ALTER TABLE note_audit ADD COLUMN chain_mac TEXT;")?;
+    }
     Ok(())
 }
 
@@ -514,6 +529,35 @@ pub(crate) fn audit_archive_list(state: State<DbState>, encounter_id: String) ->
     entries_from(&conn, &encounter_id, true)
 }
 
+/// Verify the KEYED MAC anchor for one encounter's access/activity audit chain
+/// (audit_mac.rs). Recomputes each row's `chain_mac` with the keychain-derived
+/// MAC key across BOTH live and archived rows (seq is a total order over both),
+/// so a wholesale-substituted or edited audit trail is detectable even though a
+/// self-referential hash chain cannot detect it. MAC'd over `entry_hash`, which
+/// scrubbing preserves, so a lawfully tombstoned row still verifies.
+///
+/// Returns `{ ok, brokenAt, reason, legacySkipped }`.
+#[tauri::command]
+pub(crate) fn verify_audit_macs(state: State<DbState>, encounter_id: String) -> Result<Value, AppError> {
+    let conn = state.conn()?;
+    let key = crate::audit_mac::mac_key()?;
+    let mut stmt = conn.prepare(
+        "SELECT seq, entry_hash, chain_mac FROM note_audit \
+         WHERE encounter_id = ?1 ORDER BY seq",
+    )?;
+    let rows: Vec<(i64, String, Option<String>)> = stmt
+        .query_map(params![encounter_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let verdict =
+        crate::audit_mac::verify_chain(&key, rows.iter().map(|(s, h, m)| (*s, h.as_str(), m.as_deref())));
+    Ok(json!({
+        "ok": verdict.ok,
+        "brokenAt": verdict.broken_at,
+        "reason": verdict.reason,
+        "legacySkipped": verdict.legacy_skipped,
+    }))
+}
+
 // Removed from the invoke handler — callers must use the narrow audit_log_*
 // commands above so that actor identity is derived server-side and cannot be
 // forged by a compromised WebView.
@@ -586,14 +630,17 @@ fn append_audit_row(
 
     // Chain continuity check against the true last entry for this
     // encounter, regardless of archived status — seq is a total order
-    // across both live and archived rows.
-    let last_hash: Option<String> = tx
+    // across both live and archived rows. Also read the prior row's chain_mac
+    // to chain this row's keyed MAC anchor.
+    let prev: Option<(String, Option<String>)> = tx
         .query_row(
-            "SELECT entry_hash FROM note_audit WHERE encounter_id = ?1 AND seq = ?2",
+            "SELECT entry_hash, chain_mac FROM note_audit WHERE encounter_id = ?1 AND seq = ?2",
             params![encounter_id, next_seq - 1],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
+    let last_hash: Option<String> = prev.as_ref().map(|(h, _)| h.clone());
+    let prev_mac: Option<String> = prev.as_ref().and_then(|(_, m)| m.clone());
     if last_hash.as_deref() != prev_hash {
         return Err(AppError::invalid(format!(
             "prev_hash chain mismatch (expected {:?}, got {:?})",
@@ -601,10 +648,12 @@ fn append_audit_row(
         )));
     }
 
+    // Keyed MAC anchor (audit_mac.rs) — best-effort, see note_history's use.
+    let chain_mac = crate::audit_mac::compute_best_effort(entry_hash, prev_mac.as_deref());
     tx.execute(
-        "INSERT INTO note_audit (encounter_id, seq, archived, prev_hash, entry_hash, entry_json) \
-         VALUES (?1,?2,0,?3,?4,?5)",
-        params![encounter_id, next_seq, prev_hash, entry_hash, entry_json],
+        "INSERT INTO note_audit (encounter_id, seq, archived, prev_hash, entry_hash, entry_json, chain_mac) \
+         VALUES (?1,?2,0,?3,?4,?5,?6)",
+        params![encounter_id, next_seq, prev_hash, entry_hash, entry_json, chain_mac],
     )?;
 
     if evicted_count > 0 {

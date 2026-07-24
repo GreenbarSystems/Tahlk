@@ -8,7 +8,7 @@ import { verifyHistoryChain } from './utils/contentHash.js';
 import { reportIntegrityFailure } from './solo/integrityAlert.js';
 import { logRecordViewed } from './core/auditLog.js';
 import { shouldLogRecordView } from './domain/recordAccess.js';
-import { onWindowCloseRequested, destroyWindow } from './platform/tauri.js';
+import { onWindowCloseRequested, destroyWindow, invoke, isTauri } from './platform/tauri.js';
 import { clearClipboardOnExit } from './export/exportFormatter.js';
 import { startIdleWatcher } from './core/idleLock.js';
 import * as telemetry from './core/telemetry.js';
@@ -210,6 +210,19 @@ async function renderMainContent() {
       const integrity = await verifyHistoryChain(await loadHistory(_openEncounter.id));
       if (!integrity.ok) {
         reportIntegrityFailure(integrity);
+      } else if (isTauri) {
+        // Authoritative keyed-MAC check (audit_mac.rs). verifyHistoryChain above
+        // only proves the stored rows are internally self-consistent; this
+        // recomputes each row's chain_mac with the keychain-derived MAC key, so
+        // a wholesale-substituted or forged chain — which the hash chain cannot
+        // detect — is caught here. Best-effort: a resolution error must not
+        // block opening the record (the structural check already passed).
+        try {
+          const mac = await invoke('verify_history_macs', { encounterId: _openEncounter.id });
+          if (mac && !mac.ok) reportIntegrityFailure(mac);
+        } catch (e) {
+          console.error('verify_history_macs failed', e);
+        }
       }
     }
 
