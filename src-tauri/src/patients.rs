@@ -93,6 +93,10 @@ pub(crate) fn get_patient_conn(conn: &Connection, id: &str) -> Result<Option<Val
 
 #[tauri::command]
 pub(crate) fn upsert_patient(state: State<DbState>, patient: Value) -> Result<(), AppError> {
+    // M-3: no PHI is created before first-open auth exists — see
+    // auth::require_auth_configured for why the renderer's own gate is not
+    // sufficient on its own.
+    crate::auth::require_auth_configured()?;
     let mut conn = state.conn()?;
     let provider_id = crate::kv_ops::provider_id(&conn);
     upsert_patient_conn(&mut conn, &patient, &provider_id)

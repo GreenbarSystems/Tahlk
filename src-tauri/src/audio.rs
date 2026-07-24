@@ -49,6 +49,10 @@ pub(crate) fn safe_id(id: &str) -> Result<(), AppError> {
 
 #[tauri::command]
 pub(crate) async fn save_session_audio(app: AppHandle, encounter_id: String, base64_data: String) -> Result<String, AppError> {
+    // M-3: session audio is the rawest PHI the app holds. It must not be
+    // written while the audio key still derives from a keychain-held DEK with
+    // no password wrapping it — see auth::require_auth_configured.
+    crate::auth::require_auth_configured()?;
     safe_id(&encounter_id)?;
     // H1 defense: reject over-long base64 BEFORE handing it to the decoder.
     // The decoder would otherwise allocate a Vec<u8> proportional to the
