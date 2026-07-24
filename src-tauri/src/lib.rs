@@ -317,6 +317,7 @@ pub fn run() {
             auth::auth_generate_recovery_codes,
             auth::auth_nuke_and_reinstall,
             auth::auth_lock_session,
+            auth::auth_audit_list,
             destruction_log::destruction_log_list,
             destruction_log::destruction_log_note_exported,
             config_audit::config_audit_list,
