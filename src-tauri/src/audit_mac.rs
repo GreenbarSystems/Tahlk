@@ -37,7 +37,11 @@
 //! catching a dropped tail needs an external anchor stored outside the database,
 //! which [`crate::audit_tip`] provides for signed encounters (the note-history
 //! tip is recorded at sign-off in a keychain-authenticated sidecar file and
-//! checked on open). Note that flipping an interior row's stored MAC to NULL does NOT
+//! checked on open). A NULL `chain_mac` is treated as legacy ONLY as an
+//! unbroken prefix; once any anchored row is seen, a later NULL is reported as
+//! tamper (F2), so stripping the MAC off a row — including the tail row, which
+//! otherwise has no following row to catch it — cannot launder an edit past
+//! verification. Note that flipping an interior row's stored MAC to NULL does NOT
 //! help an attacker: [`verify_chain`] then verifies the following row against a
 //! `None` predecessor, which no longer matches its stored MAC — so the tamper
 //! surfaces at the next row.
@@ -163,9 +167,27 @@ pub(crate) fn verify_chain<'a>(
 ) -> MacVerdict {
     let mut prev_mac: Option<String> = None;
     let mut legacy_skipped = 0;
+    let mut anchored_started = false;
     for (seq, entry_hash, stored) in rows {
         match stored {
-            None => legacy_skipped += 1,
+            None => {
+                // A NULL chain_mac is only legitimate as an unbroken LEGACY
+                // PREFIX (rows written before this feature, or when the key was
+                // unavailable). Once any anchored row has been seen, a NULL is
+                // tamper, not legacy: an attacker who can write the decrypted DB
+                // could otherwise strip the MAC off a row — the tail row most
+                // dangerously, since without this it has no following row to
+                // catch it (F2) — and rewrite its entry_hash freely. Flag it.
+                if anchored_started {
+                    return MacVerdict {
+                        ok: false,
+                        broken_at: Some(seq),
+                        reason: Some("null chain_mac after anchoring (MAC-strip tamper)".to_string()),
+                        legacy_skipped,
+                    };
+                }
+                legacy_skipped += 1;
+            }
             Some(mac) => {
                 if !verify_one(key, entry_hash, prev_mac.as_deref(), mac) {
                     return MacVerdict {
@@ -175,6 +197,7 @@ pub(crate) fn verify_chain<'a>(
                         legacy_skipped,
                     };
                 }
+                anchored_started = true;
             }
         }
         prev_mac = stored.map(|s| s.to_string());
@@ -255,15 +278,29 @@ mod tests {
     }
 
     #[test]
-    fn nulling_an_interior_mac_breaks_the_next_row() {
+    fn nulling_an_interior_mac_is_caught_at_that_row() {
         // An attacker can't turn an anchored row into a legacy one to launder an
-        // edit: dropping row 2's MAC makes row 3 verify against a None
-        // predecessor, which no longer matches row 3's stored MAC.
+        // edit: a NULL chain_mac after anchoring is itself flagged (F2), so
+        // dropping row 2's MAC surfaces AT row 2, not silently.
         let key = test_key();
         let mut rows = build(&key, &["a", "b", "c"]);
         rows[1].2 = None; // NULL out row 2's chain_mac
         let v = verdict(&key, &rows);
-        assert!(!v.ok, "a NULL'd interior MAC must surface at the following row");
+        assert!(!v.ok, "a NULL'd MAC after anchoring must be flagged");
+        assert_eq!(v.broken_at, Some(2));
+    }
+
+    #[test]
+    fn nulling_the_tail_mac_and_editing_it_is_caught() {
+        // The F2 hole: the LAST row has no following row, so before this fix an
+        // attacker could NULL its chain_mac (legacy-skip) and rewrite its
+        // entry_hash undetected. Now a NULL after anchoring is tamper.
+        let key = test_key();
+        let mut rows = build(&key, &["a", "b", "c"]);
+        rows[2].1 = "forged-tail-content".to_string(); // rewrite the tail's entry_hash
+        rows[2].2 = None; // and strip its MAC to skip verification
+        let v = verdict(&key, &rows);
+        assert!(!v.ok, "a stripped-and-rewritten tail row must be caught");
         assert_eq!(v.broken_at, Some(3));
     }
 
