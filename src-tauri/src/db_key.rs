@@ -1,15 +1,27 @@
-//! Database encryption key (DEK) — keychain-held, 256-bit random.
+//! Database encryption key (DEK) — 256-bit random.
 //!
-//! The DEK is generated on first launch via a CSPRNG (`getrandom`), stored
-//! in the OS secure store (alongside the idle-lock PIN hash), and passed to SQLCipher
-//! as a 64-character hex blob so `PRAGMA key = "x'HEX'"` bypasses PBKDF2 —
-//! no passphrase, no key derivation, deterministic startup.
+//! The DEK is generated on first launch via a CSPRNG (`getrandom`) and passed to
+//! SQLCipher as a 64-character hex blob so `PRAGMA key = "x'HEX'"` bypasses
+//! PBKDF2 — no key derivation at open time, deterministic startup.
 //!
-//! Threat model: the DEK never touches disk in plaintext form. If the OS
-//! keychain is compromised the DB is too; that is an accepted trade-off vs.
-//! prompting the clinician for a passphrase on every launch. FDE at the OS
-//! level (FileVault/BitLocker) is a recommended complementary control, not
-//! a substitute — device theft plus keychain export is the residual risk.
+//! **Where it lives depends on whether auth is configured (ADR 0004).**
+//! - *Before* first-open auth is set up, the DEK is held in the OS secure store
+//!   (alongside the idle-lock PIN hash) and this module reads it directly. This
+//!   is only the transient pre-auth window — `entry-solo.js` forces the
+//!   first-open password setup before the app is usable.
+//! - *After* `auth::auth_set_password` runs, the plaintext keychain DEK entry is
+//!   **deleted** (`auth.rs`) and the DEK exists only **wrapped** (AES-256-GCM,
+//!   under a password/recovery-code KEK) in `tahlk_auth.db`. `load_or_generate_dek`
+//!   below detects this (via `is_auth_configured`) and refuses to mint a
+//!   replacement — the unlocked session DEK (`auth::session_dek_hex`) is the only
+//!   route to the key. So once auth is configured, the DEK does **not** sit in the
+//!   keychain in plaintext.
+//!
+//! Threat model: with auth configured, "device theft plus keychain export" no
+//! longer yields the DB — an attacker also needs the master password (or a
+//! recovery code), which is exactly the residual ADR 0004 was written to close.
+//! FDE at the OS level (FileVault/BitLocker) remains a recommended complementary
+//! control.
 
 use crate::errors::AppError;
 use crate::hex::to_hex;

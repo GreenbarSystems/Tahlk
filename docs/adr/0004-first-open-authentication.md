@@ -1,8 +1,22 @@
 # ADR 0004 — First-open authentication (device-local password + biometric opt-in + three recovery codes)
 
-- **Status:** Proposed — 2026-07-18
+- **Status:** Accepted (partial) — proposed 2026-07-18, shipped 2026-07-24
 - **Deciders:** product owner + engineering
 - **Supersedes:** none
+
+> **Implementation status (2026-07-24).** The core of this ADR has **shipped and
+> is enforced in production**: the master-password gate, PBKDF2-210k hashing,
+> AES-256-GCM DEK wrapping under a password KEK in `tahlk_auth.db`, the three
+> recovery codes, and the transactional migration are all live (`src-tauri/src/auth.rs`),
+> the sign-in / first-open flow blocks the app shell (`src/entry-solo.js`,
+> `src/solo/authScreen.js`), and `db_key.rs` deletes the plaintext keychain DEK
+> once auth is configured. It is **not** behind a feature flag. **Deferred /
+> not built:** "Screen B — biometric unlock" (Touch ID / Windows Hello) — the
+> shipped app is password + recovery codes on every platform. The
+> subsequent-open and forgot-password flows below therefore omit the biometric
+> branches. Prior references (here and in ADR 0006) to this control as
+> "still-proposed" are superseded by this note. See
+> `docs/security/hipaa-risk-assessment.md` §3.1 for the compliance-facing summary.
 - **Related:** ADR 0003 (BAA gate soft-disable); `docs/security/hipaa-risk-assessment.md` §3.1 (idle-lock) and §3.2 (`currentUser()` gap); `docs/security/data-flow-and-security-controls.md` §1 (no Tahlk-operated server in the Solo data path); `src-tauri/src/db_key.rs` module doc (residual risk: "device theft plus keychain export"); `src-tauri/src/lock.rs` (existing PIN idle-lock).
 
 ## Context

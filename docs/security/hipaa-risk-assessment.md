@@ -5,7 +5,7 @@
 the `tahlk-sync` Group-tier backend — are explicitly out of scope; that
 service is frozen per [ADR 0001](../adr/0001-freeze-group-tier-and-sync.md)
 and has zero validated demand or production deployment as of this writing).
-**As of commit:** `abc176c`
+**As of commit:** `5885922` (idle-lock setting audit, M2)
 **Prior source material this assessment consolidates:**
 - `tahlk-security-audit.md` — the original numbered finding set (C1–C2, H1–H6,
   M1–M10, L1–L5), referenced throughout the codebase (e.g. `notes.rs:334,336`,
@@ -296,41 +296,52 @@ notes, or audio are ever recorded in this log.
 
 ## 3. Access control and person/entity authentication (§164.312(a), (d))
 
-**Status: open gaps, documented here for the first time as of `c9007ad`.**
-These are named, *required* implementation specifications under the
-Security Rule — not addressable/optional — and this document previously did
-not address them. That was a documentation gap in its own right, independent
-of whether the underlying code gap is remediated on any particular timeline.
+**Status: substantially remediated in code (see revision history).** When
+these subsections were first written (`c9007ad`) all three were open gaps and
+the app relied entirely on external OS-level controls. Since then the
+first-open authentication design ([ADR 0004](../adr/0004-first-open-authentication.md))
+and the idle auto-logoff have both **shipped and are enforced in production**,
+so the subsections below now describe *implemented* controls, with the specific
+residuals (biometric unlock not built; per-entry audit-actor attribution)
+named explicitly rather than the whole control being deferred. Each required
+implementation specification is addressed by real code; the earlier "planned,
+not yet built" framing is retained only in the revision history as a record of
+what changed.
 
 ### 3.1 Person or entity authentication — §164.312(d) (required)
 
-**Current state:** Tahlk has no application-level login, PIN, passphrase, or
-biometric gate. `db_key.rs`'s `load_or_generate_dek()` fetches the SQLCipher
-database key from the OS keychain automatically at launch with no user-
-entered secret — the database opens for whoever can launch the app under the
-currently logged-in OS account. `secrets.rs` only manages the provider's own
-Anthropic API key (authenticating the *app* to Anthropic), not a person to
-the app.
+**Current state: implemented (ADR 0004).** Tahlk now has an application-layer
+authentication gate that runs **before the app shell renders** at every launch
+(`src/entry-solo.js` `bootstrap()` blocks on `showSignInScreen()` when auth is
+configured, and forces `runFirstOpenAuth()` on a fresh install). The control is
+cryptographic, not cosmetic:
 
-**Accepted control (named explicitly, not silently relied upon):** Tahlk
-designates the operating system's own session login (Windows/macOS user
-account authentication) as its person/entity authentication boundary for
-Solo tier. This is a real control when properly configured, but it is
-external to Tahlk and Tahlk cannot verify it is in place on any given
-device.
+- The clinician sets a **master password** at first open (minimum 12 characters,
+  checked against a bundled list of the 10,000 most common passwords), hashed
+  with PBKDF2-HMAC-SHA256 at 210,000 iterations (`src-tauri/src/auth.rs`).
+- The SQLCipher DEK is no longer stored plaintext in the keychain. It is
+  **wrapped** (AES-256-GCM) under a password-derived KEK in a separate
+  `tahlk_auth.db`, and `db_key.rs`'s `load_or_generate_dek()` **deletes** the
+  plaintext keychain DEK once auth is configured and refuses to regenerate it —
+  so the database can only be opened by someone who supplies the password (or a
+  recovery code). This materially closes the "device theft plus keychain export"
+  residual the `db_key.rs` module doc previously named.
+- Three one-time **recovery codes** (Crockford base32 + checksum) provide account
+  recovery without any Greenbar-side escrow.
+- Authentication events (unlock success/failure, password change/reset,
+  recovery-code use, the irreversible nuke) are recorded in a durable
+  `auth_audit` trail — see §4.
 
-**This places an explicit operational requirement on the provider/practice**
-(an Administrative Safeguard the covered entity must implement per
-§164.308(a)(5)(ii)(D), password management — addressable but expected absent
-a documented equivalent): OS-level login must be enabled on any device
-running Tahlk, with a non-trivial password/PIN, and shared or guest accounts
-must not be used to run the app.
+**Residual (named, not deferred):** the **biometric unlock** option described in
+ADR 0004 (Touch ID / Windows Hello, "Screen B") is **not implemented** — password
++ recovery codes only, on every platform. This is the conservative direction
+(one fewer copy of the DEK) and is a UX gap, not a control gap. ADR 0004 should
+read as "Accepted — partial" accordingly.
 
-**Planned remediation (tracked, not yet built):** an in-app PIN/passphrase
-gate on launch and on resume-from-idle, independent of OS login, removing
-reliance on an external, unverifiable control. Until shipped, the OS-login
-boundary above is the accepted control and must be operationally enforced by
-the practice.
+**Retained operational recommendation:** OS-level login + full-disk encryption
+(FileVault/BitLocker) remain recommended complementary controls, but Tahlk no
+longer *depends* on the OS session as its person-authentication boundary — the
+in-app gate above is the primary control and is verifiable by Tahlk.
 
 ### 3.2 Unique user identification — §164.312(a)(2)(i) (required)
 
@@ -340,43 +351,55 @@ to the hardcoded literal string `'provider'` whenever no user object exists
 — which, in Solo mode today, is always. Every audit-log entry produced by
 any installation is attributed to that same static string.
 
-**Accepted design assumption (named explicitly):** Tahlk Solo is licensed
-and intended to be used by exactly one identified clinician per
-installation. The `'provider'` audit-log actor string is intended to
-represent that single person, established via the existing provider-profile
-setup (name/NPI already captured in `kv` during onboarding) — not a
-generically anonymous placeholder. **This assumption must hold operationally:**
-Solo installations must not be shared across multiple staff members on the
-same machine/profile. If multi-staff shared-device usage is a real deployment
-pattern, this assumption is violated and a real per-user identifier becomes
-required, which converges with the 3.1 authentication gate.
+**Partially closed (ADR 0004 + server-derived actor).** Two things changed
+since this was written:
 
-**Planned remediation (tracked, not yet built):** wire `currentUser()` to
-read the existing provider-profile record so the audit trail records the
-actual configured provider name rather than a static placeholder string.
+- This install now has a **device-local authenticated identity** — the ADR 0004
+  master password establishes that the person opening the app is the
+  account-holder before any PHI is reachable (§3.1).
+- The **Rust-side compliance trails** (`note_audit`, `patient_audit`,
+  `destruction_log`, `config_audit`) already stamp a **server-derived provider
+  name**, read from the onboarding provider profile via
+  `kv_ops::provider_id(&conn)` — not a static placeholder. A compromised WebView
+  cannot supply the actor for these rows; it is derived inside the Rust command.
 
-### 3.3 Automatic logoff — §164.312(a)(2)(iii) (required)
+**Residual (named, not deferred):** the **JS-side** audit log
+(`src/core/auditLog.js`) still reads `currentUser()`, which
+`src/core/capabilities.js` defaults to `null` in Solo tier, so its six action
+types fall back to the literal `'provider'` string. Wiring `currentUser()` to
+the provider-profile record (so the JS trail matches the Rust trails' real
+attribution) remains the open item here. **Operational assumption meanwhile:**
+Solo installations are single-clinician; they must not be shared across multiple
+staff on the same OS profile, or per-user attribution on the JS trail is lost
+until this wiring lands.
 
-**Current state:** No idle-timeout or inactivity-based session termination
-exists anywhere in the app (repo-wide search covers both the Rust backend
-and JS frontend; the only idle timeouts found govern database connection
-pooling and HTTP client behavior, not user sessions). Once launched, Tahlk
-remains fully accessible indefinitely regardless of idle duration.
+### 3.3 Automatic logoff — §164.312(a)(2)(iii) (implemented)
 
-**Interim compensating control (operational, provider-managed, effective
-immediately at no engineering cost):** until an in-app timeout ships,
-practices must configure OS-level screen-lock-on-idle (standard, built into
-Windows and macOS) on any device running Tahlk, at an interval consistent
-with their workstation security policy (commonly 10–15 minutes in clinical
-settings). This is not equivalent to an in-app control — it depends on the
-same external, Tahlk-unverifiable boundary as 3.1 — but it is a real,
-immediately available mitigation and must be treated as a required setup
-step for any Tahlk deployment until superseded.
+**Current state: implemented and on by default.** An in-app idle watcher
+(`src/core/idleLock.js`, `startIdleWatcher`) locks the UI after a configurable
+period of inactivity — **enabled by default**, 2-minute default, 1–60 minutes
+configurable. It is deliberately suspended while a recording is in progress (a
+provider mid-encounter is engaged even during conversational silence), which is
+the correct threat model: walk-away *between* patients, not mid-session.
 
-**Planned remediation (tracked, not yet built):** an in-app idle timer
-(configurable, default 10–15 minutes) that locks the UI and requires
-re-entry of the 3.1 PIN/passphrase (once shipped) before further PHI is
-displayed.
+The lock is **cryptographic, not just a screen overlay**: on idle,
+`auth_lock_session` (`src-tauri/src/auth.rs`) drops the DB connection pool and
+**zeroes the in-memory session DEK**, so once locked there is no live pool and no
+key in the process to reach PHI. Resuming requires re-entering the master
+password (or the idle-lock PIN, `src-tauri/src/lock.rs`, PBKDF2-HMAC-SHA256 at
+210,000 iterations with a throttled/locked-out verify path). The lock overlay
+itself cannot be dismissed by Escape or backdrop click.
+
+**Change-auditing (M2):** enabling/disabling the idle lock and changing its
+timeout now go through dedicated, audited commands (`lock_enabled_set` /
+`lock_timeout_set`), each writing a `config_audit` row (`lock_enabled_changed` /
+`lock_timeout_changed`) in the same transaction as the setting, and the KV keys
+are write-protected so the generic `kv_set` cannot bypass that audit. Disabling a
+required safeguard is therefore provable — see §4.
+
+**Retained operational recommendation:** OS-level screen-lock-on-idle remains a
+reasonable defence-in-depth complement, but is no longer the primary control —
+the in-app cryptographic lock above is.
 
 ---
 
@@ -476,6 +499,28 @@ KV provider profile; (c) the `signed` entry is now written atomically inside
 record and the encounter status flip in a single Rust transaction. JS passes
 `action='signed'` to `appendHistoryEntry` on Tauri now throws immediately rather
 than silently routing through any open channel.
+
+**Authentication-event logging — added (audit finding H1).** The
+credential-verification paths (master-password unlock, recovery-code unlock,
+idle-lock PIN verify/set/clear, session lock, password change/reset,
+recovery-code regeneration, and the irreversible nuke) now write to a durable
+`auth_audit` trail — metadata only (timestamp, event, outcome), no password and
+no PHI. It lives in the plain `tahlk_auth.db` wraps DB rather than the encrypted
+`tahlk.db` **by necessity**: a *failed* unlock happens while the encrypted DB is
+still locked, so it could never be recorded there. This closes the previous blind
+spot in which the single most security-critical event in the app — who unlocked
+the DEK that protects 100% of the PHI, when, and how many times it was guessed
+wrong — left no trace surviving a restart (`throttle.rs` state is in-memory
+only). A read command (`auth_audit_list`) exposes the trail for provider/auditor
+review.
+
+**Safeguard-configuration auditing — extended (audit finding M2).** `config_audit`
+(previously covering only the retention window and litigation hold) now also
+records changes to the idle auto-logoff safeguard — `lock_enabled_changed` and
+`lock_timeout_changed`, each written in the same transaction as the setting, with
+the KV keys write-protected so a generic `kv_set` cannot change the safeguard
+without leaving the tamper-evident row. Disabling automatic logoff is therefore
+provable (§164.312(a)(2)(iii) + (b)); see §3.3.
 
 **Remaining open item (not part of this remediation):** `currentUser()`
 (`src/core/capabilities.js`) still defaults to `null` outside of a real
@@ -754,3 +799,21 @@ This document should be re-reviewed:
   classification / status / action items / conditions), and §6's business-associate
   language. Resolves the ADR-0006 ↔ risk-assessment inconsistency flagged in the
   incident-response runbook §6.
+- (2026-07-24, audit finding H2) — **§3 reconciled with shipped code.** §3.1–§3.3
+  previously described the person/entity authentication gate and the automatic
+  logoff as *absent* ("Tahlk has no application-level login, PIN, passphrase, or
+  biometric gate"; "No idle-timeout … exists anywhere in the app"). Both are
+  false: first-open authentication (ADR 0004 — master password, PBKDF2-210k,
+  AES-256-GCM DEK wrapping, recovery codes; plaintext keychain DEK deleted once
+  configured) and the idle auto-logoff (on by default, cryptographic — zeroes the
+  session DEK) have shipped and are enforced. §3.1/§3.3 rewritten to describe the
+  implemented controls with the biometric-unlock residual named; §3.2 updated to
+  "partially closed" (authenticated identity + server-derived Rust audit actor;
+  JS `currentUser()` wiring still open). §4 gained the H1 authentication-event
+  trail (`auth_audit`) and the M2 idle-lock config auditing. "As of commit" bumped
+  to `5885922`. This corrects the §164.316 documentation-integrity gap where the
+  operative risk assessment understated the app's actual (stronger) posture.
+  **Not covered here:** the ADR-0006 / `config.rs` "ZDR-covered" wording still
+  asserts ZDR as active while §2 Flow D correctly records it as pending Anthropic
+  approval — that overclaim is tracked with the C1 release-blocker decision, not
+  changed in this documentation pass.
