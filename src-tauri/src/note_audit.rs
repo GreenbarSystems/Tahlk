@@ -49,8 +49,6 @@ use tauri::State;
 use crate::errors::AppError;
 use crate::DbState;
 
-/// SHA-256 of `data` returned as a 64-char lowercase hex string.
-
 /// Internal append used by all narrow server-side audit commands.
 ///
 /// Derives `actor` and `timestamp` server-side (the JS payload is never
