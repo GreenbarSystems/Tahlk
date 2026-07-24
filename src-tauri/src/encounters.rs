@@ -238,9 +238,9 @@ pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> R
 ///     record existed, was accessed, and was destroyed" survives without the
 ///     identifier (CCPA unique-identifier disposal; §164.312(b)).
 ///   - `note_history`: HARD-DELETED (metadata + hashes only, no PHI content).
-///   - `llm_audit`: retained, metadata only — see the L3 note on
-///     `delete_encounter_in_tx` about blinding its `encounter_id` if it ever
-///     starts referencing one.
+///   - `llm_audit`: retained (call metadata only), with its `encounter_id`
+///     SHA-256 blinded to the same value as `note_audit`'s so the identifier
+///     can't re-link the destroyed subject (finding M8).
 ///   - `destruction_log`: one append-only disposal row (§164.310(d)(2)).
 ///   - On-disk audio: best-effort removal after the SQL commit.
 ///
@@ -287,10 +287,10 @@ pub(crate) async fn delete_encounter(
 ///     transaction, calls this for each encounter, then commits — making the
 ///     whole cascade atomic (Medium finding M3: non-atomic cascade).
 ///
-/// If a future LLM interaction log (`llm_audit` or similar) is added that
-/// references `encounter_id`, it must also be blinded here so the encounter
-/// identifier cannot be used to re-link rows to a deleted subject after
-/// destruction (Low finding L3).
+/// Both metadata tables that reference `encounter_id` — `note_audit` and
+/// `llm_audit` — have that identifier blinded here so it cannot be used to
+/// re-link rows to a deleted subject after destruction (findings L3 / M8). Any
+/// new table that stores `encounter_id` must add the same blinding.
 pub(crate) fn delete_encounter_in_tx(
     conn: &Connection,
     id: &str,
@@ -366,6 +366,18 @@ pub(crate) fn delete_encounter_in_tx(
     let blinded = sha256_hex(&format!("{id}{now}"));
     conn.execute(
         "UPDATE note_audit SET encounter_id = ?1 WHERE encounter_id = ?2",
+        params![blinded, id],
+    )?;
+
+    // Blind llm_audit's encounter_id with the SAME value (finding M8). llm_audit
+    // holds only call metadata — model, endpoint, timestamps, no PHI content —
+    // but its encounter_id is the same indirect identifier, so leaving it raw
+    // would let a destroyed subject's LLM-call rows be re-linked exactly as
+    // note_audit's could. Reusing `blinded` keeps the two metadata trails
+    // correlatable to each other for this destruction event while de-linking
+    // both from the subject.
+    conn.execute(
+        "UPDATE llm_audit SET encounter_id = ?1 WHERE encounter_id = ?2",
         params![blinded, id],
     )?;
 
@@ -671,10 +683,11 @@ mod tests {
             );",
         )
         .unwrap();
-        // These tables are touched by delete_encounter_row (scrub + log).
+        // These tables are touched by delete_encounter_row (scrub + blind + log).
         crate::note_audit::init_schema(&conn).unwrap();
         crate::note_history::init_schema(&conn).unwrap();
         crate::destruction_log::init_schema(&conn).unwrap();
+        crate::llm_audit::init_schema(&conn).unwrap();
         conn
     }
 
@@ -1391,5 +1404,59 @@ mod tests {
         assert!(get_encounter_conn(&conn, "enc-1").unwrap().is_none());
         assert!(get_encounter_conn(&conn, "enc-2").unwrap().is_some());
         assert_eq!(kv_count(&conn), 1, "only enc-1's content rows should be gone");
+    }
+
+    // ── encounter_id blinding on destroy (note_audit + llm_audit, M8) ────────
+
+    fn seed_note_audit(conn: &Connection, enc_id: &str) {
+        conn.execute(
+            "INSERT INTO note_audit (encounter_id, seq, archived, prev_hash, entry_hash, entry_json) \
+             VALUES (?1, 1, 0, NULL, 'hash', '{}')",
+            params![enc_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_llm_audit(conn: &Connection, enc_id: &str) {
+        conn.execute(
+            "INSERT INTO llm_audit \
+             (created_at, encounter_id, model, endpoint, request_bytes, response_bytes, outcome) \
+             VALUES ('2026-07-04T10:00:00Z', ?1, 'claude', '/v1/messages', 100, 200, 'ok')",
+            params![enc_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn destroy_blinds_llm_audit_encounter_id_like_note_audit() {
+        let mut conn = fresh_db();
+        insert_row(&conn, "enc-1", "signed", "2026-07-04");
+        seed_note_audit(&conn, "enc-1");
+        seed_llm_audit(&conn, "enc-1");
+
+        delete_encounter_row(&mut conn, "enc-1", "test-provider", "patient_request").unwrap();
+
+        // The raw encounter id must be gone from BOTH metadata trails.
+        let llm_raw: i64 = conn
+            .query_row("SELECT COUNT(*) FROM llm_audit WHERE encounter_id = 'enc-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(llm_raw, 0, "raw encounter_id must be blinded out of llm_audit");
+
+        // The llm_audit row is retained (metadata), keyed to a blind.
+        let llm_blinded: String = conn
+            .query_row("SELECT encounter_id FROM llm_audit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(llm_blinded.len(), 64, "llm_audit encounter_id must be a SHA-256 blind");
+        assert!(llm_blinded.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(llm_blinded, "enc-1");
+
+        // Both trails share the SAME blind for this destruction event.
+        let audit_blinded: String = conn
+            .query_row("SELECT encounter_id FROM note_audit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            llm_blinded, audit_blinded,
+            "llm_audit and note_audit must carry the same blind so they stay correlatable"
+        );
     }
 }
