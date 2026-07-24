@@ -245,20 +245,19 @@ pub(crate) fn clear_encounter_audio_path(state: State<DbState>, id: String) -> R
 /// `note_content_v1::<id>` / `note_content_v1::transcript::<id>`, see
 /// data/keys.js) — and best-effort removes any residual on-disk audio.
 ///
-/// Deliberately does NOT delete `note_history`, `note_audit`, or
-/// `llm_audit` rows for this id. None of those tables store PHI content
-/// (metadata + hashes only, by their own design — see each module's doc
-/// comment), and retaining them after the encounter is gone preserves the
-/// compliance value of "this record existed, was accessed by X, and was
-/// deleted by Y on this date." This matches `note_history_list_
-/// encounter_ids`' own documented expectation that an encounter can be
-/// hard-deleted while its history rows remain (orphaned but still
-/// verifiable) — this command is simply the first thing to actually
-/// exercise that path. The JS caller appends a final `encounter_deleted`
-/// Permanently destroys an encounter: removes its note/transcript content,
-/// scrubs PHI from the note_audit chain (tombstone + encounter_id blinding),
-/// hard-deletes note_history, and logs the act to the append-only
-/// destruction_log. Audio cleanup is best-effort after the SQL commit.
+/// What it does to each store, precisely — this is the destruction contract an
+/// auditor relies on, so it must match the code (see `delete_encounter_in_tx`):
+///   - `encounters` row + the note/transcript content (`kv` rows above): deleted.
+///   - `note_audit`: PHI-scrubbed IN PLACE — the chain rows are kept, but the
+///     `encounter_id` is SHA-256 blinded and the entry tombstoned, so "this
+///     record existed, was accessed, and was destroyed" survives without the
+///     identifier (CCPA unique-identifier disposal; §164.312(b)).
+///   - `note_history`: HARD-DELETED (metadata + hashes only, no PHI content).
+///   - `llm_audit`: retained, metadata only — see the L3 note on
+///     `delete_encounter_in_tx` about blinding its `encounter_id` if it ever
+///     starts referencing one.
+///   - `destruction_log`: one append-only disposal row (§164.310(d)(2)).
+///   - On-disk audio: best-effort removal after the SQL commit.
 ///
 /// Takes no `provider_id`: the actor written to `destruction_log` is derived
 /// server-side from the stored profile. C2 removed the forgeable parameter
