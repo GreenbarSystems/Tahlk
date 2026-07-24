@@ -37,7 +37,6 @@ use crate::errors::AppError;
 mod audio;
 mod audio_crypto;
 mod audit_mac;
-mod audit_tip;
 mod auth;
 mod baa;
 mod config_audit;
@@ -170,19 +169,6 @@ pub fn run() {
                 log::error!("panic: {}", log_safety::cap_len(&info.to_string()));
                 default_hook(info);
             }));
-
-            // Locate the external audit-tip sidecar (audit_tip.rs) up front so its
-            // path is set on both the fresh-install and auth-configured startup
-            // branches below. If the data dir can't be resolved, tail-truncation
-            // detection is simply unavailable (logged), never fatal.
-            match app.path().app_data_dir() {
-                Ok(dir) => audit_tip::init(&dir),
-                Err(e) => log::error!(
-                    "could not resolve app_data_dir for the audit-tip anchor; \
-                     tail-truncation detection disabled: {}",
-                    log_safety::cap_len(&e.to_string())
-                ),
-            }
 
             // When auth is already configured the keychain DEK entry has been
             // removed (by auth_set_password) and the DB can only be opened with

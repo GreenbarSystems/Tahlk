@@ -68,6 +68,31 @@ If whisper.cpp integration is ever rewritten (e.g., moved to an in-process bindi
 
 ---
 
+## Item 3 — Audit-chain tail-truncation is not cryptographically detected (accepted)
+
+### What it is
+
+The `note_history` and `note_audit` audit chains are integrity-protected in two layers: a SHA-256 hash chain (each row commits to its payload and the prior row's hash) and a keyed HMAC per row (`audit_mac.rs`, keyed by an HKDF-derived value rooted in the SQLCipher DEK). Together these detect **substitution** and **edit** of any stored row. They do **not** detect **truncation** of the newest rows: a MAC-valid prefix of a chain is still MAC-valid, so an actor who drops the trailing entries leaves a chain that verifies clean.
+
+### Why it is accepted, not fixed
+
+An external "tip anchor" (a sidecar file recording each signed chain's expected tail) was prototyped to close this and then **removed as over-engineered for this deployment model**, for two reasons:
+
+1. **The threat actor overlaps with the key holder.** Tahlk Solo is single-user and local-first; the only party who can make coherent writes to the *decrypted* database is the one holding the SQLCipher DEK. Any tip anchor keyed off that same DEK (the only key material on the device) can be re-forged by that same party. Cryptographic tamper-evidence against the record owner is not achievable on a local-first single-user app.
+2. **At-rest file tampering is already covered.** SQLCipher authenticates every database page with an HMAC (`cipher_use_hmac` is on by default and is not disabled here), so raw-file tampering *without* the DEK is already detected on read, before any app-level check runs.
+
+The tip anchor added ~300 LOC and a new file-corruption failure surface to close a corner that, on this deployment model, overlaps with the party it cannot stop. The SHA-256 hash chain plus the keyed HMAC are retained as proportionate, reasonable integrity mechanisms under §164.312(c)(1) ("a *reasonable and appropriate* mechanism to corroborate that ePHI has not been altered").
+
+### Conditions under which this must be re-audited
+
+This acceptance is specific to the single-user local-first model. Re-open it if any of these change:
+
+1. **The product goes multi-user / multi-tenant** (e.g., the Firm tier becomes shared-record rather than bundled independent installs, or `tahlk-sync` / the frozen Group tier unfreezes). Then a tamperer need not be the record owner, and a truncation anchor keyed outside the DEK holder's control becomes meaningful.
+2. **The encrypted database leaves the SQLCipher boundary** (cloud backup, sync, export of the raw DB) where an out-of-band actor could truncate a copy.
+3. **`cipher_use_hmac` is ever disabled**, which would remove the at-rest page authentication this acceptance leans on.
+
+---
+
 ## Pre-release compliance checklist
 
 Run through this before every production release. Each item should be checked by a human, not assumed — this is the paper trail.
