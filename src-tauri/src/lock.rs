@@ -28,6 +28,7 @@
 use std::num::NonZeroU32;
 
 use ring::pbkdf2;
+use tauri::AppHandle;
 
 use crate::errors::AppError;
 use crate::hex::{from_hex, to_hex};
@@ -138,13 +139,20 @@ pub(crate) fn lock_pin_set(pin: String) -> Result<(), AppError> {
 const THROTTLE_SCOPE: &str = "lock_pin";
 
 #[tauri::command]
-pub(crate) fn lock_pin_verify(pin: String) -> Result<bool, AppError> {
-    crate::throttle::check(THROTTLE_SCOPE)?;
+pub(crate) fn lock_pin_verify(app: AppHandle, pin: String) -> Result<bool, AppError> {
+    // Audit finding H1: the idle-lock PIN gate is one of the credential-
+    // verification paths that must leave a durable trace (§164.312(b)).
+    if let Err(e) = crate::throttle::check(THROTTLE_SCOPE) {
+        crate::auth::record_auth_event(&app, "pin_verify", "throttled");
+        return Err(e);
+    }
     let ok = verify_pin(&pin)?;
     if ok {
         crate::throttle::record_success(THROTTLE_SCOPE);
+        crate::auth::record_auth_event(&app, "pin_verify", "success");
     } else {
         crate::throttle::record_failure(THROTTLE_SCOPE);
+        crate::auth::record_auth_event(&app, "pin_verify", "failure");
     }
     Ok(ok)
 }

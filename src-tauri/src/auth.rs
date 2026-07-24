@@ -427,8 +427,116 @@ fn init_wraps_schema(conn: &Connection) -> rusqlite::Result<()> {
             salt_hex       TEXT NOT NULL,
             ciphertext_hex TEXT NOT NULL,
             created_at     TEXT NOT NULL
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS auth_audit (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            event      TEXT NOT NULL,
+            outcome    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS auth_audit_created_idx
+            ON auth_audit (created_at DESC);",
     )
+}
+
+// ── Authentication-event audit trail (HIPAA §164.312(b), audit finding H1) ──
+//
+// Before this, every credential-verification path (password unlock, recovery
+// unlock, PIN verify, password change/reset, recovery-code regeneration, the
+// irreversible nuke) was rate-limited but never *recorded*: the single most
+// security-critical event in the app — who unlocked the DEK that protects
+// 100% of the PHI, when, and how many times it was guessed wrong — left no
+// durable trace (`throttle.rs` state is in-memory only, wiped on restart).
+//
+// This log lives in the plain `tahlk_auth.db` wraps DB, NOT the SQLCipher
+// `tahlk.db`, for a structural reason: a *failed* unlock happens precisely
+// while the encrypted DB is still locked, so it could never be recorded there.
+// The wraps DB is always openable, so both success and failure land. It is
+// deliberately metadata-only (timestamp, event, outcome) — no password, no
+// PHI, no provider identity — so persisting it to an unencrypted file next to
+// the wraps table (already `chmod 0600`) adds no sensitive material to protect.
+
+/// Valid `event` values. Validated at the append boundary so a bug can't stuff
+/// an arbitrary string into a compliance record.
+pub(crate) const AUTH_AUDIT_EVENTS: &[&str] = &[
+    "password_set",             // first-open / post-nuke setup
+    "unlock_password",          // startup or idle-resume password unlock
+    "unlock_recovery",          // forgot-password recovery-code unlock
+    "password_changed",         // Settings: change master password
+    "password_reset_recovery",  // forgot-password: reset via recovery code
+    "recovery_codes_regenerated", // Settings: regenerate all three codes
+    "pin_verify",               // idle-lock PIN verification
+    "session_locked",           // idle-lock activation (auto-logoff)
+    "nuke_reinstall",           // irreversible wipe attempt
+];
+
+/// Valid `outcome` values.
+pub(crate) const AUTH_AUDIT_OUTCOMES: &[&str] = &["success", "failure", "throttled", "refused"];
+
+/// Appends one authentication-event row. Takes `&Connection` so it can be
+/// unit-tested against a bare in-memory SQLite without a Tauri harness.
+pub(crate) fn append_auth_event(conn: &Connection, event: &str, outcome: &str) -> Result<(), AppError> {
+    debug_assert!(AUTH_AUDIT_EVENTS.contains(&event), "append_auth_event: unvalidated event: {event}");
+    debug_assert!(AUTH_AUDIT_OUTCOMES.contains(&outcome), "append_auth_event: unvalidated outcome: {outcome}");
+    conn.execute(
+        "INSERT INTO auth_audit (created_at, event, outcome) VALUES (?1, ?2, ?3)",
+        params![utc_now_iso(), event, outcome],
+    )?;
+    Ok(())
+}
+
+/// Best-effort recorder called from the auth/lock command entry points. Opens
+/// the wraps DB and appends one row. Deliberately fire-and-forget: a failed
+/// audit write is logged (metadata only — never PHI) but NOT propagated, for
+/// the same reason `notes::record_llm_call` refuses to propagate — masking the
+/// real auth result the caller came in with (an unlock success or failure)
+/// behind an audit-plumbing error would be worse than a missing row. Note that
+/// a *successful* `nuke_reinstall` is intentionally never recorded here: it
+/// destroys `tahlk_auth.db` by design, so the meaningful auditable nuke events
+/// are the failed/refused/throttled attempts, which DO persist.
+pub(crate) fn record_auth_event(app: &AppHandle, event: &str, outcome: &str) {
+    let path = match wraps_db_path(app) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("auth_audit: could not resolve wraps path for {event}/{outcome}: {e}");
+            return;
+        }
+    };
+    match open_wraps_db(&path) {
+        Ok(conn) => {
+            if let Err(e) = append_auth_event(&conn, event, outcome) {
+                log::warn!("auth_audit: failed to record {event}/{outcome}: {e}");
+            }
+        }
+        Err(e) => log::warn!("auth_audit: could not open wraps DB for {event}/{outcome}: {e}"),
+    }
+}
+
+/// Success/failure outcome string for the common `Result`-returning commands.
+fn outcome_str<T>(r: &Result<T, AppError>) -> &'static str {
+    if r.is_ok() { "success" } else { "failure" }
+}
+
+/// #[tauri::command] — list recent authentication events (newest first) for the
+/// provider's own review / an auditor's post-incident inspection. Metadata only.
+/// Capped so the query stays bounded even on a long-lived install.
+#[tauri::command]
+pub(crate) fn auth_audit_list(app: AppHandle) -> Result<Vec<serde_json::Value>, AppError> {
+    let path = wraps_db_path(&app)?;
+    let conn = open_wraps_db(&path)?;
+    let mut stmt = conn.prepare(
+        "SELECT created_at, event, outcome FROM auth_audit ORDER BY id DESC LIMIT 500",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "createdAt": r.get::<_, String>(0)?,
+                "event":     r.get::<_, String>(1)?,
+                "outcome":   r.get::<_, String>(2)?,
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// Open (or create) the wraps DB at `path`. Creates parent directories if
@@ -777,30 +885,34 @@ pub(crate) fn auth_is_configured() -> bool {
 /// `tahlk_auth.db` becomes the only route to the database key.
 #[tauri::command]
 pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<String>, AppError> {
-    let dek_hex = crate::db_key::load_or_generate_dek()?;
-    let dek_vec =
-        from_hex(&dek_hex).ok_or_else(|| AppError::internal_from("DEK hex malformed"))?;
-    let mut dek = [0u8; DEK_BYTES];
-    dek.copy_from_slice(&dek_vec);
-    let path = wraps_db_path(&app)?;
-    let codes = set_password(&password, &dek, &path)?;
+    let r = (|| -> Result<Vec<String>, AppError> {
+        let dek_hex = crate::db_key::load_or_generate_dek()?;
+        let dek_vec =
+            from_hex(&dek_hex).ok_or_else(|| AppError::internal_from("DEK hex malformed"))?;
+        let mut dek = [0u8; DEK_BYTES];
+        dek.copy_from_slice(&dek_vec);
+        let path = wraps_db_path(&app)?;
+        let codes = set_password(&password, &dek, &path)?;
 
-    // Publish the DEK for this session BEFORE the keychain entry is deleted
-    // below. Without this, audio_crypto::audio_key() would look for a keychain
-    // entry that no longer exists and db_key would mint a fresh random DEK —
-    // silently orphaning every previously-encrypted .wav.enc on this device.
-    crate::auth::set_session_dek_hex(&dek_hex);
+        // Publish the DEK for this session BEFORE the keychain entry is deleted
+        // below. Without this, audio_crypto::audio_key() would look for a keychain
+        // entry that no longer exists and db_key would mint a fresh random DEK —
+        // silently orphaning every previously-encrypted .wav.enc on this device.
+        crate::auth::set_session_dek_hex(&dek_hex);
 
-    // Remove the keychain DEK so subsequent launches must go through the auth
-    // path. Best-effort: a delete failure leaves the keychain as a fallback
-    // but is logged; the wrapped copy is what guards forward security.
-    if let Ok(entry) = crate::keychain::entry(crate::db_key::KEYRING_USER) {
-        if let Err(e) = entry.delete_credential() {
-            log::warn!("auth_set_password: could not remove keychain DEK: {e}");
+        // Remove the keychain DEK so subsequent launches must go through the auth
+        // path. Best-effort: a delete failure leaves the keychain as a fallback
+        // but is logged; the wrapped copy is what guards forward security.
+        if let Ok(entry) = crate::keychain::entry(crate::db_key::KEYRING_USER) {
+            if let Err(e) = entry.delete_credential() {
+                log::warn!("auth_set_password: could not remove keychain DEK: {e}");
+            }
         }
-    }
 
-    Ok(codes.iter().map(|c| c.display()).collect())
+        Ok(codes.iter().map(|c| c.display()).collect())
+    })();
+    record_auth_event(&app, "password_set", outcome_str(&r));
+    r
 }
 
 /// Startup (and idle-lock re-)unlock via master password. Verifies the
@@ -816,9 +928,12 @@ pub(crate) fn auth_unlock_password(
     password: String,
 ) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    crate::throttle::check(THROTTLE_UNLOCK)?;
+    crate::throttle::check(THROTTLE_UNLOCK).inspect_err(|_| {
+        record_auth_event(&app, "unlock_password", "throttled");
+    })?;
     let dek = unlock_with_password(&password, &path).inspect_err(|_| {
         crate::throttle::record_failure(THROTTLE_UNLOCK);
+        record_auth_event(&app, "unlock_password", "failure");
     })?;
     crate::throttle::record_success(THROTTLE_UNLOCK);
     let hex_key = to_hex(&dek);
@@ -859,6 +974,7 @@ pub(crate) fn auth_unlock_password(
     }
 
     state.set_pool(pool);
+    record_auth_event(&app, "unlock_password", "success");
     Ok(())
 }
 
@@ -869,9 +985,13 @@ pub(crate) fn auth_unlock_password(
 /// DB — the JS overlay drives exactly that flow. Ordered pool-first so a
 /// caller mid-checkout can't grab a connection after the DEK is gone.
 #[tauri::command]
-pub(crate) fn auth_lock_session(state: State<DbState>) {
+pub(crate) fn auth_lock_session(app: AppHandle, state: State<DbState>) {
     state.lock_session();
     clear_session_dek();
+    // Auto-logoff is a §164.312(a)(2)(iii) safeguard activation — record it so
+    // the audit trail shows the session was actually locked, not just that the
+    // control is configured.
+    record_auth_event(&app, "session_locked", "success");
 }
 
 /// Unlock via a recovery code (forgot-password flow). Returns nothing to JS;
@@ -880,12 +1000,16 @@ pub(crate) fn auth_lock_session(state: State<DbState>) {
 #[tauri::command]
 pub(crate) fn auth_unlock_recovery(app: AppHandle, code: String) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    crate::throttle::check(THROTTLE_UNLOCK)?;
+    crate::throttle::check(THROTTLE_UNLOCK).inspect_err(|_| {
+        record_auth_event(&app, "unlock_recovery", "throttled");
+    })?;
     let dek = unlock_with_recovery_code(&code, &path).inspect_err(|_| {
         crate::throttle::record_failure(THROTTLE_UNLOCK);
+        record_auth_event(&app, "unlock_recovery", "failure");
     })?;
     crate::throttle::record_success(THROTTLE_UNLOCK);
     set_session_dek_hex(&to_hex(&dek));
+    record_auth_event(&app, "unlock_recovery", "success");
     Ok(())
 }
 
@@ -898,7 +1022,9 @@ pub(crate) fn auth_change_password(
     new_password: String,
 ) -> Result<(), AppError> {
     let path = wraps_db_path(&app)?;
-    change_password(&old_password, &new_password, &path)
+    let r = change_password(&old_password, &new_password, &path);
+    record_auth_event(&app, "password_changed", outcome_str(&r));
+    r
 }
 
 /// Forgot-password reset via a recovery code. Wraps the DEK under a new
@@ -911,7 +1037,9 @@ pub(crate) fn auth_reset_with_recovery_code(
     new_password: String,
 ) -> Result<Vec<String>, AppError> {
     let path = wraps_db_path(&app)?;
-    let codes = reset_password_with_recovery_code(&code, &new_password, &path)?;
+    let r = reset_password_with_recovery_code(&code, &new_password, &path);
+    record_auth_event(&app, "password_reset_recovery", outcome_str(&r));
+    let codes = r?;
     Ok(codes.iter().map(|c| c.display()).collect())
 }
 
@@ -923,7 +1051,9 @@ pub(crate) fn auth_generate_recovery_codes(
     password: String,
 ) -> Result<Vec<String>, AppError> {
     let path = wraps_db_path(&app)?;
-    let codes = generate_new_recovery_codes(&password, &path)?;
+    let r = generate_new_recovery_codes(&password, &path);
+    record_auth_event(&app, "recovery_codes_regenerated", outcome_str(&r));
+    let codes = r?;
     Ok(codes.iter().map(|c| c.display()).collect())
 }
 
@@ -959,11 +1089,18 @@ pub(crate) fn auth_nuke_and_reinstall(app: AppHandle, credential: String) -> Res
             // sharpest brute-force target in the app, and it must not share a
             // counter with the ordinary unlock screen (locking one should not
             // lock the other).
-            crate::throttle::check(THROTTLE_NUKE)?;
+            crate::throttle::check(THROTTLE_NUKE).inspect_err(|_| {
+                record_auth_event(&app, "nuke_reinstall", "throttled");
+            })?;
             let pass_ok = unlock_with_password(&credential, &wraps).is_ok();
             let code_ok = !pass_ok && unlock_with_recovery_code(&credential, &wraps).is_ok();
             if !pass_ok && !code_ok {
                 crate::throttle::record_failure(THROTTLE_NUKE);
+                // A wrong-credential wipe attempt is exactly the attack signal
+                // this log exists to preserve — record it before returning.
+                // (A *successful* nuke is intentionally not recorded: it deletes
+                // this very wraps DB, so only the failed/refused attempts persist.)
+                record_auth_event(&app, "nuke_reinstall", "failure");
                 return Err(AppError::precondition(
                     "That is not your current password or a valid recovery code. \
                      Confirm with one of them to erase this device.",
@@ -972,6 +1109,7 @@ pub(crate) fn auth_nuke_and_reinstall(app: AppHandle, credential: String) -> Res
             crate::throttle::record_success(THROTTLE_NUKE);
         }
         NukeAuthorization::Refuse => {
+            record_auth_event(&app, "nuke_reinstall", "refused");
             return Err(AppError::invalid(
                 "this device holds patient data that predates password setup, so there is no \
                  credential to verify against — Tahlk will not destroy it from inside the app. \
@@ -1562,5 +1700,94 @@ mod tests {
         let wraps_path = dir.path().join("tahlk_auth.db");
         let main_path = dir.path().join("tahlk.db");
         assert!(nuke_and_reinstall(&wraps_path, &main_path).is_ok());
+    }
+
+    // ── Authentication-event audit trail (H1, §164.312(b)) ───────────────────
+
+    // Read the audit rows the same way `auth_audit_list` does, but against a
+    // bare Connection (the #[tauri::command] needs an AppHandle we don't have
+    // in a unit test). Newest-first, mirroring the command's ORDER BY id DESC.
+    fn list_events(conn: &Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT event, outcome FROM auth_audit ORDER BY id DESC")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn open_wraps_db_creates_the_auth_audit_table() {
+        // The audit table must be created by the same schema init every wraps-DB
+        // open runs, so existing installs get it on their next unlock.
+        let (_dir, path) = temp_wraps();
+        let conn = open_wraps_db(&path).unwrap();
+        // A bare count query only succeeds if the table exists.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM auth_audit", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "a fresh wraps DB has an empty audit trail");
+    }
+
+    #[test]
+    fn append_auth_event_records_event_and_outcome() {
+        let (_dir, path) = temp_wraps();
+        let conn = open_wraps_db(&path).unwrap();
+        append_auth_event(&conn, "unlock_password", "failure").unwrap();
+        let rows = list_events(&conn);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], ("unlock_password".to_string(), "failure".to_string()));
+    }
+
+    #[test]
+    fn auth_audit_rows_are_metadata_only_timestamped() {
+        // No PHI, no credential — just a UTC timestamp, event, outcome.
+        let (_dir, path) = temp_wraps();
+        let conn = open_wraps_db(&path).unwrap();
+        append_auth_event(&conn, "pin_verify", "success").unwrap();
+        let created_at: String = conn
+            .query_row("SELECT created_at FROM auth_audit LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(created_at.ends_with('Z'), "timestamp must be UTC ISO-8601: {created_at}");
+    }
+
+    #[test]
+    fn auth_audit_lists_newest_first() {
+        let (_dir, path) = temp_wraps();
+        let conn = open_wraps_db(&path).unwrap();
+        append_auth_event(&conn, "password_set", "success").unwrap();
+        append_auth_event(&conn, "unlock_password", "failure").unwrap();
+        append_auth_event(&conn, "unlock_password", "success").unwrap();
+        let rows = list_events(&conn);
+        // ORDER BY id DESC → most recent first.
+        let events: Vec<&str> = rows.iter().map(|(e, _)| e.as_str()).collect();
+        assert_eq!(events, vec!["unlock_password", "unlock_password", "password_set"]);
+        assert_eq!(rows[0].1, "success");
+        assert_eq!(rows[1].1, "failure");
+    }
+
+    #[test]
+    fn every_wired_event_and_outcome_is_on_its_allowlist() {
+        // Guards against a call site passing a string that isn't in the
+        // allowlist (which would debug_assert-panic in tests / slip an
+        // unvalidated value into the record in release). These are the exact
+        // pairs the auth.rs / lock.rs command sites emit.
+        for (event, outcome) in [
+            ("password_set", "success"),
+            ("unlock_password", "throttled"),
+            ("unlock_password", "failure"),
+            ("unlock_password", "success"),
+            ("unlock_recovery", "success"),
+            ("password_changed", "failure"),
+            ("password_reset_recovery", "success"),
+            ("recovery_codes_regenerated", "success"),
+            ("pin_verify", "failure"),
+            ("session_locked", "success"),
+            ("nuke_reinstall", "refused"),
+        ] {
+            assert!(AUTH_AUDIT_EVENTS.contains(&event), "event off allowlist: {event}");
+            assert!(AUTH_AUDIT_OUTCOMES.contains(&outcome), "outcome off allowlist: {outcome}");
+        }
     }
 }
