@@ -7,6 +7,7 @@
 //!   - `secrets`       — guarded KV namespaces + provider-profile write path.
 //!   - `kv`            — generic key/value store commands (secret_* namespace blocked).
 //!   - `baa`           — Anthropic BAA acknowledgment gate (audit finding C2).
+//!   - `breach_scope`  — read-only incident-scoping report (who/what PHI, §164.404).
 //!   - `encounters`    — encounter CRUD, sign-off, stats.
 //!   - `note_history`  — relational note-history append-log + KV→table migration.
 //!   - `note_audit`    — relational record-access/activity audit log + KV→table migration.
@@ -39,6 +40,7 @@ mod audio_crypto;
 mod audit_mac;
 mod auth;
 mod baa;
+mod breach_scope;
 mod config_audit;
 mod crypto;
 mod db;
@@ -320,6 +322,7 @@ pub fn run() {
             note_audit::audit_log_note_exported,
             note_audit::audit_log_records_listed,
             note_audit::verify_audit_macs,
+            breach_scope::breach_scope,
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,

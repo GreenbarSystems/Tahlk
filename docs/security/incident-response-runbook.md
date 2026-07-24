@@ -179,6 +179,36 @@ Document the answer to each factor — this is what the "presumed breach
 unless risk assessment shows low probability" standard actually means in
 practice.
 
+### Establishing scope first — `breach_scope`
+
+Factors 1 and 3 both require knowing *what PHI was actually on the device*.
+Do not estimate this. Run the `breach_scope` command (`src-tauri/src/breach_scope.rs`)
+with the incident window as `YYYY-MM-DD` bounds; it returns, read-only:
+
+| section | what it answers |
+|---|---|
+| `encounters` | every encounter present, with `has_note` / `has_transcript` / `has_audio` — the PHI *types* §164.404(c)(1)(B) requires you to describe |
+| `patients` | the roster, with `dob_present` / `notes_present`. This is the list of individuals owed a notice under §164.404(a) |
+| `exports` | notes that left the app as a file or via the clipboard during the window — copies that may exist beyond this device |
+| `destructions` | disposals recorded during the window, including any that happened mid-incident |
+
+Three properties of the output to understand before relying on it:
+
+- **Encounters are not bounded below by the window start.** A record created
+  years earlier and still on the device was present during the incident. The
+  report includes it deliberately; a narrower reading would omit individuals
+  who are owed notices.
+- **It reports counts *and* a `truncated` flag per section.** If `truncated`
+  is true, the row list is capped and `total` is the real figure — use
+  `total` for the §164.408 count, never `rows.length`.
+- **It deliberately omits dates of birth**, reporting only `dob_present`.
+  Note the *types* of identifiers in your assessment; do not paste patient
+  DOBs into an incident record that will be copied and filed.
+
+The query itself writes a `breach_scope` records-listed entry to the audit
+trail. That is intended — it reads every alias on the device, and the trail
+should show that it happened.
+
 1. **The nature and extent of the PHI involved**, including the types of
    identifiers and the likelihood of re-identification.
 2. **The unauthorized person who used the PHI or to whom the disclosure was

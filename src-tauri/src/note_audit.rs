@@ -203,7 +203,11 @@ pub(crate) fn audit_log_note_exported(
 /// Enforced at the command boundary so a compromised WebView can't stuff an
 /// arbitrary string into the (synthetic) `encounter_id` column and forge an
 /// unbounded set of chains — mirrors patient_audit::VALID_ACTIONS.
-pub(crate) const VALID_LIST_SCOPES: &[&str] = &["sessions", "patients"];
+/// `breach_scope` is here because an incident-response query reads every
+/// patient alias on the device in one call — the largest single bulk PHI
+/// access the app performs. "It was for compliance" is a claim the audit trail
+/// should carry, not one it should assume.
+pub(crate) const VALID_LIST_SCOPES: &[&str] = &["sessions", "patients", "breach_scope"];
 
 /// Record that a roster/list of records was displayed to the provider — the
 /// list-view counterpart to `record_viewed` (which covers a single-encounter
@@ -229,7 +233,7 @@ pub(crate) fn audit_log_records_listed(
 /// Validation + append for `audit_log_records_listed`, split out from the
 /// `#[tauri::command]` wrapper so it is exercisable without a Tauri `State`
 /// harness (mirrors patient_audit's `list_conn` test seam).
-fn records_listed_conn(conn: &mut Connection, scope: &str, count: i64) -> Result<(), AppError> {
+pub(crate) fn records_listed_conn(conn: &mut Connection, scope: &str, count: i64) -> Result<(), AppError> {
     if !VALID_LIST_SCOPES.contains(&scope) {
         return Err(AppError::invalid("unknown records-listed scope"));
     }
