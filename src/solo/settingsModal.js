@@ -35,8 +35,9 @@ const PROVIDER_KEY = keys.provider();
 // than the note-export disclosure in src/solo/encounter/template.js: the
 // diagnostics log itself contains no PHI by design (telemetry.js's
 // scrubProps() allowlists only numbers/booleans/6 non-PHI string keys, and
-// recordError() truncates through already-hardened Rust error paths — see
-// AUDIT-RESIDUAL-RISK.md Item 1 verification notes). So this only needs to
+// recordError() persists only kind/name/code and drops the raw error message
+// outright — see AUDIT-RESIDUAL-RISK.md Item 1 verification notes). So this
+// only needs to
 // disclose that the exported FILE is unencrypted at rest — it must NOT imply
 // the log contains patient data, which would contradict the "No patient
 // data...are ever recorded" copy directly above it.

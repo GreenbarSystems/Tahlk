@@ -9,8 +9,9 @@
 //
 // test_telemetry.mjs proves the happy path of scrubProps. These tests attack
 // it: they try to smuggle PHI in through every shape a careless (or malicious)
-// call site might use, and they pin the one path that BYPASSES scrubProps
-// entirely — recordError's `message` — as a documented gap with a fix lever.
+// call site might use. They also pin the path that USED to bypass scrubProps
+// entirely — recordError's `message`, closed by L4 in #43 — so the raw message
+// can never be reintroduced without a test failing.
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
