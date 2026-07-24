@@ -108,10 +108,14 @@ pub(crate) fn append(
     new_value: &str,
     provider_id: &str,
 ) -> Result<(), AppError> {
-    debug_assert!(
-        VALID_ACTIONS.contains(&action),
-        "config_audit::append called with an unvalidated action: {action}"
-    );
+    // Real guard, not a debug_assert: a release build must not write an
+    // unrecognized action to a compliance table (the debug-only assert let one
+    // through in production). Fail closed — the caller's transaction rolls back.
+    if !VALID_ACTIONS.contains(&action) {
+        return Err(AppError::invalid(format!(
+            "config_audit::append called with an unvalidated action: {action}"
+        )));
+    }
     conn.execute(
         "INSERT INTO config_audit (created_at, action, old_value, new_value, provider_id) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -186,6 +190,16 @@ mod tests {
                 "Dr. Chen".into()
             )]
         );
+    }
+
+    #[test]
+    fn an_unrecognized_action_is_rejected_in_every_build() {
+        // Real guard, not debug_assert: a release build must also refuse to write
+        // an unvalidated action to this compliance table, and write nothing.
+        let conn = fresh_db();
+        let err = append(&conn, "sneaky_untracked_action", None, "x", "Dr. Chen").unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(rows(&conn).is_empty(), "a rejected action must leave no row");
     }
 
     #[test]

@@ -410,13 +410,13 @@ pub(crate) async fn retention_destroy_eligible(
 ) -> Result<Value, AppError> {
     let mut conn = state.conn()?;
 
-    // Checked up front for a clearer message than the per-encounter guard
-    // inside delete_encounter_in_tx would give, and to fail before any work.
-    if litigation_hold_is_active(&conn)? {
-        return Err(AppError::invalid(
-            "litigation hold is active — retention-based destruction is blocked",
-        ));
-    }
+    // Refuse before any work if a hold is active. Use the shared
+    // litigation_hold_check so the refusal is a PreconditionFailed — shown to the
+    // provider verbatim — rather than an InvalidInput, which errors.rs swallows
+    // into a generic "unknown error" (so the old message never reached the user).
+    // Routing through the shared helper also keeps this message from drifting
+    // from the per-encounter guard inside delete_encounter_in_tx.
+    litigation_hold_check(&conn, "expired records")?;
 
     let provider_id = crate::kv_ops::provider_id(&conn);
 
