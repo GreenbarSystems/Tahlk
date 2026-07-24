@@ -13,6 +13,51 @@ use tauri_plugin_shell::ShellExt;
 
 use crate::errors::AppError;
 
+// --- Transient plaintext scratch artifacts -------------------------------
+//
+// Transcription cannot avoid putting plaintext PHI on disk: whisper.cpp is an
+// external process that reads and writes real files. Three land in the audio
+// directory for the duration of one call — the decrypted `.wav` we write, and
+// the `.txt` + `.json` the sidecar writes beside it. All three are removed by
+// RAII guards on every *graceful* exit path.
+//
+// `Drop` does not run on SIGKILL, `taskkill /F`, an OOM kill, or a power cut.
+// Anything left behind by one of those is unsecured PHI at rest under
+// 45 CFR §164.402 — which forfeits the breach-notification safe harbor for the
+// whole device, since the encrypted database alone is no longer the only copy.
+// The constants below name what to look for; `audio::purge_transcription_scratch`
+// sweeps them at every startup.
+
+/// Filename prefix for every transient plaintext artifact transcription
+/// creates. Shared with the startup sweep so the two cannot drift.
+pub(crate) const SCRATCH_PREFIX: &str = "transcribe-";
+
+/// Extensions transcription leaves behind: the decrypted audio we write, plus
+/// the two the sidecar emits from `--output-txt` / `--output-json-full`.
+const SCRATCH_EXTS: [&str; 3] = [".wav", ".txt", ".json"];
+
+/// Hex length of the random scratch suffix (8 bytes from `getrandom`).
+const SCRATCH_SUFFIX_HEX_LEN: usize = 16;
+
+/// True when `name` is one of this module's transient plaintext scratch files.
+///
+/// Matched tightly — exact prefix, exactly [`SCRATCH_SUFFIX_HEX_LEN`] hex
+/// chars, then a known extension — because the caller DELETES whatever this
+/// accepts and the same directory holds real session audio
+/// (`<encounter-id>.wav.enc`). A loose match here would destroy patient
+/// recordings, so this errs toward leaving an unrecognized file alone; the
+/// only names it accepts are the ones `transcribe_audio` itself constructs,
+/// pinned by `scratch_names_match_the_sweep_predicate`.
+pub(crate) fn is_scratch_artifact(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(SCRATCH_PREFIX) else {
+        return false;
+    };
+    let Some(stem) = SCRATCH_EXTS.iter().find_map(|e| rest.strip_suffix(e)) else {
+        return false;
+    };
+    stem.len() == SCRATCH_SUFFIX_HEX_LEN && stem.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 // --- Transcription quality signal (Finding #2) ---------------------------
 //
 // whisper.cpp's plain `--output-txt` path (the only one used before this
@@ -317,7 +362,7 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
     let mut rand = [0u8; 8];
     getrandom::getrandom(&mut rand).map_err(AppError::internal_from)?;
     let suffix: String = rand.iter().map(|b| format!("{:02x}", b)).collect();
-    let temp_wav = audio_dir.join(format!("transcribe-{}.wav", suffix));
+    let temp_wav = audio_dir.join(format!("{}{}.wav", SCRATCH_PREFIX, suffix));
     let temp_wav_str = temp_wav.to_string_lossy().into_owned();
 
     // L9: create the plaintext scratch file with mode 0600 from the first
@@ -419,6 +464,56 @@ pub(crate) async fn transcribe_audio(app: AppHandle, audio_path: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- scratch-artifact naming (HITECH H-1) -----------------------------
+    //
+    // `audio::purge_transcription_scratch` deletes whatever
+    // `is_scratch_artifact` accepts, and it runs in the directory holding
+    // encrypted session audio. These pin both halves of that contract: the
+    // names transcription actually produces must be recognized (or
+    // crash-orphaned plaintext PHI silently survives every future launch),
+    // and nothing else may be.
+
+    #[test]
+    fn scratch_names_match_the_sweep_predicate() {
+        // The suffix is 8 random bytes rendered as 2 hex chars each — see the
+        // `getrandom(&mut rand)` call in transcribe_audio. If that array size
+        // changes, this constant must change with it or the sweep stops
+        // matching the very files it exists to remove.
+        assert_eq!(SCRATCH_SUFFIX_HEX_LEN, 8 * 2);
+
+        let suffix = "a1b2c3d4e5f60718";
+        assert_eq!(suffix.len(), SCRATCH_SUFFIX_HEX_LEN);
+        // The three artifacts one transcription leaves: the `.wav` we write
+        // and the `.txt`/`.json` the sidecar writes from --output-file.
+        for ext in [".wav", ".txt", ".json"] {
+            let name = format!("{SCRATCH_PREFIX}{suffix}{ext}");
+            assert!(
+                is_scratch_artifact(&name),
+                "{name} is plaintext PHI this module creates — the sweep must recognize it"
+            );
+        }
+    }
+
+    #[test]
+    fn session_audio_and_near_misses_are_not_scratch() {
+        for name in [
+            "enc-l9k3a-x7q2.wav.enc",             // real session audio
+            "enc-l9k3a-x7q2.wav",                 // legacy plaintext session audio
+            "transcribe-a1b2c3d4e5f60718.enc",    // unknown extension
+            "transcribe-zzzzzzzzzzzzzzzz.wav",    // right length, not hex
+            "transcribe-a1b2c3d4.wav",            // hex, too short
+            "transcribe-a1b2c3d4e5f607189.wav",   // hex, too long
+            "transcribe-.wav",                    // no suffix
+            "x-transcribe-a1b2c3d4e5f60718.wav",  // prefix not at the start
+            "",
+        ] {
+            assert!(
+                !is_scratch_artifact(name),
+                "{name} must not be treated as scratch — the sweep would delete it"
+            );
+        }
+    }
 
     // --- parse_quality_from_json tests (Finding #2) -----------------------
     //

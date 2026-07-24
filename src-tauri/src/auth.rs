@@ -957,12 +957,26 @@ pub(crate) fn auth_unlock_password(
             .app_data_dir()
             .map_err(AppError::internal_from)?
             .join("audio");
+        let provider = crate::kv_ops::provider_id(&conn);
+
+        // Same plaintext-scratch sweep as lib.rs::setup, and it must run on
+        // BOTH paths: on an auth-configured install the DB stays locked through
+        // setup, so this unlock is the first moment a sweep can record what it
+        // removed. Skipping it here would leave crash-orphaned plaintext PHI in
+        // place for exactly the installs that took the trouble to set a
+        // password. Runs before the migration for the same reason as there.
+        let scratch = crate::audio::purge_transcription_scratch(&conn, &audio_dir, &provider)?;
+        if scratch > 0 {
+            log::warn!(
+                "removed {scratch} plaintext transcription scratch file(s) left by an unclean shutdown"
+            );
+        }
+
         let key = crate::audio_crypto::audio_key()?;
         let n = crate::audio_crypto::migrate_plaintext_audio_at_rest(&conn, &audio_dir, &key)?;
         // Same reconciliation as the pre-auth path in lib.rs::setup: find PHI
         // audio whose encounter row is gone and either finish the disposal or
         // record that it could not be finished.
-        let provider = crate::kv_ops::provider_id(&conn);
         let orphans = crate::audio::reconcile_orphaned_audio(&conn, &audio_dir, &provider)?;
         if orphans > 0 {
             log::warn!("reconciled {orphans} orphaned audio file(s) after prior destruction");
