@@ -155,6 +155,35 @@ treatment (checked via `grep -n "export_note|fs::write" src-tauri/src/export.rs`
 **What it is.** `generate_note` (`src-tauri/src/notes.rs`) sends the session
 transcript — PHI — to Anthropic's API to produce the structured clinical note.
 
+**Minimum necessary determination (§164.502(b), HITECH §13405(b)).** This
+analysis is required and was previously implicit, so it is recorded here.
+
+The disclosure to the business associate is the *session transcript in full*.
+That is the minimum necessary for the purpose, because the purpose is producing
+a clinical note **from** the encounter: the model cannot summarize, structure,
+or attribute content it has not been given, and any pre-truncation would be a
+clinical-accuracy decision made by a heuristic rather than by the clinician who
+signs the note. Sending less risks a note that omits material the provider
+would have documented — a patient-safety cost, not just a quality one.
+
+What is *not* sent, and would not be minimum necessary:
+
+- **No patient identifiers.** The request carries transcript text and the
+  system prompt. The patient alias, DOB, patient id, and roster notes are never
+  included — they are not needed to draft a note, so they are not disclosed.
+- **No prior encounters.** Each call carries the current session only; the
+  model is given no history it does not need.
+- **No stored artifacts.** Audio is never uploaded; only the local transcript
+  produced by the on-device sidecar is sent.
+
+`llm_audit` records the metadata of each call (endpoint, model, byte length,
+outcome) without the content, so the determination above is auditable after the
+fact without the audit log itself becoming a second copy of the PHI.
+
+Re-open this determination if the request payload ever grows to include patient
+demographics, prior notes, or roster context — each of those would be a new
+disclosure needing its own justification, not an extension of this one.
+
 The **governing model is managed-key** (see `MANAGED-KEY-ROLLOUT.md`): **Greenbar
 Systems is the provider's Business Associate**, and Greenbar — not the individual
 practice — holds the relationship with Anthropic, which is Greenbar's

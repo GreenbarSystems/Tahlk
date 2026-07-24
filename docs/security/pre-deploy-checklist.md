@@ -143,6 +143,30 @@ Not S1/S2 themselves, but the same "before-deploy" review pass should:
       (`audio_path` vs `audio_object_key`, etc. — see ADR 0001) are resolved
       as part of unfreeze planning, not shipped with a schema split.
 
+## Compliance-scope re-determination triggers
+
+Two scope determinations on file conclude a rule does **not** currently apply to
+Tahlk. Both are conditional on the product model, and neither re-checks itself —
+nothing in CI can notice that a shipped change invalidated a legal conclusion.
+Confirm these before a release that changes how or where records are stored:
+
+- [ ] **FTC Health Breach Notification Rule** —
+      [`docs/compliance/ftc-health-breach-notification-rule-scope-determination.md`](../compliance/ftc-health-breach-notification-rule-scope-determination.md)
+      concludes the Rule does not apply. Re-read its "Conditions that would
+      trigger re-determination" section if this release adds cloud storage or
+      sync of records, a consumer-facing (non-provider) product surface, or any
+      third-party data sharing. The determination leans on Tahlk being
+      HIPAA-covered and provider-directed; a consumer-facing tier is exactly the
+      change that would flip it.
+- [ ] **42 CFR Part 2** —
+      [`docs/compliance/42-cfr-part-2-scope-determination.md`](../compliance/42-cfr-part-2-scope-determination.md).
+      Re-read if this release targets or markets to substance-use-disorder
+      treatment programs, which is the trigger for Part 2's much stricter
+      consent-and-redisclosure regime.
+
+Checking these boxes means someone re-read the determination against what is
+actually shipping — not that the file still exists.
+
 ## Sign-off
 
 Before flipping traffic to a real deployment, the owning engineer must:
