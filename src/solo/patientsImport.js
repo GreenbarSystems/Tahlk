@@ -184,10 +184,28 @@ function showStep2(card, modal, rerender, headers, rows) {
     `Found ${rows.length} patient row${rows.length !== 1 ? 's' : ''}. ` +
     'Choose which CSV column maps to each Tahlk field.');
 
-  const warning = el('div', 'import-warning',
-    'You selected a column that may contain real patient names. ' +
-    'Patient data is stored encrypted on your device — ensure this device is access-controlled.');
+  // The warning has to state the CONSEQUENCE of the choice, not reassure about
+  // encryption. The old copy ended "...stored encrypted on your device — ensure
+  // this device is access-controlled", which is true no matter which column is
+  // picked and therefore carries no information about the decision being made;
+  // leading with reassurance also blunts the sentence before it.
+  //
+  // What actually changes: the alias field exists so the roster can be
+  // pseudonymous. Mapping a real-name column makes it directly identifying.
+  // Combined with a date of birth that is two of the HIPAA §164.514(b)(2)
+  // identifiers, which is why the second line appears only for that pairing.
+  // Nothing here claims the alias mechanism de-identifies anything — it does
+  // not, and the copy must not imply otherwise.
+  const warning = el('div', 'import-warning', '');
   warning.hidden = true;
+
+  const WARN_NAME =
+    'The column you chose for Patient alias looks like it holds real names. ' +
+    'The alias is meant to be a pseudonym you recognize — importing real names ' +
+    'makes your roster directly identifying.';
+  const WARN_NAME_DOB =
+    ' You are also importing dates of birth. A real name plus a date of birth ' +
+    'identifies a patient outright.';
 
   const FIELDS = [
     { key: 'aliasCol',    label: 'Patient alias',    required: true,  sug: suggested.aliasCol },
@@ -235,9 +253,19 @@ function showStep2(card, modal, rerender, headers, rows) {
   }
 
   const checkWarning = () => {
-    warning.hidden = !NAME_COL_PATTERN.test(selects.aliasCol.value);
+    const nameLike = NAME_COL_PATTERN.test(selects.aliasCol.value);
+    warning.hidden = !nameLike;
+    // textContent, not innerHTML — this string is built from constants, but the
+    // build guard rejects innerHTML in this file and the rule is worth keeping
+    // regardless of the current inputs.
+    warning.textContent = nameLike
+      ? WARN_NAME + (selects.dobCol.value ? WARN_NAME_DOB : '')
+      : '';
   };
   selects.aliasCol.addEventListener('change', checkWarning);
+  // The DOB mapping changes the warning's severity, so it has to re-run when
+  // that select changes too — not only when the alias column does.
+  selects.dobCol?.addEventListener('change', checkWarning);
   checkWarning();
 
   const backBtn = actionBtn('← Back', 'btn btn-ghost',
