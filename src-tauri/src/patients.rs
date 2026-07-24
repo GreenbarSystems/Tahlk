@@ -256,6 +256,14 @@ pub(crate) async fn destroy_patient_records(
     // removal, audit, and destruction_log entry are one atomic unit.
     {
         let tx = conn.transaction()?;
+        // Re-check the hold INSIDE the transaction, before any destructive
+        // write. The up-front check above runs on a separate read and closes no
+        // window for a patient with ZERO encounters: the per-encounter guard in
+        // delete_encounter_in_tx never fires, so nothing else would stop the
+        // `DELETE FROM patients` below if a concurrent retention_hold_set(true)
+        // committed between the up-front read and this transaction (F6). Checking
+        // here makes the guard and the DELETE atomic on one snapshot.
+        retention::litigation_hold_check(&tx, "patient records")?;
         for enc_id in &encounter_ids {
             crate::encounters::delete_encounter_in_tx(&tx, enc_id, &provider_id, "patient_request")?;
         }
