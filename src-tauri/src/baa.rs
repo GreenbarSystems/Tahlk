@@ -363,6 +363,29 @@ mod tests {
         assert_eq!(got.provider_id, "jane");
     }
 
+    // Every other test in this module passes `gate_enabled` as an explicit
+    // parameter to `resolve_ack`, so none of them reads the constant. That is
+    // the right shape for testing the decision logic, but it leaves the
+    // shipped value itself unasserted: setting GATE_ENABLED to false keeps the
+    // entire suite green while disabling the only technical control that stops
+    // a transcript reaching Anthropic without a recorded attestation. One
+    // character, no signal. This is the signal.
+    //
+    // assertions_on_constants is silenced deliberately — the lint assumes a
+    // constant assertion is a tautology, and here it is a pin against exactly
+    // that edit.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn the_gate_is_enabled_in_shipped_builds() {
+        assert!(
+            GATE_ENABLED,
+            "baa::GATE_ENABLED must stay true: require_ack uses it as the choke \
+             point that refuses note generation before any network I/O. Turning \
+             it off is a compliance decision, not a code cleanup — update ADR \
+             0006 and remove this test in the same commit."
+        );
+    }
+
     #[test]
     fn error_code_wire_shape() {
         // The JS side branches on `code === 'baa_required'`. Guard that
