@@ -264,6 +264,17 @@ fn key_pragma(hex_key: &str) -> Result<String, AppError> {
 // than at the first user query.
 fn apply_key(conn: &Connection, hex_key: &str) -> Result<(), AppError> {
     conn.execute_batch(&key_pragma(hex_key)?)?;
+    // Pin the SQLCipher on-disk format to v4 (finding #14). The bundled
+    // SQLCipher (libsqlite3-sys 0.35) is 4.x, so v4 is the format every existing
+    // database was already created under — this is a no-op today. Its purpose is
+    // forward safety: a future SQLCipher MAJOR bump (e.g. 5.x, which could change
+    // the default page size / KDF / HMAC algorithm) would otherwise be unable to
+    // open databases written by this build, an availability/lockout event.
+    // Pinning makes the format explicit so a dependency upgrade cannot silently
+    // strand installed databases. Must run after `PRAGMA key` and before the
+    // first read below. Applied on every pooled connection (via KeyingCustomizer)
+    // and every verify/migration open, so create and open always agree.
+    conn.execute_batch("PRAGMA cipher_compatibility = 4;")?;
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
         .map_err(|e| {
             AppError::Storage(format!(
