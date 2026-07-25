@@ -250,6 +250,18 @@ pub(crate) fn purge_transcription_scratch(
     Ok(removed)
 }
 
+/// Read every live encounter id into a set for O(1) orphan lookups during the
+/// audio sweep. One query instead of one-per-file (audit perf finding #11).
+/// Any row error aborts (via `?`) so a partial set can never mislabel a live
+/// file as an orphan.
+fn load_live_encounter_ids(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM encounters")?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::HashSet<String>>>()?;
+    Ok(ids)
+}
+
 /// Startup sweep for encrypted audio whose encounter row no longer exists.
 ///
 /// Closes the failure mode no per-call handler can: if the process dies
@@ -277,6 +289,25 @@ pub(crate) fn reconcile_orphaned_audio(
         Err(e) => return Err(AppError::Storage(e.to_string())),
     };
 
+    // Load every live encounter id ONCE, up front, rather than issuing a
+    // `SELECT EXISTS` per file (audit perf finding #11): that was O(files)
+    // synchronous DB round-trips on the launch path, and audio files accumulate
+    // for the whole retention window (default policy keeps them). Membership is
+    // then an O(1) set lookup below. Fail-safe: if the id set cannot be read (or
+    // any row errors), we cannot distinguish orphans from live files, so abort
+    // WITHOUT deleting anything — this function deletes PHI, and every ambiguous
+    // case must keep the file, exactly as the old per-file query did on error.
+    let live_ids = match load_live_encounter_ids(conn) {
+        Ok(ids) => ids,
+        Err(e) => {
+            log::warn!(
+                "orphaned-audio sweep skipped: could not enumerate encounters: {}",
+                crate::log_safety::cap_len(&e.to_string())
+            );
+            return Ok(0);
+        }
+    };
+
     let mut orphans = 0usize;
     for entry in entries.flatten() {
         let raw = entry.file_name();
@@ -289,15 +320,7 @@ pub(crate) fn reconcile_orphaned_audio(
             continue;
         }
 
-        let still_referenced = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM encounters WHERE id = ?1)",
-                params![id],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(1) // query failed → assume referenced, never delete on doubt
-            != 0;
-        if still_referenced {
+        if live_ids.contains(id) {
             continue;
         }
 
