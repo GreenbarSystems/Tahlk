@@ -480,9 +480,17 @@ fn migrate_plaintext_to_encrypted(
         encrypted_path.display().to_string().replace('\'', "''"),
         hex_key
     );
-    src.execute_batch(&attach)?;
+    // Generic errors on BOTH the ATTACH and the export: the `attach` string
+    // contains `KEY "x'<DEK>'"`, and a rusqlite error can echo the offending
+    // SQL (statement text + context) into its Display. That message would be
+    // logged/panicked upstream (lib.rs, auth.rs) into the OS log file, which is
+    // outside the encryption boundary. Discard the underlying message here, the
+    // same discipline `export_db_to`/`build_restore_pending` already apply to
+    // their KEY-bearing ATTACH statements.
+    src.execute_batch(&attach)
+        .map_err(|_| AppError::Storage("migration attach failed".into()))?;
     src.query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()))
-        .map_err(|e| AppError::Storage(format!("sqlcipher_export failed: {}", e)))?;
+        .map_err(|_| AppError::Storage("migration export failed".into()))?;
     src.execute_batch("DETACH DATABASE encrypted;")?;
     drop(src);
 

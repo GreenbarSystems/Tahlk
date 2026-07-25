@@ -957,7 +957,7 @@ pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<
         // but is logged; the wrapped copy is what guards forward security.
         if let Ok(entry) = crate::keychain::entry(crate::db_key::KEYRING_USER) {
             if let Err(e) = entry.delete_credential() {
-                log::warn!("auth_set_password: could not remove keychain DEK: {e}");
+                log::warn!("auth_set_password: could not remove the keychain data key: {e}");
             }
         }
 

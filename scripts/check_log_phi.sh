@@ -48,8 +48,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/../src-tauri/src"
 
-# Field/variable names that strongly imply PHI. Substring, case-insensitive.
-FORBIDDEN="transcript|note|content|patient|provider_name|chief_complaint|ssn|dob|date_of_birth|mrn|phone|email|address|zip|postal|insurance|member_id|policy|dea|npi|first_name|last_name|birth"
+# Field/variable names that strongly imply PHI *or* secret key material.
+# Substring, case-insensitive.
+#
+# The second group (dek|passphrase|secret|credential|bearer) closes a distinct
+# gap from PHI: the DEK/backup-passphrase are the crown jewels, and a
+# `log::error!("... {dek_hex}")` or `"... {passphrase}"` would leak them to the
+# unencrypted OS log just as surely as PHI would. Bare `key`/`token` are
+# deliberately EXCLUDED — they collide with legitimate, non-leaking words
+# ("keychain", "keyed", "keyring") that appear throughout the crate; `dek` and
+# `passphrase` name the actual secret-bearing variables with near-zero false
+# positives. The runtime redactor in log_safety.rs (`scrub_hex_secrets`, folded
+# into `cap_len`) is the value-level second layer for anything this name-level
+# scan can't see.
+FORBIDDEN="transcript|note|content|patient|provider_name|chief_complaint|ssn|dob|date_of_birth|mrn|phone|email|address|zip|postal|insurance|member_id|policy|dea|npi|first_name|last_name|birth|dek|passphrase|secret|credential|bearer"
 
 # Collect log::/eprintln!/println! macro lines (with file:line) across all
 # .rs files. grep exits non-zero when nothing matches, which is the success

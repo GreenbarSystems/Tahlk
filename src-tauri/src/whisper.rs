@@ -720,10 +720,12 @@ mod tests {
     }
 
     // Cap the redacted output at 200 chars. Unbounded upstream messages
-    // must not blow up audit rows or log lines.
+    // must not blow up audit rows or log lines. Uses a NON-hex fill ('z') so
+    // this isolates the length cap — cap_len now also redacts long hex runs
+    // (DEK-shaped key material), which an all-hex fill would trigger.
     #[test]
     fn redact_whisper_stderr_caps_length() {
-        let raw = "a".repeat(500);
+        let raw = "z".repeat(500);
         let out = redact_whisper_stderr(&raw);
         // 200 chars + the ellipsis marker.
         assert_eq!(out.chars().count(), 201);
