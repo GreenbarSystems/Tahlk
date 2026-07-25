@@ -200,6 +200,16 @@ export async function logNoteExported(encounterId, format, method) {
   return appendAudit(keys.noteAudit(encounterId), 'note_exported', { format, method });
 }
 
+// Record the provider's attestation that the patient consented to being
+// recorded (finding S1). `allParty` marks an all-party-consent state, where
+// this is a legal prerequisite. Server-derived actor/timestamp on Tauri so the
+// consent record cannot be forged or back-dated; dev/browser-preview falls back
+// to the hash-chained appendAudit path.
+export async function logRecordingConsent(encounterId, { allParty, providerState = null, method = 'provider_attested' } = {}) {
+  if (isTauri) return invoke('audit_log_recording_consent', { encounterId, allParty: !!allParty, providerState, method });
+  return appendAudit(keys.noteAudit(encounterId), 'recording_consent', { encounterId, allParty: !!allParty, providerState, method });
+}
+
 // Record that a roster/list of records (`scope`) was displayed with `count`
 // rows of PHI visible — the list-view counterpart to logRecordViewed, which
 // only covers a single-encounter panel open. One entry per render, not one

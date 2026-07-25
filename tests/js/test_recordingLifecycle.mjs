@@ -132,7 +132,9 @@ const { encountersRepo } = await import('../../src/data/encountersRepo.js');
 function makeCtx(id) {
   const subs = {};
   return {
-    currentEncounter: { id, status: 'draft', audio_path: null },
+    // recording_consent pre-satisfied: this suite exercises the
+    // start/stop/teardown lifecycle, not the S1 consent gate.
+    currentEncounter: { id, status: 'draft', audio_path: null, recording_consent: { consented: true } },
     sub: (name, fn) => { subs[name] = fn; },
     onEncounterUpdated: () => {},
     _emit: (name, payload) => subs[name]?.(payload),

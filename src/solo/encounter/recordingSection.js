@@ -4,13 +4,52 @@
 
 import { encountersRepo } from '../../data/encountersRepo.js';
 import { startRecording, stopRecording, abortRecording, isRecording, listAudioDevices, setDeviceId, getDeviceId } from '../../scribe/recorder.js';
-import { toast, fmtDuration } from '../../utils/format.js';
+import { toast, fmtDuration, nowISO } from '../../utils/format.js';
 import { userMessage } from '../../platform/appError.js';
+import { kvGet } from '../../core/storageBackend.js';
+import { keys } from '../../data/keys.js';
+import { requiresAllPartyConsent, stateName } from '../../domain/jurisdictions.js';
+import { consentToRecordModal } from '../consentModal.js';
+import { logRecordingConsent } from '../../core/auditLog.js';
 
 export function wireRecordingSection(ctx) {
   const recordBtn   = document.getElementById('btn-record');
   const recordLabel = document.getElementById('record-label');
   const recordTimer = document.getElementById('record-timer');
+
+  // Patient consent-to-record gate (finding S1). Consent is captured before the
+  // first recording of an encounter and remembered on the encounter object;
+  // the attestation is also written to the tamper-evident audit trail, which is
+  // the authoritative consent record.
+  //
+  // Returns true if it is OK to proceed with recording. Prompts for consent the
+  // first time; state-aware (all-party-consent states require the affirmative
+  // attestation and say so). Fails safe: any cancel/close means no recording.
+  async function ensureRecordingConsent() {
+    if (ctx.currentEncounter.recording_consent?.consented) return true;
+    const providerState = (kvGet(keys.provider()) || {}).state || '';
+    const allParty = requiresAllPartyConsent(providerState);
+    const ok = await consentToRecordModal({ allParty, stateLabel: stateName(providerState) });
+    if (!ok) return false;
+    ctx.currentEncounter.recording_consent = {
+      consented: true,
+      allParty,
+      state: providerState || null,
+      method: 'provider_attested',
+      at: nowISO(),
+    };
+    // Best-effort: a failed audit write must not block a consented recording,
+    // but it is logged so the gap is visible (mirrors other audit call sites).
+    try {
+      await logRecordingConsent(ctx.currentEncounter.id, {
+        allParty,
+        providerState: providerState || null,
+      });
+    } catch (e) {
+      console.error('recording-consent audit write failed', e);
+    }
+    return true;
+  }
 
   // Device picker: populate on mount; re-populate after first permission grant
   // so browser-supplied labels (empty before grant) become readable names.
@@ -67,6 +106,11 @@ export function wireRecordingSection(ctx) {
         if (recordLabel) recordLabel.textContent = 'Start Recording';
       }
     } else {
+      // S1: no recording without the patient-consent attestation.
+      if (!await ensureRecordingConsent()) {
+        toast('Recording canceled — patient consent is required.');
+        return;
+      }
       try {
         await startRecording(ctx.currentEncounter.id);
         recordBtn?.classList.add('btn-record--active');

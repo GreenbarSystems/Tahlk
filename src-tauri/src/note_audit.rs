@@ -199,6 +199,35 @@ pub(crate) fn audit_log_note_exported(
     server_append(&mut conn, &encounter_id, "note_exported", extra)
 }
 
+/// Record that the provider attested the patient consented to being recorded
+/// (finding S1). `all_party` marks that the provider's jurisdiction is an
+/// all-party-consent (wiretap) state, where recording a confidential
+/// conversation without consent can be a criminal violation — so the
+/// attestation is the legal predicate for the recording, not a nicety. Actor
+/// and timestamp are derived server-side, so the consent record cannot be
+/// back-dated or re-attributed from the WebView; it lands in the same
+/// tamper-evident `note_audit` chain as every other access event, keyed to the
+/// encounter it authorizes.
+#[tauri::command]
+pub(crate) fn audit_log_recording_consent(
+    state: State<'_, DbState>,
+    encounter_id: String,
+    all_party: bool,
+    provider_state: Option<String>,
+    method: String,
+) -> Result<(), AppError> {
+    let mut conn = state.conn()?;
+    let mut extra = BTreeMap::new();
+    extra.insert("encounterId".to_string(), json!(encounter_id));
+    extra.insert("allParty".to_string(), json!(all_party));
+    extra.insert("providerState".to_string(), match &provider_state {
+        Some(s) => json!(s),
+        None => Value::Null,
+    });
+    extra.insert("method".to_string(), json!(method));
+    server_append(&mut conn, &encounter_id, "recording_consent", extra)
+}
+
 /// Roster/list scopes that may be recorded as a records-listed access event.
 /// Enforced at the command boundary so a compromised WebView can't stuff an
 /// arbitrary string into the (synthetic) `encounter_id` column and forge an
