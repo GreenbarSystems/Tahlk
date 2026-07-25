@@ -59,27 +59,6 @@ pub(crate) fn provider_id(conn: &Connection) -> String {
     .unwrap_or_else(|| "provider".to_string())
 }
 
-/// The provider's practice state (USPS 2-letter code), read from the stored
-/// profile, or `None` if not set. Nearly every state patient-protection rule
-/// (retention floors, recording consent, breach timelines) keys off this, so
-/// server-side consumers read it here rather than trusting a caller-supplied
-/// value — the same discipline as [`provider_id`]. Returns `None` (not a
-/// guess) when the profile is missing/unparseable or has no `state` field, so
-/// callers can fail safe / prompt rather than silently assume a jurisdiction.
-pub(crate) fn provider_state(conn: &Connection) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM kv WHERE key = ?1",
-        params![crate::secrets::NOTE_PROVIDER_PROFILE_KEY],
-        |r| r.get::<_, String>(0),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-    .and_then(|v| v["state"].as_str().map(String::from))
-    .filter(|s| !s.is_empty())
-}
-
 /// Insert or update a single KV row. `updated_at` is stamped server-side to
 /// the current unix second so callers can't accidentally desync their local
 /// clock into the row. The SQL is byte-identical to what `kv_set` and
@@ -152,28 +131,6 @@ mod tests {
 
         put_profile(&conn, r#"{"name":42}"#);
         assert_eq!(provider_id(&conn), "provider", "name of the wrong type");
-    }
-
-    #[test]
-    fn reads_the_provider_state_when_present() {
-        let conn = kv_db();
-        put_profile(&conn, r#"{"name":"Dr. Jane Smith","state":"NY"}"#);
-        assert_eq!(provider_state(&conn).as_deref(), Some("NY"));
-    }
-
-    #[test]
-    fn provider_state_is_none_when_missing_empty_or_unparseable() {
-        let conn = kv_db();
-        assert_eq!(provider_state(&conn), None, "no profile row");
-
-        put_profile(&conn, r#"{"name":"Dr. Jane Smith"}"#);
-        assert_eq!(provider_state(&conn), None, "profile without a state field");
-
-        put_profile(&conn, r#"{"name":"Dr. Jane Smith","state":""}"#);
-        assert_eq!(provider_state(&conn), None, "empty state must be None, not \"\"");
-
-        put_profile(&conn, "not json at all");
-        assert_eq!(provider_state(&conn), None, "unparseable profile");
     }
 
     #[test]

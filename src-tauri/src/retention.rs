@@ -3,8 +3,8 @@
 //! Covered entities must retain records for at least 6 years from creation
 //! or last effective date; state rules vary and are often longer (and longer
 //! still for minors). The GOVERNING floor is the provider's own state's law —
-//! captured on the provider profile (`kv_ops::provider_state`) and referenced
-//! for the provider in `docs/compliance/state-retention-reference.md`. The
+//! captured on the provider profile (the `state` field) and referenced for the
+//! provider in `docs/compliance/state-retention-reference.md`. The
 //! Arizona citations in `minor_extension_allows_destruction` below are a
 //! worked EXAMPLE of a state adult floor, not a universal rule; the actual
 //! window is provider-configured and the provider is responsible for setting
