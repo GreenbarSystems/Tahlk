@@ -142,6 +142,42 @@ This acceptance is specific to the single-user local-first model. Re-open it if 
 
 ---
 
+## Item 4 — `destruction_log`, `config_audit`, `auth_audit` are append-only but not keyed-HMAC-chained (accepted)
+
+### What it is
+
+Three audit tables — `destruction_log` (PHI disposal), `config_audit` (retention / hold / lock / restore settings), and `auth_audit` (authentication events) — record legally consequential activity but, unlike `note_history` / `note_audit`, carry **no per-row hash or keyed MAC**. Their integrity rests on the fact that **no delete or update command is exposed** for them via the Tauri IPC surface (verified against the full `invoke_handler` list): a compromised WebView can append and read, never erase or edit.
+
+### Why it is accepted, not fixed
+
+1. **Same DEK-holder overlap as Item 3.** `config_audit` and `destruction_log` live inside the SQLCipher database. The only party who can make coherent edits to the *decrypted* rows is the DEK holder, and an app-level MAC rooted in that same DEK can be re-forged by that same party — so a keyed chain buys nothing against the one actor who could bypass the append-only IPC surface. This is exactly the reasoning in Item 3.
+2. **`auth_audit` cannot be DEK-keyed even in principle.** Its rows are written during *failed* unlock attempts — **before any DEK or MAC key exists** (that is the whole reason it lives in the always-openable plaintext `tahlk_auth.db` rather than the encrypted DB). A MAC key derived from the DEK cannot cover rows written when the DEK is unavailable. It is deliberately **metadata-only** (timestamp, event, outcome — no PHI, no identity) precisely so that leaving it unencrypted and un-MAC'd discloses nothing sensitive.
+3. **At-rest page tampering of the two encrypted tables is already caught** by SQLCipher's per-page HMAC (`cipher_use_hmac` on), as in Item 3.
+
+### Conditions under which this must be re-audited
+
+1. Any of Item 3's conditions (multi-user / multi-tenant; the encrypted DB leaving the SQLCipher boundary).
+2. **Any delete or update command is ever exposed** for these tables — the append-only-IPC property is the entire control here.
+3. **`auth_audit` ever gains a field beyond bounded metadata** (e.g. an actor identity or free-text detail), at which point its plaintext, un-authenticated storage would need to be reconsidered.
+
+---
+
+## Item 5 — Sign-off content hash is client-computed, not independently re-derived server-side (accepted, tracked)
+
+### What it is
+
+`computeNoteHash` (`src/utils/contentHash.js`) runs in the WebView and the resulting `signed_hash` is passed to Rust, which stores it **without independently recomputing** it from the note content in the KV store (`note_content_v1::<id>`). So the hash attests to *what the client said the content was*, not to what is actually stored.
+
+### Why it is accepted (and narrower than it looks)
+
+Post-sign content is **immutable server-side** (`kv.rs::block_if_encounter_signed` rejects any write to a signed encounter's content), so the primary tamper vector — editing the note after signing — is already blocked regardless of the hash. The residual is confined to a bug, race, or compromised WebView persisting a `signed_hash` that never matched the text *at sign time*; the keyed-MAC chain then faithfully protects that (possibly-wrong-at-birth) hash from later alteration.
+
+### Why it is not yet fixed in code
+
+Deriving the hash server-side requires Rust to reproduce the JS JSON canonicalization **byte-for-byte** (fixed key order, `JSON.stringify`-compatible string escaping). A mismatch would reject *legitimate* sign-offs, so this must be developed and validated against a running build rather than shipped from a static edit. Tracked as a follow-up; when implemented, Rust should **derive** the hash server-side (from the KV content it can already read) rather than trust a client-supplied value.
+
+---
+
 ## Pre-release compliance checklist
 
 Run through this before every production release. Each item should be checked by a human, not assumed — this is the paper trail.
