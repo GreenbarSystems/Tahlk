@@ -414,14 +414,19 @@ fn build_restore_pending(
 
 /// Apply a staged restore at open time, before the pool is built. Crash-safe
 /// and idempotent (see the module comment). No-op when nothing is staged.
+///
+/// Returns `true` when a restore was actually swapped into place, so the caller
+/// can record the durable `database_restored` audit row and clean up the
+/// pre-restore breadcrumb; `false` when there was nothing staged (or a staged
+/// file was discarded as unreadable).
 fn apply_pending_restore(
     db_path: &Path,
     pending: &Path,
     bak: &Path,
     hex_key: &str,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     if !pending.exists() {
-        return Ok(());
+        return Ok(false);
     }
     // Only ever swap in a pending that actually opens with this DEK — never
     // replace good data with a file we cannot read (wrong DEK, corrupt, or a
@@ -429,7 +434,7 @@ fn apply_pending_restore(
     if !verify_encrypted_opens(pending, hex_key) {
         log::warn!("discarding an unreadable pending restore");
         let _ = std::fs::remove_file(pending);
-        return Ok(());
+        return Ok(false);
     }
     // Move the current DB aside as a safety copy. Skipped when the canonical
     // path is already gone (a crash between the two renames), so the prior
@@ -440,7 +445,7 @@ fn apply_pending_restore(
     }
     std::fs::rename(pending, db_path).map_err(AppError::storage_from)?;
     log::info!("applied a staged backup restore");
-    Ok(())
+    Ok(true)
 }
 
 // Builds a fresh SQLCipher-encrypted copy of the legacy plaintext DB at
@@ -590,7 +595,8 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     // ciphertext, so that check then correctly no-ops).
     let restore_pending = data_dir.join(RESTORE_PENDING_FILE);
     let pre_restore_bak = data_dir.join(PRE_RESTORE_BAK_FILE);
-    apply_pending_restore(&db_path, &restore_pending, &pre_restore_bak, hex_key)?;
+    let restore_applied =
+        apply_pending_restore(&db_path, &restore_pending, &pre_restore_bak, hex_key)?;
 
     if is_plaintext_db(&db_path).map_err(AppError::storage_from)? {
         // Rename-before-destroy swap. Each step is individually crash-safe;
@@ -679,7 +685,37 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     llm_audit::init_schema(&conn)?;
     destruction_log::init_schema(&conn)?;
     config_audit::init_schema(&conn)?;
+
+    // A staged restore just replaced the ENTIRE record DB (every table and audit
+    // trail). Record it durably in the restored DB itself so the live DB an
+    // auditor inspects carries the marker. Best-effort: the physical swap has
+    // already committed, so a failed insert must not fail the open — and the
+    // reliable, healthy-session trace was already written as `restore_staged` in
+    // the wraps DB, which the restore does not replace.
+    if restore_applied {
+        let actor = crate::kv_ops::provider_id(&conn);
+        if let Err(e) = config_audit::append(
+            &conn,
+            "database_restored",
+            Some(PRE_RESTORE_BAK_FILE),
+            "restored from encrypted backup",
+            &actor,
+        ) {
+            log::warn!("could not record database_restored config-audit row: {e}");
+        }
+        crate::auth::record_auth_event(app, "restore_applied", "success");
+    }
     drop(conn);
+
+    // Clean up the pre-restore breadcrumb once the restored DB has opened and
+    // verified cleanly (reaching here means the pool built and every schema init
+    // succeeded). This bounds the full, DEK-encrypted copy of the prior record
+    // set to the session in which the restore applied, rather than leaving it in
+    // the data dir indefinitely (audit finding #2). Mirrors the zero_and_remove
+    // discipline already used for the plaintext-migration breadcrumb.
+    if pre_restore_bak.exists() {
+        zero_and_remove(&pre_restore_bak);
+    }
 
     Ok(pool)
 }
@@ -775,8 +811,9 @@ mod tests {
         make_keyed_db(&db, &key, "current");
         make_keyed_db(&pending, &key, "from-backup");
 
-        apply_pending_restore(&db, &pending, &bak, &key).unwrap();
+        let applied = apply_pending_restore(&db, &pending, &bak, &key).unwrap();
 
+        assert!(applied, "a real swap must report applied=true so the caller audits it");
         assert_eq!(read_row(&db, &key), "from-backup", "canonical DB is now the restored copy");
         assert!(!pending.exists(), "pending must be consumed");
         assert_eq!(read_row(&bak, &key), "current", "prior DB preserved as the safety bak");
@@ -792,8 +829,9 @@ mod tests {
         make_keyed_db(&db, &key, "current");
         make_keyed_db(&pending, &second_key(), "unreadable-with-install-dek");
 
-        apply_pending_restore(&db, &pending, &bak, &key).unwrap();
+        let applied = apply_pending_restore(&db, &pending, &bak, &key).unwrap();
 
+        assert!(!applied, "an unreadable pending is discarded, not applied");
         assert_eq!(read_row(&db, &key), "current", "a pending keyed with the wrong DEK must NOT replace good data");
         assert!(!pending.exists(), "the unreadable pending is discarded");
         assert!(!bak.exists(), "no swap happened, so no bak was made");
@@ -805,7 +843,9 @@ mod tests {
         let db = dir.path().join("tahlk.db");
         let key = fixed_key();
         make_keyed_db(&db, &key, "current");
-        apply_pending_restore(&db, &dir.path().join("nope"), &dir.path().join("bak"), &key).unwrap();
+        let applied =
+            apply_pending_restore(&db, &dir.path().join("nope"), &dir.path().join("bak"), &key).unwrap();
+        assert!(!applied, "no pending means nothing applied");
         assert_eq!(read_row(&db, &key), "current");
     }
 

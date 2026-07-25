@@ -187,7 +187,15 @@ pub(crate) async fn stage_backup_restore(app: AppHandle, passphrase: String) -> 
     };
     let backup_path = src_path.to_string();
 
-    crate::db::stage_restore_pending(&app, &backup_path, &passphrase, &dek)?;
+    // Durable, compliance-grade record that a full-record restore was initiated,
+    // written now while the session is healthy — NOT at the fragile next-launch
+    // swap. Lands in the wraps DB, which the restore does not replace. Recorded
+    // on failure too: an attempted-but-rejected restore (wrong passphrase, bad
+    // file) is itself worth a trace.
+    let staged = crate::db::stage_restore_pending(&app, &backup_path, &passphrase, &dek);
+    let outcome = if staged.is_ok() { "success" } else { "failure" };
+    crate::auth::record_auth_event(&app, "restore_staged", outcome);
+    staged?;
     log::info!("backup restore staged (applies on next launch)");
     Ok(true)
 }

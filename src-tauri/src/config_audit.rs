@@ -34,6 +34,13 @@ pub(crate) const VALID_ACTIONS: &[&str] = &[
     // window weakens a required safeguard, so each change is audited (M2).
     "lock_enabled_changed",
     "lock_timeout_changed",
+    // A staged backup restore replaced the ENTIRE record database — every table
+    // and every audit trail — at startup. Without a durable marker in the
+    // restored DB, an auditor cannot tell "time moved forward normally" from
+    // "an older, more favourable record set was substituted": the restored
+    // copy's own hash-chains verify clean either way. This row is that marker
+    // (audit finding #2). Written into the restored DB itself.
+    "database_restored",
 ];
 
 pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -220,6 +227,25 @@ mod tests {
         assert_eq!(r[0].0, "lock_enabled_changed");
         assert_eq!(r[0].2, "false");
         assert_eq!(r[1].0, "lock_timeout_changed");
+    }
+
+    #[test]
+    fn database_restored_action_is_accepted() {
+        // A full-record restore must be recordable in the same trail (finding #2)
+        // so the live DB carries a durable marker that it was substituted.
+        let conn = fresh_db();
+        append(
+            &conn,
+            "database_restored",
+            Some("tahlk.db.pre-restore.bak"),
+            "restored from encrypted backup",
+            "Dr. Chen",
+        )
+        .unwrap();
+        let r = rows(&conn);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].0, "database_restored");
+        assert_eq!(r[0].2, "restored from encrypted backup");
     }
 
     #[test]
