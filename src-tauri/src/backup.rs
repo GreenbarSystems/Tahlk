@@ -154,6 +154,44 @@ pub(crate) async fn export_encrypted_backup(
     Ok(true)
 }
 
+/// #[tauri::command] — stage a restore from an encrypted backup file (ADR 0009).
+///
+/// **Non-destructive.** Re-keys the chosen backup into a pending file keyed with
+/// this install's DEK; the next launch swaps it into place (see `db.rs`). The
+/// live database and the connection pool are untouched by this call, so a
+/// mistake or crash here cannot corrupt current data — the swap only happens at
+/// startup, before any pool exists, keeping the prior DB as a `.pre-restore.bak`.
+///
+/// Requires an unlocked session (the DEK must be in memory). Returns `true` when
+/// a restore was staged, `false` when the provider dismissed the file picker.
+#[tauri::command]
+pub(crate) async fn stage_backup_restore(app: AppHandle, passphrase: String) -> Result<bool, AppError> {
+    // The install DEK, from the current unlocked session. Restore re-keys the
+    // backup into THIS DEK so the existing login password still opens it.
+    let dek = crate::auth::session_dek_hex()
+        .ok_or_else(|| AppError::precondition("Unlock the app before restoring a backup."))?;
+
+    let app_for_dialog = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app_for_dialog
+            .dialog()
+            .file()
+            .add_filter("Tahlk encrypted backup", &["tahlkbackup"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(AppError::storage_from)?;
+
+    let Some(src_path) = picked else {
+        return Ok(false); // provider cancelled the file picker
+    };
+    let backup_path = src_path.to_string();
+
+    crate::db::stage_restore_pending(&app, &backup_path, &passphrase, &dek)?;
+    log::info!("backup restore staged (applies on next launch)");
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

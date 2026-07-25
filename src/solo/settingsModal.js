@@ -277,6 +277,19 @@ export async function renderSettings() {
         </div>
         <button class="btn btn-primary" id="s-backup-export">Export encrypted backup</button>
         <div id="s-backup-result" class="settings-desc" style="margin-top:8px"></div>
+
+        <h4 class="settings-sub-h" style="margin-top:20px">Restore from a backup</h4>
+        <p class="settings-desc">
+          Replace <strong>all records on this device</strong> with a backup file. This <strong>cannot be undone</strong>
+          (a copy of the current database is kept as a safety file). The restore is prepared now and completes when you
+          <strong>restart Tahlk</strong>. Note: backups do not include audio recordings, so those are not restored.
+        </p>
+        <div class="field-row">
+          <label for="s-restore-pass">Backup's passphrase</label>
+          <input type="password" id="s-restore-pass" autocomplete="off" placeholder="Passphrase used for that backup" />
+        </div>
+        <button class="btn btn-ghost btn-danger" id="s-restore-backup">Restore from backup…</button>
+        <div id="s-restore-result" class="settings-desc" style="margin-top:8px"></div>
       </section>
 
       <section class="settings-section settings-section--muted">
@@ -715,6 +728,42 @@ export function wireSettings() {
       }
     } catch (e) {
       setResult(`Could not create backup: ${userMessage(e, 'unknown error')}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  // Restore from a backup (OPS-3). Destructive — replaces all records — so it
+  // requires the backup's passphrase AND a typed confirmation. The command is
+  // non-destructive itself (it stages a pending restore applied on next launch).
+  document.getElementById('s-restore-backup')?.addEventListener('click', async () => {
+    const pass = document.getElementById('s-restore-pass')?.value || '';
+    const resultEl = document.getElementById('s-restore-result');
+    const setResult = msg => { if (resultEl) resultEl.textContent = msg; };
+    if (!pass) { setResult('Enter the passphrase for the backup you want to restore.'); return; }
+    const typed = await promptModal({
+      title: 'Restore from backup?',
+      message: 'This replaces ALL current records on this device with the backup, and completes on the next restart. A copy of your current database is kept as a safety file. Type RESTORE to continue.',
+      expected: 'Type: RESTORE',
+      confirmLabel: 'Continue',
+      confirmClass: 'btn-danger',
+      placeholder: 'RESTORE',
+    });
+    if (typed !== 'RESTORE') { setResult('Restore canceled.'); return; }
+    const btn = document.getElementById('s-restore-backup');
+    if (btn) btn.disabled = true;
+    setResult('Choose the backup file…');
+    try {
+      const staged = await invoke('stage_backup_restore', { passphrase: pass });
+      if (staged) {
+        setResult('Restore prepared. Restart Tahlk to complete it.');
+        toast('Restore prepared — restart Tahlk to complete.');
+        const a = document.getElementById('s-restore-pass'); if (a) a.value = '';
+      } else {
+        setResult('Restore canceled.');
+      }
+    } catch (e) {
+      setResult(`Could not prepare the restore: ${userMessage(e, 'unknown error')}`);
     } finally {
       if (btn) btn.disabled = false;
     }

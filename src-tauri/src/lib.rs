@@ -290,6 +290,7 @@ pub fn run() {
             llm_audit::llm_audit_list_for_patient,
             export::data_location,
             backup::export_encrypted_backup,
+            backup::stage_backup_restore,
             encounters::list_encounters,
             encounters::get_encounter,
             encounters::encounter_stats,

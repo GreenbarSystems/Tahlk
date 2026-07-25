@@ -635,11 +635,16 @@ equivalent to losing every patient record the practice has in Tahlk. No
 other component (whisper model, app binary, config) contains PHI or is
 irreplaceable by reinstalling.
 
-**Shipped (ADR 0008):** the in-app encrypted backup export described above.
-**Remaining follow-up:** an in-app *restore* flow (importing a backup into an
-install and re-wrapping the DEK under that install's password). Until it ships,
-the exported file is a standard passphrase-encrypted SQLCipher database,
-recoverable with SQLCipher tooling in a recovery scenario.
+**Shipped (ADR 0008 + ADR 0009):** both halves of the contingency plan — the
+encrypted backup **export** described above, and an in-app **restore**
+(Settings → Encrypted backup → Restore from a backup). Restore re-keys the
+chosen backup into this install's DEK and applies it on next launch via a
+crash-safe, staged swap that keeps the prior database as a `.pre-restore.bak`
+safety copy; it requires the backup passphrase and a typed confirmation.
+**Scope note:** restore recovers the database (notes, transcripts, patients,
+encounters, audit trails) but **not audio recordings**, which the backup does
+not include — the Settings copy states this. Bundling audio into export/restore
+is a possible future enhancement.
 
 ---
 

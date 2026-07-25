@@ -334,6 +334,115 @@ fn verify_encrypted_opens(path: &Path, hex_key: &str) -> bool {
     }
 }
 
+// ── Backup restore (staged; OPS-3 restore, ADR 0009) ────────────────────────
+//
+// Restore is two-phase, for crash safety and because the app cannot safely swap
+// the live DB file while the pool holds it open:
+//   1. `stage_restore_pending` (driven by a Settings command, NON-destructive)
+//      opens the passphrase-encrypted backup and RE-KEYS its contents into a
+//      pending file keyed with THIS install's DEK — so the install's existing
+//      login password / wraps still open the restored data. It never touches
+//      the live DB or the pool.
+//   2. `apply_pending_restore` (below, at open time, before the pool exists)
+//      swaps the verified pending into the canonical path with the same
+//      rename-before-destroy discipline as the plaintext migration, keeping the
+//      prior DB as a `.pre-restore.bak` safety copy.
+
+const RESTORE_PENDING_FILE: &str = "tahlk.db.restore-pending";
+const PRE_RESTORE_BAK_FILE: &str = "tahlk.db.pre-restore.bak";
+
+fn app_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, AppError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| AppError::internal_from(format!("could not resolve app_data_dir: {e}")))
+}
+
+/// Re-key a passphrase-encrypted backup at `backup_path` into a pending file
+/// keyed with `dek_hex` (this install's DEK). NON-destructive: the live DB is
+/// untouched and the swap happens at the next open (`apply_pending_restore`).
+/// Verifies the backup opens with `passphrase` and that the staged file opens
+/// with the DEK before returning. Errors never echo the KEY SQL (it carries the
+/// passphrase).
+pub(crate) fn stage_restore_pending(
+    app: &AppHandle,
+    backup_path: &str,
+    passphrase: &str,
+    dek_hex: &str,
+) -> Result<(), AppError> {
+    let pending = app_data_dir(app)?.join(RESTORE_PENDING_FILE);
+    build_restore_pending(backup_path, &pending, passphrase, dek_hex)
+}
+
+/// Path-explicit core of [`stage_restore_pending`], split out so it is
+/// unit-testable against tempfiles without a Tauri `AppHandle`.
+fn build_restore_pending(
+    backup_path: &str,
+    pending: &Path,
+    passphrase: &str,
+    dek_hex: &str,
+) -> Result<(), AppError> {
+    if pending.exists() {
+        std::fs::remove_file(pending).map_err(AppError::storage_from)?;
+    }
+
+    let src = Connection::open(backup_path).map_err(AppError::storage_from)?;
+    src.execute_batch(&format!("PRAGMA key = '{}';", passphrase.replace('\'', "''")))
+        .map_err(|_| AppError::invalid("could not open the backup file"))?;
+    // Confirm the passphrase actually decrypts it before building anything.
+    src.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .map_err(|_| AppError::invalid("wrong passphrase, or this is not a valid Tahlk backup"))?;
+
+    let attach = format!(
+        "ATTACH DATABASE '{}' AS restored KEY \"x'{}'\";",
+        pending.display().to_string().replace('\'', "''"),
+        dek_hex
+    );
+    src.execute_batch(&attach)
+        .map_err(|_| AppError::Storage("could not stage the restore".into()))?;
+    let exported = src.query_row("SELECT sqlcipher_export('restored')", [], |_| Ok(()));
+    let _ = src.execute_batch("DETACH DATABASE restored;");
+    drop(src);
+    exported.map_err(|_| AppError::Storage("restore staging failed".into()))?;
+
+    if !verify_encrypted_opens(pending, dek_hex) {
+        let _ = std::fs::remove_file(pending);
+        return Err(AppError::Storage("the staged restore could not be verified".into()));
+    }
+    crate::perms::chmod_0600_unix(pending);
+    Ok(())
+}
+
+/// Apply a staged restore at open time, before the pool is built. Crash-safe
+/// and idempotent (see the module comment). No-op when nothing is staged.
+fn apply_pending_restore(
+    db_path: &Path,
+    pending: &Path,
+    bak: &Path,
+    hex_key: &str,
+) -> Result<(), AppError> {
+    if !pending.exists() {
+        return Ok(());
+    }
+    // Only ever swap in a pending that actually opens with this DEK — never
+    // replace good data with a file we cannot read (wrong DEK, corrupt, or a
+    // leftover from a different install).
+    if !verify_encrypted_opens(pending, hex_key) {
+        log::warn!("discarding an unreadable pending restore");
+        let _ = std::fs::remove_file(pending);
+        return Ok(());
+    }
+    // Move the current DB aside as a safety copy. Skipped when the canonical
+    // path is already gone (a crash between the two renames), so the prior
+    // `.bak` — the only copy of the pre-restore data — is preserved.
+    if db_path.exists() {
+        let _ = std::fs::remove_file(bak); // Windows rename won't overwrite an existing target
+        std::fs::rename(db_path, bak).map_err(AppError::storage_from)?;
+    }
+    std::fs::rename(pending, db_path).map_err(AppError::storage_from)?;
+    log::info!("applied a staged backup restore");
+    Ok(())
+}
+
 // Builds a fresh SQLCipher-encrypted copy of the legacy plaintext DB at
 // `plaintext_path` into `encrypted_path` (a temp path — NOT the canonical DB
 // path) using `sqlcipher_export`. `PRAGMA rekey` does NOT work for
@@ -466,6 +575,15 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     // an empty DB or re-migrate over a good encrypted file.
     recover_orphaned_migration(&db_path, &encrypted_tmp, &bak, hex_key)?;
 
+    // Apply a staged backup restore (ADR 0009) before the pool opens — the
+    // canonical DB may be replaced here by the re-keyed restored copy. Runs
+    // after migration recovery (so any half-done plaintext migration is settled
+    // first) and before the plaintext check below (the restored copy is
+    // ciphertext, so that check then correctly no-ops).
+    let restore_pending = data_dir.join(RESTORE_PENDING_FILE);
+    let pre_restore_bak = data_dir.join(PRE_RESTORE_BAK_FILE);
+    apply_pending_restore(&db_path, &restore_pending, &pre_restore_bak, hex_key)?;
+
     if is_plaintext_db(&db_path).map_err(AppError::storage_from)? {
         // Rename-before-destroy swap. Each step is individually crash-safe;
         // `recover_orphaned_migration` above completes whichever step was in
@@ -575,6 +693,112 @@ mod tests {
 
     fn other_key() -> String {
         "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into()
+    }
+
+    // ── Backup restore (staged) ──────────────────────────────────────────────
+
+    fn second_key() -> String {
+        "1".repeat(64)
+    }
+
+    fn make_keyed_db(path: &Path, key: &str, row: &str) {
+        let c = Connection::open(path).unwrap();
+        apply_key(&c, key).unwrap();
+        c.execute_batch(&format!(
+            "CREATE TABLE t (v TEXT NOT NULL); INSERT INTO t (v) VALUES ('{row}');"
+        ))
+        .unwrap();
+    }
+
+    fn read_row(path: &Path, key: &str) -> String {
+        let c = Connection::open(path).unwrap();
+        apply_key(&c, key).unwrap();
+        c.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn build_restore_pending_rekeys_a_passphrase_backup_into_the_dek() {
+        let dir = TempDir::new().unwrap();
+        let backup = dir.path().join("b.tahlkbackup");
+        let pending = dir.path().join("tahlk.db.restore-pending");
+        let passphrase = "a good backup passphrase";
+        let dek = fixed_key();
+
+        // A passphrase-keyed "backup" carrying a row.
+        {
+            let c = Connection::open(&backup).unwrap();
+            c.execute_batch(&format!("PRAGMA key = '{passphrase}';")).unwrap();
+            c.execute_batch(
+                "CREATE TABLE t (v TEXT NOT NULL); INSERT INTO t (v) VALUES ('restored-phi');",
+            )
+            .unwrap();
+        }
+
+        build_restore_pending(backup.to_str().unwrap(), &pending, passphrase, &dek).unwrap();
+        assert!(pending.exists(), "a verified pending must be written");
+
+        // The pending opens with the install DEK (not the passphrase) and has the row.
+        assert_eq!(read_row(&pending, &dek), "restored-phi");
+    }
+
+    #[test]
+    fn build_restore_pending_rejects_a_wrong_passphrase_and_leaves_no_file() {
+        let dir = TempDir::new().unwrap();
+        let backup = dir.path().join("b.tahlkbackup");
+        let pending = dir.path().join("pending");
+        {
+            let c = Connection::open(&backup).unwrap();
+            c.execute_batch("PRAGMA key = 'the-real-pass';").unwrap();
+            c.execute_batch("CREATE TABLE t (v TEXT NOT NULL); INSERT INTO t (v) VALUES ('x');")
+                .unwrap();
+        }
+        let r = build_restore_pending(backup.to_str().unwrap(), &pending, "the-wrong-pass", &fixed_key());
+        assert!(r.is_err(), "a wrong passphrase must fail staging");
+        assert!(!pending.exists(), "no pending file may be left behind on failure");
+    }
+
+    #[test]
+    fn apply_pending_restore_swaps_in_the_pending_and_keeps_a_bak() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("tahlk.db");
+        let pending = dir.path().join("pending");
+        let bak = dir.path().join("bak");
+        let key = fixed_key();
+        make_keyed_db(&db, &key, "current");
+        make_keyed_db(&pending, &key, "from-backup");
+
+        apply_pending_restore(&db, &pending, &bak, &key).unwrap();
+
+        assert_eq!(read_row(&db, &key), "from-backup", "canonical DB is now the restored copy");
+        assert!(!pending.exists(), "pending must be consumed");
+        assert_eq!(read_row(&bak, &key), "current", "prior DB preserved as the safety bak");
+    }
+
+    #[test]
+    fn apply_pending_restore_discards_a_pending_it_cannot_open() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("tahlk.db");
+        let pending = dir.path().join("pending");
+        let bak = dir.path().join("bak");
+        let key = fixed_key();
+        make_keyed_db(&db, &key, "current");
+        make_keyed_db(&pending, &second_key(), "unreadable-with-install-dek");
+
+        apply_pending_restore(&db, &pending, &bak, &key).unwrap();
+
+        assert_eq!(read_row(&db, &key), "current", "a pending keyed with the wrong DEK must NOT replace good data");
+        assert!(!pending.exists(), "the unreadable pending is discarded");
+        assert!(!bak.exists(), "no swap happened, so no bak was made");
+    }
+
+    #[test]
+    fn apply_pending_restore_is_a_noop_without_a_pending() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("tahlk.db");
+        let key = fixed_key();
+        make_keyed_db(&db, &key, "current");
+        apply_pending_restore(&db, &dir.path().join("nope"), &dir.path().join("bak"), &key).unwrap();
+        assert_eq!(read_row(&db, &key), "current");
     }
 
     #[test]
