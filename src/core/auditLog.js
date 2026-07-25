@@ -34,6 +34,10 @@ import { nowISO } from '../utils/format.js';
 import { hashAuditEntry, verifyAuditChain } from '../utils/contentHash.js';
 import { invoke, isTauri } from '../platform/tauri.js';
 import { keys } from '../data/keys.js';
+import { mapLimit } from '../utils/asyncPool.js';
+
+// Concurrency bound for the full-database audit-chain sweep — see historyChain.js.
+const AUDIT_SWEEP_CONCURRENCY = 16;
 
 export const MAX_AUDIT_ENTRIES = 5000;
 
@@ -242,13 +246,17 @@ export async function verifyAllAuditChains() {
   if (!isTauri) return { ok: true, checked: 0, broken: [], results: [] };
 
   const encounterIds = await invoke('note_audit_list_encounter_ids');
-  const results = [];
-  for (const encounterId of encounterIds) {
-    const archive = await invoke('audit_archive_list', { encounterId });
-    const live = await invoke('audit_list', { encounterId });
+  // Bounded-concurrency sweep rather than N strictly-sequential round-trips
+  // (audit perf finding #12); the two reads per encounter (archive + live) are
+  // independent, so they run together too.
+  const results = await mapLimit(encounterIds, AUDIT_SWEEP_CONCURRENCY, async encounterId => {
+    const [archive, live] = await Promise.all([
+      invoke('audit_archive_list', { encounterId }),
+      invoke('audit_list', { encounterId }),
+    ]);
     const verdict = await verifyAuditChain([...archive, ...live]);
-    results.push({ encounterId, ...verdict });
-  }
+    return { encounterId, ...verdict };
+  });
 
   const broken = results.filter(r => !r.ok);
   return { ok: broken.length === 0, checked: results.length, broken, results };
