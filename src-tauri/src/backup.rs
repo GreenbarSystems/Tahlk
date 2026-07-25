@@ -53,6 +53,14 @@ pub(crate) fn validate_backup_passphrase(passphrase: &str) -> Result<(), AppErro
             "backup passphrase exceeds {PASSPHRASE_MAX_LEN} characters"
         )));
     }
+    // The passphrase is the sole protection on a full-record export, so hold it
+    // to the same common-password floor as the login credential (audit finding,
+    // Low): a ≥12-char passphrase that is still a dictionary word is weak.
+    if crate::auth::is_common_password(passphrase) {
+        return Err(AppError::invalid(
+            "this passphrase appears in a list of commonly used passwords — choose a more unique one",
+        ));
+    }
     Ok(())
 }
 
@@ -210,6 +218,15 @@ mod tests {
         assert!(validate_backup_passphrase(&"a".repeat(PASSPHRASE_MIN_LEN)).is_ok());
         assert!(validate_backup_passphrase(&"a".repeat(PASSPHRASE_MAX_LEN)).is_ok());
         assert!(validate_backup_passphrase(&"a".repeat(PASSPHRASE_MAX_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn common_passphrase_is_rejected_even_when_long_enough() {
+        // >= 12 chars but a dictionary word from the vendored common list must
+        // still be refused — the passphrase is the sole guard on a full export.
+        assert!(validate_backup_passphrase("unbelievable").is_err());
+        // A non-dictionary passphrase of the same length is accepted.
+        assert!(validate_backup_passphrase("qz7-marlin-fog").is_ok());
     }
 
     #[test]

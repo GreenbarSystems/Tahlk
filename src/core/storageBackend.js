@@ -133,6 +133,30 @@ const TauriBackend = {
 
 // ── LocalStorageBackend (dev / non-Tauri fallback) ─────────────────────────
 
+// PHI-bearing KV key prefixes. In the non-Tauri fallback these would land in
+// cleartext browser localStorage, so a WRITE is refused outright rather than
+// silently persisting patient data unencrypted (audit finding #15). The packaged
+// desktop app always runs on TauriBackend (SQLCipher at rest), so this only ever
+// fires if a web build (dist-solo/dist-group) is opened outside the Tauri shell.
+// Non-PHI settings/provider keys are intentionally NOT listed — the dev UI loop
+// (onboarding, settings) still needs them.
+const PHI_KEY_PREFIXES = [
+  'note_content_v1::',        // note text + transcript
+  'note_history_v1::',        // note lifecycle chain
+  'note_audit_v1::',          // access / activity trail
+  'note_audit_archive_v1::',
+];
+
+function refusePhiInBrowser(key) {
+  if (typeof key === 'string' && PHI_KEY_PREFIXES.some(p => key === p || key.startsWith(p))) {
+    // Message names only the prefix, never the value.
+    throw new Error(
+      `Refusing to write patient data (${key.split('::')[0]}::…) to unencrypted browser ` +
+      `storage. Tahlk must run in its desktop app, where records are encrypted at rest.`
+    );
+  }
+}
+
 const LocalStorageBackend = {
   kind: 'local',
 
@@ -166,6 +190,7 @@ const LocalStorageBackend = {
   // serialization error rather than a Rust guard, but the divergence is
   // identical: a cached value that never reached storage.
   setSync(key, value) {
+    refusePhiInBrowser(key);
     const snap = _snapshot(key);
     _cache.set(key, value);
     try { localStorage.setItem(key, JSON.stringify(value)); }
@@ -176,6 +201,7 @@ const LocalStorageBackend = {
   },
 
   async setAsync(key, value) {
+    refusePhiInBrowser(key);
     const snap = _snapshot(key);
     _cache.set(key, value);
     try {
