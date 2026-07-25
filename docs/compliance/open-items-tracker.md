@@ -15,7 +15,7 @@
 |----|------|----------|-------|--------|--------|
 | ENG-1 | Accounting of disclosures (§164.528) | Engineering | Claude Code | this cycle | ☑ |
 | ENG-2 | Document the third transcription scratch artifact | Engineering / docs | Claude Code | this cycle | ☑ |
-| ENG-3 | Wire the JS audit actor to the provider profile | Engineering | _tbd_ | _tbd_ | ☐ |
+| ENG-3 | Wire the JS audit actor to the provider profile | Engineering | Claude Code | this cycle | ☑ |
 | LEG-1 | State scope determinations (counsel sign-off) | Legal | _counsel_ | _tbd_ | ☐ |
 | LEG-2 | State-conditional consent authorization language | Legal + Eng | _counsel_ | _tbd_ | ☐ |
 | LEG-3 | Patient privacy notice — finalize & adopt | Legal + Product | _tbd_ | _tbd_ | ☐ |
@@ -46,14 +46,14 @@
 - [x] The "no unguarded write path" checklist item clarified — the sidecar-written `.txt`/`.json` are covered by the guard/predicate + `SCRATCH_EXTS`/`is_scratch_artifact` pairing, not by the `fs::write` grep.
 **Closed by:** this cycle (see PR). **References:** `src-tauri/src/whisper.rs`, `AUDIT-RESIDUAL-RISK.md`, `docs/security/hipaa-risk-assessment.md` (Flow B).
 
-### ENG-3 — Wire the JS audit actor to the provider profile &nbsp; ☐
+### ENG-3 — Wire the JS audit actor to the provider profile &nbsp; ☑ done (already wired)
 **Finding:** §164.312(a)(2)(i) / §164.312(b) — JS-side audit actor attribution.
-**What / why:** `capabilities.js` `currentUser()` defaults to `null`, so the JS audit log (`auditLog.js`) falls back to a generic `'provider'` label. The Rust trails already stamp the server-derived provider name; wiring `currentUser()` to the provider profile brings the JS trail into parity.
+**Outcome:** the code was **already correct** — this item was documentation lag. `capabilities.js`'s base `currentUser: () => null` is overridden at startup by `installSoloCapabilities()` (`src/entry-solo.js`), which returns `{ name: profile.name, id: 'solo' }` read live from the provider profile, so `auditLog.js` already attributes to the configured clinician. Both the original audit reviewer and the H2 pass described the base default without accounting for the override.
 **Acceptance criteria:**
-- [ ] `currentUser()` reads the configured provider profile.
-- [ ] `auditLog.js` entries attribute to the configured clinician.
-- [ ] `hipaa-risk-assessment.md` §3.2 updated to reflect the closure.
-**References:** `src/core/capabilities.js`, `src/core/auditLog.js`, `docs/security/hipaa-risk-assessment.md` §3.2.
+- [x] `currentUser()` reads the configured provider profile — confirmed at `src/entry-solo.js` `installSoloCapabilities()`.
+- [x] `auditLog.js` entries attribute to the configured clinician — via the overridden `currentUser()`; the `'provider'` fallback only applies before a profile name exists (onboarding requires one).
+- [x] `hipaa-risk-assessment.md` §3.2/§4/§3-header corrected to reflect the wiring (the remaining nuance — the fixed `'solo'` id — is acceptable for a single-clinician tier).
+**Closed by:** doc correction this cycle (no code change needed). **References:** `src/entry-solo.js`, `src/core/capabilities.js`, `src/core/auditLog.js`, `docs/security/hipaa-risk-assessment.md` §3.2.
 
 ---
 

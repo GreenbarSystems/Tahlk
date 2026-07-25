@@ -339,9 +339,9 @@ these subsections were first written (`c9007ad`) all three were open gaps and
 the app relied entirely on external OS-level controls. Since then the
 first-open authentication design ([ADR 0004](../adr/0004-first-open-authentication.md))
 and the idle auto-logoff have both **shipped and are enforced in production**,
-so the subsections below now describe *implemented* controls, with the specific
-residuals (biometric unlock not built; per-entry audit-actor attribution)
-named explicitly rather than the whole control being deferred. Each required
+so the subsections below now describe *implemented* controls, with the one
+remaining residual (biometric unlock not built) named explicitly rather than
+the whole control being deferred. Each required
 implementation specification is addressed by real code; the earlier "planned,
 not yet built" framing is retained only in the revision history as a record of
 what changed.
@@ -383,30 +383,30 @@ in-app gate above is the primary control and is verifiable by Tahlk.
 
 ### 3.2 Unique user identification — §164.312(a)(2)(i) (required)
 
-**Current state:** `src/core/capabilities.js`'s Solo-tier default is
-`currentUser: () => null`. `src/core/auditLog.js`'s `actor` field falls back
-to the hardcoded literal string `'provider'` whenever no user object exists
-— which, in Solo mode today, is always. Every audit-log entry produced by
-any installation is attributed to that same static string.
+**Current state: attributed to the configured clinician.** `capabilities.js`'s
+**base** default is `currentUser: () => null`, but Solo tier overrides it at
+startup: `installSoloCapabilities()` (`src/entry-solo.js`) installs
+`currentUser: () => { const p = kvGet(keys.provider()); return p && p.name ?
+{ name: p.name, id: 'solo' } : null; }`, read **live** from storage on every
+call so the actor reflects the current identity even right after onboarding.
+So every audit entry is attributed to the configured provider name, from two
+directions:
 
-**Partially closed (ADR 0004 + server-derived actor).** Two things changed
-since this was written:
-
-- This install now has a **device-local authenticated identity** — the ADR 0004
-  master password establishes that the person opening the app is the
-  account-holder before any PHI is reachable (§3.1).
 - The **Rust-side compliance trails** (`note_audit`, `patient_audit`,
-  `destruction_log`, `config_audit`) already stamp a **server-derived provider
-  name**, read from the onboarding provider profile via
-  `kv_ops::provider_id(&conn)` — not a static placeholder. A compromised WebView
-  cannot supply the actor for these rows; it is derived inside the Rust command.
+  `destruction_log`, `config_audit`) stamp a **server-derived provider name**
+  via `kv_ops::provider_id(&conn)` — a compromised WebView cannot supply the
+  actor; it is derived inside the Rust command.
+- The **JS-side** audit log (`src/core/auditLog.js`) reads the overridden
+  `currentUser()`, so its `actor` is the configured provider name; the literal
+  `'provider'` fallback applies only if no profile name exists, which onboarding
+  requires before the app is usable.
 
-**Residual (named, not deferred):** the **JS-side** audit log
-(`src/core/auditLog.js`) still reads `currentUser()`, which
-`src/core/capabilities.js` defaults to `null` in Solo tier, so its six action
-types fall back to the literal `'provider'` string. Wiring `currentUser()` to
-the provider-profile record (so the JS trail matches the Rust trails' real
-attribution) remains the open item here. **Operational assumption meanwhile:**
+This install also has a **device-local authenticated identity** (the ADR 0004
+master password, §3.1). The one remaining nuance is that the JS actor's `id`
+is the fixed token `'solo'` rather than a per-person unique id — acceptable for
+a single-clinician-per-install tier, where the profile **name** is the
+identification and the whole tier represents one clinician. **Operational
+assumption:**
 Solo installations are single-clinician; they must not be shared across multiple
 staff on the same OS profile, or per-user attribution on the JS trail is lost
 until this wiring lands.
@@ -560,13 +560,13 @@ the KV keys write-protected so a generic `kv_set` cannot change the safeguard
 without leaving the tamper-evident row. Disabling automatic logoff is therefore
 provable (§164.312(a)(2)(iii) + (b)); see §3.3.
 
-**Remaining open item (not part of this remediation):** `currentUser()`
-(`src/core/capabilities.js`) still defaults to `null` outside of a real
-authenticated-identity implementation, so `actor`/`actorId` on both trails
-currently stamp a generic `'provider'` label rather than a specific person
-until §3.2 (unique user identification) ships. Hash-chaining makes the
-*sequence* of events tamper-evident regardless, but attributing a given
-entry to a specific individual still depends on that separate item landing.
+**Actor attribution:** both trails attribute to the configured provider name —
+the Rust trails via server-derived `kv_ops::provider_id`, and the JS trail via
+the Solo-tier `currentUser()` override installed at startup
+(`installSoloCapabilities()` in `src/entry-solo.js`) which reads the provider
+profile live. See §3.2. The generic `'provider'` fallback only applies before a
+profile name exists, which onboarding requires. Hash-chaining makes the
+*sequence* of events tamper-evident independently of the actor value.
 
 ---
 
@@ -855,3 +855,12 @@ This document should be re-reviewed:
   asserts ZDR as active while §2 Flow D correctly records it as pending Anthropic
   approval — that overclaim is tracked with the C1 release-blocker decision, not
   changed in this documentation pass.
+- (2026-07-25, open-item ENG-3) — §3.2 corrected: the JS audit actor was
+  already wired. The prior text described `capabilities.js`'s base
+  `currentUser: () => null` without accounting for the Solo-tier override
+  installed at startup (`installSoloCapabilities()` in `entry-solo.js`), which
+  reads the provider profile live and returns the configured name. Both trails
+  therefore attribute to the provider; the residual is only the fixed `'solo'`
+  id token, acceptable for a single-clinician-per-install tier. Updated §3.2,
+  §4's actor-attribution note, and the §3 header residual list (biometric is now
+  the sole named residual). No code change — this closes a documentation-lag gap.
