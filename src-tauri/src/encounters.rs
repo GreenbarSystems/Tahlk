@@ -154,7 +154,42 @@ pub(crate) fn mark_encounter_signed(
 ) -> Result<(), AppError> {
     let mut conn = state.conn()?;
     let signed_at = crate::time::utc_now_iso();
-    mark_signed(&mut conn, &id, &signed_at, &signed_hash)
+    // Derive the attestation hash server-side from the stored note content +
+    // transcript rather than trusting the client-supplied value (finding #7): a
+    // compromised or buggy WebView can no longer persist a `signed_hash` that
+    // never matched the content it claims to attest to. `signed_hash` is still
+    // accepted for wire compatibility but the server-derived value is
+    // authoritative and is what the encounter row + `signed` history entry store.
+    let _ = signed_hash;
+    let derived = derive_sign_hash(&conn, &id);
+    mark_signed(&mut conn, &id, &signed_at, &derived)
+}
+
+/// Read a KV string value (stored JSON-encoded, e.g. a quoted string) and decode
+/// it back to the raw string; a missing or unparseable row yields `""`.
+fn kv_content(conn: &Connection, key: &str) -> String {
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = ?1",
+        params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .and_then(|s| serde_json::from_str::<String>(&s).ok())
+    .unwrap_or_default()
+}
+
+/// Derive the sign-off hash server-side from stored content + the server-derived
+/// provider identity, mirroring JS `signNote`'s `computeNoteHash` inputs
+/// (finding #7). `signed_by` is `kv_ops::provider_id`, matching the client's
+/// `providerProfile.name`; the two content fields are read from the KV keys the
+/// editor persists (`flushPendingEdit` runs before signing, so they are current).
+pub(crate) fn derive_sign_hash(conn: &Connection, encounter_id: &str) -> String {
+    let signed_by = crate::kv_ops::provider_id(conn);
+    let note_content = kv_content(conn, &format!("note_content_v1::{encounter_id}"));
+    let transcript = kv_content(conn, &format!("note_content_v1::transcript::{encounter_id}"));
+    crate::crypto::sign_content_hash(encounter_id, &signed_by, &transcript, &note_content)
 }
 
 /// Pure DB helper for `mark_encounter_signed` — takes any `rusqlite::Connection`
@@ -715,6 +750,38 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn derive_sign_hash_reads_kv_and_matches_pure_hash() {
+        // finding #7: the server derives the sign-off hash from stored content.
+        let conn = fresh_db();
+        // KV values are stored JSON-encoded, exactly as the JS kvSet writes them:
+        // the provider profile is an object; content/transcript are quoted strings.
+        conn.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+            params!["note_provider_v1::profile", r#"{"name":"Dr. Chen"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+            params!["note_content_v1::enc-1", "\"SOAP note body\""],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, 0)",
+            params!["note_content_v1::transcript::enc-1", "\"raw transcript\""],
+        )
+        .unwrap();
+
+        let got = derive_sign_hash(&conn, "enc-1");
+        assert_eq!(
+            got,
+            crate::crypto::sign_content_hash("enc-1", "Dr. Chen", "raw transcript", "SOAP note body"),
+            "derive must read + JSON-decode the KV values and hash them"
+        );
+        // Proves it actually read the content rather than hashing empties.
+        assert_ne!(got, crate::crypto::sign_content_hash("enc-1", "Dr. Chen", "", ""));
     }
 
     // Read back the sign-off metadata for a row so tests can prove a rejected
