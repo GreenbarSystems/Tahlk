@@ -291,7 +291,17 @@ fn derive_recovery_kek(seed: &[u8; CODE_DATA_LEN]) -> Result<[u8; HASH_LEN], App
 /// Wrap (encrypt) the 32-byte DEK under a KEK using AES-256-GCM.
 /// Returns `nonce[12] ‖ ciphertext[32] ‖ tag[16]` = 60 bytes total.
 /// A fresh random nonce is drawn per call — never reuse (key, nonce) pairs.
-pub(crate) fn wrap_dek(kek: &[u8; HASH_LEN], dek: &[u8; DEK_BYTES]) -> Result<Vec<u8>, AppError> {
+///
+/// `wrap_type` (the row's `wrap_type`, e.g. `"password"` / `"recovery_1"`) is
+/// bound into the GCM authentication as associated data (audit finding #13), so
+/// a ciphertext authenticates only for the row it was written for — it cannot be
+/// silently moved between rows. See [`unwrap_dek`] for the read-side (which stays
+/// backward-compatible with pre-#13 wraps sealed under empty AAD).
+pub(crate) fn wrap_dek(
+    kek: &[u8; HASH_LEN],
+    dek: &[u8; DEK_BYTES],
+    wrap_type: &str,
+) -> Result<Vec<u8>, AppError> {
     let unbound =
         UnboundKey::new(&AES_256_GCM, kek).map_err(|_| AppError::internal_from("wrap_dek: bad key"))?;
     let sealing = LessSafeKey::new(unbound);
@@ -302,7 +312,7 @@ pub(crate) fn wrap_dek(kek: &[u8; HASH_LEN], dek: &[u8; DEK_BYTES]) -> Result<Ve
 
     let mut buf = dek.to_vec();
     sealing
-        .seal_in_place_append_tag(nonce, Aad::empty(), &mut buf)
+        .seal_in_place_append_tag(nonce, Aad::from(wrap_type.as_bytes()), &mut buf)
         .map_err(|_| AppError::internal_from("wrap_dek: seal failed"))?;
 
     let mut out = Vec::with_capacity(NONCE_LEN + buf.len());
@@ -311,11 +321,21 @@ pub(crate) fn wrap_dek(kek: &[u8; HASH_LEN], dek: &[u8; DEK_BYTES]) -> Result<Ve
     Ok(out)
 }
 
-/// Unwrap (decrypt + authenticate) a wrapped DEK blob produced by `wrap_dek`.
+/// Unwrap (decrypt + authenticate) a wrapped DEK blob produced by [`wrap_dek`].
 /// Returns the 32-byte DEK on success. Fails if the blob is too short, if the
 /// GCM tag does not validate (wrong key, corruption, tampering), or if the
 /// decrypted length is not exactly `DEK_BYTES`.
-pub(crate) fn unwrap_dek(kek: &[u8; HASH_LEN], wrapped: &[u8]) -> Result<[u8; DEK_BYTES], AppError> {
+///
+/// `wrap_type` is the expected associated data (audit finding #13). For
+/// backward compatibility with wraps written before #13 (sealed under EMPTY
+/// AAD), a `wrap_type`-bound open that fails is retried under empty AAD. Because
+/// `open_in_place` consumes the nonce and mutates its buffer, each attempt gets a
+/// fresh copy of both.
+pub(crate) fn unwrap_dek(
+    kek: &[u8; HASH_LEN],
+    wrapped: &[u8],
+    wrap_type: &str,
+) -> Result<[u8; DEK_BYTES], AppError> {
     let min_len = NONCE_LEN + DEK_BYTES + AES_256_GCM.tag_len();
     if wrapped.len() < min_len {
         return Err(AppError::invalid("wrapped DEK blob is too short"));
@@ -323,25 +343,33 @@ pub(crate) fn unwrap_dek(kek: &[u8; HASH_LEN], wrapped: &[u8]) -> Result<[u8; DE
     let (nonce_bytes, ciphertext) = wrapped.split_at(NONCE_LEN);
     let mut nonce_arr = [0u8; NONCE_LEN];
     nonce_arr.copy_from_slice(nonce_bytes);
-    let nonce = Nonce::assume_unique_for_key(nonce_arr);
 
     let unbound =
         UnboundKey::new(&AES_256_GCM, kek).map_err(|_| AppError::internal_from("unwrap_dek: bad key"))?;
     let opening = LessSafeKey::new(unbound);
-    let mut buf = ciphertext.to_vec();
-    let plaintext = opening
-        .open_in_place(nonce, Aad::empty(), &mut buf)
-        .map_err(|_| AppError::invalid("unwrap_dek: authentication failed — wrong key or corrupted blob"))?;
 
-    if plaintext.len() != DEK_BYTES {
-        return Err(AppError::internal_from(format!(
-            "unwrapped DEK has wrong length: expected {DEK_BYTES}, got {}",
-            plaintext.len()
-        )));
-    }
-    let mut out = [0u8; DEK_BYTES];
-    out.copy_from_slice(plaintext);
-    Ok(out)
+    // One decryption attempt under `aad`. Returns the DEK on success. Each call
+    // rebuilds the nonce (consumed by open_in_place) and clones the ciphertext
+    // (mutated in place), so a failed attempt leaves nothing to clean up before
+    // the next.
+    let attempt = |aad: &[u8]| -> Option<[u8; DEK_BYTES]> {
+        let nonce = Nonce::assume_unique_for_key(nonce_arr);
+        let mut buf = ciphertext.to_vec();
+        let plaintext = opening.open_in_place(nonce, Aad::from(aad), &mut buf).ok()?;
+        if plaintext.len() != DEK_BYTES {
+            return None;
+        }
+        let mut out = [0u8; DEK_BYTES];
+        out.copy_from_slice(plaintext);
+        Some(out)
+    };
+
+    // Current format: wrap_type-bound AAD. Legacy fallback: empty AAD (pre-#13).
+    attempt(wrap_type.as_bytes())
+        .or_else(|| attempt(b""))
+        .ok_or_else(|| {
+            AppError::invalid("unwrap_dek: authentication failed — wrong key or corrupted blob")
+        })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -765,15 +793,15 @@ pub(crate) fn set_password(
     // KEKs are wrapped in Zeroizing so the derived key material is wiped from
     // the stack on drop, not merely dropped (audit finding #4).
     let pw_kek = Zeroizing::new(derive_kek(password, &pw_salt)?);
-    let pw_wrapped = wrap_dek(&pw_kek, dek)?;
+    let pw_wrapped = wrap_dek(&pw_kek, dek, "password")?;
 
     // Generate recovery codes and wrap DEK under each recovery KEK.
     let (rc1, seed1) = generate_recovery_code()?;
     let (rc2, seed2) = generate_recovery_code()?;
     let (rc3, seed3) = generate_recovery_code()?;
-    let rw1 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed1)?), dek)?;
-    let rw2 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed2)?), dek)?;
-    let rw3 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed3)?), dek)?;
+    let rw1 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed1)?), dek, "recovery_1")?;
+    let rw2 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed2)?), dek, "recovery_2")?;
+    let rw3 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed3)?), dek, "recovery_3")?;
 
     // Write all four rows atomically.
     let mut conn = open_wraps_db(wraps_db_path)?;
@@ -832,7 +860,7 @@ pub(crate) fn unlock_with_password(
     let wrapped =
         from_hex(&ciph_hex).ok_or_else(|| AppError::Storage("invalid ciphertext hex".into()))?;
     let kek = Zeroizing::new(derive_kek(password, &salt)?);
-    unwrap_dek(&kek, &wrapped)
+    unwrap_dek(&kek, &wrapped, "password")
 }
 
 /// Try each recovery row in turn; return the DEK on the first that authenticates
@@ -849,18 +877,21 @@ pub(crate) fn unlock_with_recovery_code(
     let kek = Zeroizing::new(derive_recovery_kek(&seed)?);
 
     let conn = open_wraps_db(wraps_db_path)?;
+    // Select wrap_type alongside the ciphertext so each row is unwrapped under
+    // its own bound AAD (finding #13). Legacy empty-AAD recovery wraps still
+    // open via unwrap_dek's fallback regardless of the wrap_type passed.
     let mut stmt = conn.prepare(
-        "SELECT ciphertext_hex FROM auth_dek_wraps \
+        "SELECT wrap_type, ciphertext_hex FROM auth_dek_wraps \
          WHERE wrap_type IN ('recovery_1','recovery_2','recovery_3') ORDER BY id",
     )?;
-    let rows: Vec<String> = stmt
-        .query_map([], |r| r.get(0))?
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .filter_map(|r| r.ok())
         .collect();
 
-    for hex in &rows {
+    for (wrap_type, hex) in &rows {
         if let Some(wrapped) = from_hex(hex) {
-            if let Ok(dek) = unwrap_dek(&kek, &wrapped) {
+            if let Ok(dek) = unwrap_dek(&kek, &wrapped, wrap_type) {
                 return Ok(dek);
             }
         }
@@ -899,7 +930,7 @@ pub(crate) fn change_password(
     let mut new_salt = [0u8; SALT_LEN];
     getrandom::getrandom(&mut new_salt).map_err(AppError::internal_from)?;
     let new_kek = Zeroizing::new(derive_kek(new_password, &new_salt)?);
-    let new_wrapped = wrap_dek(&new_kek, &dek)?;
+    let new_wrapped = wrap_dek(&new_kek, &dek, "password")?;
 
     let conn = open_wraps_db(wraps_db_path)?;
     conn.execute(
@@ -925,9 +956,9 @@ pub(crate) fn generate_new_recovery_codes(
     let (rc1, seed1) = generate_recovery_code()?;
     let (rc2, seed2) = generate_recovery_code()?;
     let (rc3, seed3) = generate_recovery_code()?;
-    let rw1 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed1)?), &dek)?;
-    let rw2 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed2)?), &dek)?;
-    let rw3 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed3)?), &dek)?;
+    let rw1 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed1)?), &dek, "recovery_1")?;
+    let rw2 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed2)?), &dek, "recovery_2")?;
+    let rw3 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed3)?), &dek, "recovery_3")?;
 
     let mut conn = open_wraps_db(wraps_db_path)?;
     let now = utc_now_iso();
@@ -1619,17 +1650,17 @@ mod tests {
     fn wrap_unwrap_roundtrip() {
         let kek = [0x42u8; HASH_LEN];
         let dek = test_dek();
-        let wrapped = wrap_dek(&kek, &dek).unwrap();
+        let wrapped = wrap_dek(&kek, &dek, "password").unwrap();
         // nonce(12) + plaintext(32) + tag(16) = 60 bytes.
         assert_eq!(wrapped.len(), NONCE_LEN + DEK_BYTES + AES_256_GCM.tag_len());
-        assert_eq!(unwrap_dek(&kek, &wrapped).unwrap(), dek);
+        assert_eq!(unwrap_dek(&kek, &wrapped, "password").unwrap(), dek);
     }
 
     #[test]
     fn wrap_produces_different_blobs_for_same_input() {
         let kek = [0x42u8; HASH_LEN];
-        let w1 = wrap_dek(&kek, &test_dek()).unwrap();
-        let w2 = wrap_dek(&kek, &test_dek()).unwrap();
+        let w1 = wrap_dek(&kek, &test_dek(), "password").unwrap();
+        let w2 = wrap_dek(&kek, &test_dek(), "password").unwrap();
         assert_ne!(w1[..NONCE_LEN], w2[..NONCE_LEN], "nonces must differ");
         assert_ne!(w1, w2);
     }
@@ -1638,32 +1669,74 @@ mod tests {
     fn unwrap_rejects_wrong_key() {
         let kek = [0x42u8; HASH_LEN];
         let wrong = [0x43u8; HASH_LEN];
-        let wrapped = wrap_dek(&kek, &test_dek()).unwrap();
-        assert!(unwrap_dek(&wrong, &wrapped).is_err());
+        let wrapped = wrap_dek(&kek, &test_dek(), "password").unwrap();
+        assert!(unwrap_dek(&wrong, &wrapped, "password").is_err());
     }
 
     #[test]
     fn unwrap_rejects_tampered_ciphertext() {
         let kek = [0x42u8; HASH_LEN];
-        let mut wrapped = wrap_dek(&kek, &test_dek()).unwrap();
+        let mut wrapped = wrap_dek(&kek, &test_dek(), "password").unwrap();
         let last = wrapped.len() - 1;
         wrapped[last] ^= 0x01;
-        assert!(unwrap_dek(&kek, &wrapped).is_err());
+        assert!(unwrap_dek(&kek, &wrapped, "password").is_err());
     }
 
     #[test]
     fn unwrap_rejects_tampered_nonce() {
         let kek = [0x42u8; HASH_LEN];
-        let mut wrapped = wrap_dek(&kek, &test_dek()).unwrap();
+        let mut wrapped = wrap_dek(&kek, &test_dek(), "password").unwrap();
         wrapped[0] ^= 0xff;
-        assert!(unwrap_dek(&kek, &wrapped).is_err());
+        assert!(unwrap_dek(&kek, &wrapped, "password").is_err());
     }
 
     #[test]
     fn unwrap_rejects_too_short_blob() {
         let kek = [0x42u8; HASH_LEN];
-        assert!(unwrap_dek(&kek, &[0u8; 4]).is_err());
-        assert!(unwrap_dek(&kek, &[]).is_err());
+        assert!(unwrap_dek(&kek, &[0u8; 4], "password").is_err());
+        assert!(unwrap_dek(&kek, &[], "password").is_err());
+    }
+
+    // ── AAD binding (finding #13) ────────────────────────────────────────────
+
+    #[test]
+    fn wrap_type_aad_is_bound_a_wrap_does_not_open_as_another_row() {
+        // The property #13 adds: a ciphertext sealed for one row must not
+        // authenticate as another (and the legacy-empty-AAD fallback must NOT
+        // rescue it — this wrap is bound, not legacy).
+        let kek = [0x42u8; HASH_LEN];
+        let dek = test_dek();
+        let wrapped = wrap_dek(&kek, &dek, "recovery_1").unwrap();
+        assert_eq!(unwrap_dek(&kek, &wrapped, "recovery_1").unwrap(), dek, "same type opens");
+        assert!(
+            unwrap_dek(&kek, &wrapped, "password").is_err(),
+            "a recovery_1 wrap must not open as the password row"
+        );
+    }
+
+    #[test]
+    fn legacy_empty_aad_wrap_still_unwraps() {
+        // Backward-compatibility: a wrap written before #13 (sealed under EMPTY
+        // AAD) must still open under the new unwrap_dek regardless of wrap_type.
+        // Construct such a blob the way the pre-#13 wrap_dek did.
+        let kek = [0x42u8; HASH_LEN];
+        let dek = test_dek();
+        let unbound = UnboundKey::new(&AES_256_GCM, &kek).unwrap();
+        let sealing = LessSafeKey::new(unbound);
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        getrandom::getrandom(&mut nonce_bytes).unwrap();
+        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+        let mut buf = dek.to_vec();
+        sealing.seal_in_place_append_tag(nonce, Aad::empty(), &mut buf).unwrap();
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&nonce_bytes);
+        legacy.extend_from_slice(&buf);
+
+        assert_eq!(
+            unwrap_dek(&kek, &legacy, "password").unwrap(),
+            dek,
+            "a pre-#13 empty-AAD wrap must still unlock"
+        );
     }
 
     // ── set_password + unlock ────────────────────────────────────────────────
@@ -1720,7 +1793,7 @@ mod tests {
                     .unwrap();
                 if let Some(h) = hex {
                     if let Some(wrapped) = from_hex(&h) {
-                        if let Ok(recovered) = unwrap_dek(&kek, &wrapped) {
+                        if let Ok(recovered) = unwrap_dek(&kek, &wrapped, row_type) {
                             assert_eq!(recovered, dek);
                             found = true;
                             break;
@@ -1748,7 +1821,7 @@ mod tests {
         // Sanity-check the row is there, then confirm wrong KEK fails.
         assert!(!salt_hex.is_empty());
         let wrapped = from_hex(&ciph_hex).unwrap();
-        assert!(unwrap_dek(&wrong_kek, &wrapped).is_err());
+        assert!(unwrap_dek(&wrong_kek, &wrapped, "password").is_err());
     }
 
     #[test]
@@ -1826,16 +1899,16 @@ mod tests {
         let dek = test_dek();
         let old_salt = [0x01u8; SALT_LEN];
         let old_kek = derive_kek("OldP4ssword-Alpha!!", &old_salt).unwrap();
-        let old_wrapped = wrap_dek(&old_kek, &dek).unwrap();
-        let recovered = unwrap_dek(&old_kek, &old_wrapped).unwrap();
+        let old_wrapped = wrap_dek(&old_kek, &dek, "password").unwrap();
+        let recovered = unwrap_dek(&old_kek, &old_wrapped, "password").unwrap();
         assert_eq!(recovered, dek);
 
         let new_salt = [0x02u8; SALT_LEN];
         let new_kek = derive_kek("NewP4ssword-Beta!!!", &new_salt).unwrap();
-        let new_wrapped = wrap_dek(&new_kek, &recovered).unwrap();
-        assert_eq!(unwrap_dek(&new_kek, &new_wrapped).unwrap(), dek);
+        let new_wrapped = wrap_dek(&new_kek, &recovered, "password").unwrap();
+        assert_eq!(unwrap_dek(&new_kek, &new_wrapped, "password").unwrap(), dek);
         // Old KEK must no longer open the new blob.
-        assert!(unwrap_dek(&old_kek, &new_wrapped).is_err());
+        assert!(unwrap_dek(&old_kek, &new_wrapped, "password").is_err());
     }
 
     // ── Nuke ─────────────────────────────────────────────────────────────────
