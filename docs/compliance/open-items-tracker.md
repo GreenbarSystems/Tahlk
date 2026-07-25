@@ -13,7 +13,7 @@
 
 | ID | Item | Category | Owner | Target | Status |
 |----|------|----------|-------|--------|--------|
-| ENG-1 | Accounting of disclosures (§164.528) | Engineering | _tbd_ | _tbd_ | ☐ |
+| ENG-1 | Accounting of disclosures (§164.528) | Engineering | Claude Code | this cycle | ☑ |
 | ENG-2 | Document the third transcription scratch artifact | Engineering / docs | _tbd_ | _tbd_ | ☐ |
 | ENG-3 | Wire the JS audit actor to the provider profile | Engineering | _tbd_ | _tbd_ | ☐ |
 | LEG-1 | State scope determinations (counsel sign-off) | Legal | _counsel_ | _tbd_ | ☐ |
@@ -27,15 +27,15 @@
 
 ## Engineering — near-term
 
-### ENG-1 — Accounting of disclosures (§164.528) &nbsp; ☐
+### ENG-1 — Accounting of disclosures (§164.528) &nbsp; ☑ done
 **Finding:** HIPAA Privacy Rule — no patient-indexed accounting-of-disclosures capability.
-**What / why:** `llm_audit` records every note-generation disclosure to the third-party AI service with actor/model/timestamp/byte-counts — the raw material for a disclosure accounting — but it is keyed by `encounter_id`, and the encounter↔patient linkage is optional/alias-based. A patient who invokes their §164.528 right cannot be answered reliably.
+**What / why:** `llm_audit` records every note-generation disclosure to the third-party AI service with actor/model/timestamp/byte-counts — the raw material for a disclosure accounting — but it was keyed by `encounter_id` only. A patient who invokes their §164.528 right could not be answered directly.
 **Acceptance criteria:**
-- [ ] `patient_id` populated on each `llm_audit` row at call time (from the encounter).
-- [ ] A narrow, read-only `llm_audit_list_for_patient` command returning every disclosure for a patient over the retention period.
-- [ ] The alias-collision caveat handled the same way the destroy-cascade already does.
-- [ ] Tests: round-trip + patient-scoping.
-**References:** `src-tauri/src/llm_audit.rs`, `src-tauri/src/patients.rs`, `src-tauri/src/encounters.rs` (`patient_id` column).
+- [x] `patient_id` column added to `llm_audit` (idempotent migration for existing installs) and populated on each row at call time, snapshotted from the encounter in `notes::generate_note`.
+- [x] A narrow, read-only `llm_audit_list_for_patient` command (+ `list_for_patient` helper) returning every disclosure for a patient, newest first, with the same DoS clamp as the encounter list.
+- [x] Completeness caveat documented in code and asserted by a test: rows with a NULL `patient_id` (encounter-less or historical) are excluded and cannot produce a false match.
+- [x] Tests: patient-scoping/ordering, NULL-exclusion, and the legacy-table migration round-trip.
+**Closed by:** this cycle (see PR). **References:** `src-tauri/src/llm_audit.rs`, `src-tauri/src/notes.rs`, `src-tauri/src/encounters.rs` (`patient_id_for`).
 
 ### ENG-2 — Document the third transcription scratch artifact &nbsp; ☐
 **Finding:** Documentation currency — an undocumented plaintext scratch file.

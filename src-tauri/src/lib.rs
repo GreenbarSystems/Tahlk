@@ -285,6 +285,7 @@ pub fn run() {
             baa::baa_ack_set,
             baa::baa_ack_clear,
             llm_audit::llm_audit_list,
+            llm_audit::llm_audit_list_for_patient,
             export::data_location,
             encounters::list_encounters,
             encounters::get_encounter,
