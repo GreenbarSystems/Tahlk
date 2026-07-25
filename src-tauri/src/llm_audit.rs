@@ -47,13 +47,39 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              upstream_reqid    TEXT,
              outcome           TEXT    NOT NULL,
              error_code        TEXT,
-             duration_ms       INTEGER
+             duration_ms       INTEGER,
+             patient_id        TEXT
          );
          CREATE INDEX IF NOT EXISTS llm_audit_created_idx
              ON llm_audit (created_at DESC);
          CREATE INDEX IF NOT EXISTS llm_audit_encounter_idx
              ON llm_audit (encounter_id);",
     )?;
+    // §164.528 accounting of disclosures (open-item ENG-1): installs created
+    // before `patient_id` existed get the column added here. The disclosure
+    // log is keyed by encounter; a `patient_id` snapshot captured at call time
+    // lets a patient-scoped accounting be produced directly rather than joining
+    // through the (optionally-linked) encounters table after the fact.
+    add_patient_id_column(conn)?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS llm_audit_patient_idx ON llm_audit (patient_id);",
+    )?;
+    Ok(())
+}
+
+/// Idempotent migration: add `patient_id` to a pre-existing `llm_audit` table.
+/// `CREATE TABLE IF NOT EXISTS` is a no-op on an install whose table predates
+/// the column, so the ALTER is gated on a `pragma_table_info` presence check
+/// (ALTER TABLE ADD COLUMN cannot be made conditional in SQLite directly).
+fn add_patient_id_column(conn: &Connection) -> rusqlite::Result<()> {
+    let has: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('llm_audit') WHERE name = 'patient_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has == 0 {
+        conn.execute_batch("ALTER TABLE llm_audit ADD COLUMN patient_id TEXT;")?;
+    }
     Ok(())
 }
 
@@ -68,6 +94,12 @@ pub(crate) struct LlmCallEntry {
     /// Encounter this call belongs to, if any. May be None for a call not
     /// tied to a specific session.
     pub encounter_id: Option<String>,
+    /// Patient this disclosure was about, snapshotted from the encounter at
+    /// call time so a §164.528 accounting can be produced per patient (ENG-1).
+    /// None when the call isn't tied to an encounter, or the encounter has no
+    /// linked patient (historical rows); those cannot appear in a
+    /// patient-scoped accounting and that limitation is documented.
+    pub patient_id: Option<String>,
     /// Local clinician display name from the provider profile — the audit
     /// actor, NOT an account owner. In managed mode the Anthropic account is
     /// always Greenbar's (the proxy holds the single BAA/ZDR-covered key), so
@@ -102,8 +134,8 @@ pub(crate) fn append(conn: &Connection, entry: &LlmCallEntry) -> Result<i64, App
     conn.execute(
         "INSERT INTO llm_audit \
          (created_at, encounter_id, provider_id, model, endpoint, \
-          request_bytes, response_bytes, upstream_reqid, outcome, error_code, duration_ms) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+          request_bytes, response_bytes, upstream_reqid, outcome, error_code, duration_ms, patient_id) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![
             entry.created_at,
             entry.encounter_id,
@@ -116,6 +148,7 @@ pub(crate) fn append(conn: &Connection, entry: &LlmCallEntry) -> Result<i64, App
             entry.outcome,
             entry.error_code,
             entry.duration_ms,
+            entry.patient_id,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -135,12 +168,13 @@ fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "outcome":        r.get::<_, String>(9)?,
         "errorCode":      r.get::<_, Option<String>>(10)?,
         "durationMs":     r.get::<_, Option<i64>>(11)?,
+        "patientId":      r.get::<_, Option<String>>(12)?,
     }))
 }
 
 const SELECT_COLS: &str =
     "id, created_at, encounter_id, provider_id, model, endpoint, \
-     request_bytes, response_bytes, upstream_reqid, outcome, error_code, duration_ms";
+     request_bytes, response_bytes, upstream_reqid, outcome, error_code, duration_ms, patient_id";
 
 /// Core list query, split out from the Tauri command so it can be unit-tested
 /// against an in-memory `Connection` without standing up a `State<DbState>`.
@@ -198,6 +232,48 @@ pub(crate) fn llm_audit_list(
     list_recent(&conn, encounter_id.as_deref(), limit)
 }
 
+/// Every disclosure recorded for a single patient, newest first. This is the
+/// query behind a §164.528 accounting-of-disclosures request (ENG-1): given a
+/// patient, enumerate every third-party note-generation call that transmitted
+/// their PHI. Split from the command for the same in-memory-test reason as
+/// `list_recent`.
+///
+/// Caveat (documented, not silently swallowed): rows whose `patient_id` is NULL
+/// — a call not tied to an encounter, or one whose encounter had no linked
+/// patient (e.g. historical rows created before `patient_id` was captured) —
+/// cannot be attributed to a patient and are therefore not returned here. An
+/// accounting produced from this query is complete only for disclosures made
+/// after `patient_id` capture shipped and for encounters with a linked patient.
+fn list_for_patient(conn: &Connection, patient_id: &str, limit: i64) -> Result<Vec<Value>, AppError> {
+    let sql = format!(
+        "SELECT {} FROM llm_audit WHERE patient_id = ? ORDER BY id DESC LIMIT ?",
+        SELECT_COLS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![patient_id, limit], row_to_json)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// #[tauri::command] — list every disclosure recorded for one patient, most
+/// recent first, for a §164.528 accounting. Same DoS-guard clamp as
+/// `llm_audit_list`.
+#[tauri::command]
+pub(crate) fn llm_audit_list_for_patient(
+    state: tauri::State<crate::DbState>,
+    patient_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<Value>, AppError> {
+    let limit = crate::db::clamp_list_limit_to(
+        limit.map(i64::from),
+        100,
+        crate::db::AUDIT_LIST_LIMIT_MAX,
+    );
+    let conn = state.conn()?;
+    list_for_patient(&conn, &patient_id, limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +288,7 @@ mod tests {
         LlmCallEntry {
             created_at: "2026-07-04T14:22:11Z".into(),
             encounter_id: Some("enc-1".into()),
+            patient_id: Some("pt-1".into()),
             provider_id: "jane@example.com".into(),
             model: "claude-haiku-4-5-20251001".into(),
             endpoint: "https://api.anthropic.com/v1/messages".into(),
@@ -331,6 +408,81 @@ mod tests {
         let rows = list_recent(&conn, None, 2).unwrap();
         // Newest two only.
         assert_eq!(id_seq(&rows), vec![5, 4]);
+    }
+
+    // ENG-1 (§164.528 accounting of disclosures) ─────────────────────────────
+
+    #[test]
+    fn list_for_patient_returns_only_that_patients_disclosures_newest_first() {
+        let conn = fresh();
+        let mut a = entry("ok", 100);
+        a.patient_id = Some("pt-A".into());
+        let mut b = entry("ok", 100);
+        b.patient_id = Some("pt-B".into());
+        append(&conn, &a).unwrap(); // id 1, pt-A
+        append(&conn, &b).unwrap(); // id 2, pt-B
+        append(&conn, &a).unwrap(); // id 3, pt-A
+
+        let rows = list_for_patient(&conn, "pt-A", 100).unwrap();
+        assert_eq!(id_seq(&rows), vec![3, 1], "newest-first, this patient only");
+        assert!(rows.iter().all(|r| r["patientId"] == "pt-A"));
+
+        assert!(list_for_patient(&conn, "pt-unknown", 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_for_patient_excludes_null_patient_rows() {
+        // A disclosure with no linked patient (historical / encounter-less) must
+        // NOT appear in any patient's accounting — the documented completeness
+        // caveat, asserted so it can't silently regress into a false match.
+        let conn = fresh();
+        let mut null_pt = entry("ok", 100);
+        null_pt.patient_id = None;
+        append(&conn, &null_pt).unwrap();
+        assert!(list_for_patient(&conn, "pt-A", 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn migration_adds_patient_id_to_a_legacy_table() {
+        // Simulate an install whose llm_audit predates the patient_id column.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_audit (
+                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                 created_at     TEXT NOT NULL,
+                 encounter_id   TEXT,
+                 provider_id    TEXT NOT NULL DEFAULT '',
+                 model          TEXT NOT NULL,
+                 endpoint       TEXT NOT NULL,
+                 request_bytes  INTEGER NOT NULL,
+                 response_bytes INTEGER NOT NULL,
+                 upstream_reqid TEXT,
+                 outcome        TEXT NOT NULL,
+                 error_code     TEXT,
+                 duration_ms    INTEGER
+             );",
+        )
+        .unwrap();
+
+        // init_schema must add the column (not error on the existing table)...
+        init_schema(&conn).unwrap();
+        // ...and be idempotent on a second run.
+        init_schema(&conn).unwrap();
+
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('llm_audit') WHERE name = 'patient_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1, "patient_id column must exist after migration");
+
+        // A full append + patient-scoped read must round-trip on the migrated table.
+        append(&conn, &entry("ok", 100)).unwrap();
+        let rows = list_for_patient(&conn, "pt-1", 100).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["patientId"], "pt-1");
     }
 
     #[test]

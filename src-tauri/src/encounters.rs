@@ -579,6 +579,25 @@ pub(crate) fn upsert_encounter(state: State<DbState>, encounter: Value) -> Resul
 /// signed row whose signed_at/signed_hash differ from what's already
 /// committed -- makes the UPDATE a no-op (0 rows changed), which the caller
 /// detects and surfaces as an explicit, retryable error instead of a silent
+/// The patient linked to an encounter, if any. Used by the disclosure log
+/// (`llm_audit`) to snapshot the patient at note-generation time so a §164.528
+/// accounting can be produced per patient (open-item ENG-1). Returns `None`
+/// when the encounter row is absent, has no linked patient, or on any read
+/// error — a missing snapshot must never fail the note-generation path, and an
+/// absent patient link simply means the row won't appear in a patient-scoped
+/// accounting (a documented completeness limit, not an error).
+pub(crate) fn patient_id_for(conn: &Connection, encounter_id: &str) -> Option<String> {
+    let looked_up: rusqlite::Result<Option<String>> = conn.query_row(
+        "SELECT patient_id FROM encounters WHERE id = ?1",
+        params![encounter_id],
+        |r| r.get::<_, Option<String>>(0),
+    );
+    match looked_up {
+        Ok(Some(s)) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// lost update.
 // One parameter per encounter column, deliberately. Bundling them into a
 // struct would let a caller construct a partially-populated value and have it

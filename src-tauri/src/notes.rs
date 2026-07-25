@@ -342,6 +342,17 @@ pub(crate) async fn generate_note(
     let base_url = device::sync_base_url();
     let endpoint = device::proxy_endpoint(&base_url);
 
+    // Snapshot the patient this disclosure is about (ENG-1, §164.528). Resolved
+    // once, up front, from a scoped connection checkout that is dropped before
+    // any `.await` — so no non-Send connection is held across the network calls
+    // below. Best-effort: a missing snapshot must never fail note generation.
+    let patient_id: Option<String> = encounter_id.as_deref().and_then(|eid| {
+        state
+            .conn()
+            .ok()
+            .and_then(|c| crate::encounters::patient_id_for(&c, eid))
+    });
+
     // BAA gate FIRST — before we resolve a token, before we build a client,
     // before we allocate the request body. The compliance failure is that
     // PHI reaches Anthropic without a BAA, so the check has to sit strictly
@@ -358,6 +369,7 @@ pub(crate) async fn generate_note(
             record_llm_call(&state, LlmCallEntry {
                 created_at: utc_now_iso(),
                 encounter_id: encounter_id.clone(),
+                patient_id: patient_id.clone(),
                 provider_id: String::new(),
                 model: ANTHROPIC_MODEL.into(),
                 endpoint: endpoint.clone(),
@@ -398,6 +410,7 @@ pub(crate) async fn generate_note(
                 LlmCallEntry {
                     created_at: utc_now_iso(),
                     encounter_id: encounter_id.clone(),
+                    patient_id: patient_id.clone(),
                     provider_id: ack.provider_id.clone(),
                     model: ANTHROPIC_MODEL.into(),
                     endpoint: endpoint.clone(),
@@ -449,6 +462,7 @@ pub(crate) async fn generate_note(
                      upstream_reqid: Option<String>| LlmCallEntry {
         created_at: created_at.clone(),
         encounter_id: encounter_id.clone(),
+        patient_id: patient_id.clone(),
         provider_id: ack.provider_id.clone(),
         model: ANTHROPIC_MODEL.into(),
         endpoint: endpoint.clone(),
