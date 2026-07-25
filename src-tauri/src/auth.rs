@@ -363,13 +363,22 @@ pub(crate) fn validate_password(password: &str) -> Result<(), AppError> {
             "password exceeds {PASSWORD_MAX_LEN} characters"
         )));
     }
-    let lower = password.to_ascii_lowercase();
-    if COMMON_PASSWORDS.lines().any(|line| line.trim() == lower) {
+    if is_common_password(password) {
         return Err(AppError::invalid(
             "this password appears in a list of commonly used passwords — choose a more unique one",
         ));
     }
     Ok(())
+}
+
+/// True if `candidate` (case-insensitive) is in the vendored 10k-common-password
+/// list. Shared by `validate_password` and the backup-passphrase check: the
+/// backup passphrase is the *only* thing protecting a full copy of every patient
+/// record, so it must not be weaker than the login password against the same
+/// dictionary attack (audit finding, Low).
+pub(crate) fn is_common_password(candidate: &str) -> bool {
+    let lower = candidate.to_ascii_lowercase();
+    COMMON_PASSWORDS.lines().any(|line| line.trim() == lower)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
