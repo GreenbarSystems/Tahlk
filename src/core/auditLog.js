@@ -253,3 +253,14 @@ export async function verifyAllAuditChains() {
   const broken = results.filter(r => !r.ok);
   return { ok: broken.length === 0, checked: results.length, broken, results };
 }
+
+// Authoritative keyed-MAC sweep across every record-access/activity chain (audit
+// finding #3) — the counterpart to verifyAllAuditChains. That sweep proves each
+// chain is internally self-consistent; this recomputes each row's keyed
+// chain_mac (audit_mac.rs), so a substituted or forged access trail is caught.
+// Before this, the per-encounter verify_audit_macs had NO call site at all, so
+// this substitution check never ran on the access trail. One IPC call.
+export async function verifyAllAuditMacs() {
+  if (!isTauri) return { ok: true, checked: 0, broken: [] };
+  return invoke('verify_all_audit_macs');
+}

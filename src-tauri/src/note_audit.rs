@@ -565,6 +565,16 @@ pub(crate) fn verify_audit_macs(state: State<DbState>, encounter_id: String) -> 
     crate::audit_mac::verify_table_chain(&conn, "note_audit", &encounter_id)
 }
 
+/// Whole-database keyed-MAC sweep for the record-access/activity trail — the
+/// counterpart to `verify_audit_macs`, which only ran per encounter and had NO
+/// call site at all, so the substitution-detecting check on this trail never ran
+/// in the shipped app. Wired to Settings + a launch sweep (audit finding #3).
+#[tauri::command]
+pub(crate) fn verify_all_audit_macs(state: State<DbState>) -> Result<Value, AppError> {
+    let conn = state.conn()?;
+    crate::audit_mac::verify_all_chains(&conn, "note_audit")
+}
+
 // Transactional core of the note_audit append: opens a transaction for the
 // race-safe seq/prev_hash check, the INSERT, and the optional archive eviction.
 // Driven by `server_append` (the live path) and by unit tests against a plain

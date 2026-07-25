@@ -6,6 +6,7 @@ import { installCapabilities } from './core/capabilities.js';
 import { loadHistory } from './domain/historyChain.js';
 import { verifyHistoryChain } from './utils/contentHash.js';
 import { reportIntegrityFailure } from './solo/integrityAlert.js';
+import { verifyRecordMacsOnLaunch } from './domain/recordIntegrity.js';
 import { logRecordViewed } from './core/auditLog.js';
 import { shouldLogRecordView } from './domain/recordAccess.js';
 import { onWindowCloseRequested, destroyWindow, invoke, isTauri } from './platform/tauri.js';
@@ -123,6 +124,28 @@ async function bootstrap() {
   // a dismissible banner pointing the provider to Settings. Runs after renderApp()
   // so the DOM is ready and never delays the auth or onboarding flow.
   checkRetentionOnLaunch();
+  // Non-blocking launch integrity sweep: run the authoritative keyed-MAC checks
+  // across all records once per session (audit finding #3), so a substituted
+  // record set is caught even for encounters the provider never reopens.
+  verifyChainsOnLaunch();
+}
+
+// Launch-time authoritative integrity sweep. Runs only the two keyed-MAC sweeps
+// (two IPC calls), which are the substitution-detecting checks that previously
+// ran only on a single-encounter panel open. Best-effort and never blocks or
+// crashes launch. On any broken chain it records the technical detail to the
+// opt-in diagnostics log and shows one plain-language alert (the full list is
+// available via Settings → "Check note records").
+async function verifyChainsOnLaunch() {
+  if (!isTauri) return;
+  try {
+    const { ok, broken } = await verifyRecordMacsOnLaunch();
+    if (!ok && broken.length) {
+      reportIntegrityFailure(broken[0]);
+    }
+  } catch {
+    // Never block or crash launch on an integrity-sweep failure.
+  }
 }
 
 async function checkRetentionOnLaunch() {

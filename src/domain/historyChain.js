@@ -161,3 +161,16 @@ export async function verifyAllChains() {
     results,
   };
 }
+
+// Authoritative keyed-MAC sweep across EVERY note-history chain (audit finding
+// #3). verifyAllChains above recomputes each stored entry's hash and checks the
+// self-referential links — it proves the rows are internally consistent, but a
+// wholesale-substituted chain forged by someone WITHOUT the keychain-derived MAC
+// key still passes it. This calls the Rust sweep (audit_mac.rs), which recomputes
+// each row's keyed chain_mac, so substitution is caught. One IPC call for the
+// whole database. Returns { ok, checked, broken: [{ encounterId, brokenAt,
+// reason, legacySkipped }] }.
+export async function verifyAllHistoryMacs() {
+  if (!isTauri) return { ok: true, checked: 0, broken: [] };
+  return invoke('verify_all_history_macs');
+}

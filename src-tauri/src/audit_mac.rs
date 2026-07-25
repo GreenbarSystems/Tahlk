@@ -236,6 +236,51 @@ pub(crate) fn verify_table_chain(
     }))
 }
 
+/// Verify the keyed-MAC chain for EVERY encounter in `table` in a single sweep,
+/// returning `{ ok, checked, broken: [{ encounterId, brokenAt, reason,
+/// legacySkipped }] }`. This is the whole-database counterpart to
+/// [`verify_table_chain`]: the per-encounter check only ran on a panel open, so
+/// an encounter signed once and never reopened never had its authoritative
+/// (substitution-detecting) check run at all (audit finding #3).
+///
+/// The MAC key is resolved once and both statements prepared once, so the sweep
+/// is a single key derivation plus two prepared queries reused across encounters
+/// — not a per-encounter key derivation. `table` is the same trusted
+/// compile-time literal contract as [`verify_table_chain`].
+pub(crate) fn verify_all_chains(conn: &Connection, table: &str) -> Result<Value, AppError> {
+    let key = mac_key()?;
+    let id_sql = format!("SELECT DISTINCT encounter_id FROM {table} ORDER BY encounter_id");
+    let ids: Vec<String> = conn
+        .prepare(&id_sql)?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    let row_sql =
+        format!("SELECT seq, entry_hash, chain_mac FROM {table} WHERE encounter_id = ?1 ORDER BY seq");
+    let mut row_stmt = conn.prepare(&row_sql)?;
+
+    let mut broken: Vec<Value> = Vec::new();
+    for id in &ids {
+        let rows: Vec<(i64, String, Option<String>)> = row_stmt
+            .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        let verdict = verify_chain(&key, rows.iter().map(|(s, h, m)| (*s, h.as_str(), m.as_deref())));
+        if !verdict.ok {
+            broken.push(json!({
+                "encounterId": id,
+                "brokenAt": verdict.broken_at,
+                "reason": verdict.reason,
+                "legacySkipped": verdict.legacy_skipped,
+            }));
+        }
+    }
+    Ok(json!({
+        "ok": broken.is_empty(),
+        "checked": ids.len(),
+        "broken": broken,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     //! These exercise the security property directly with a FIXED test key
