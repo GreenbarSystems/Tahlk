@@ -445,8 +445,45 @@ fn init_wraps_schema(conn: &Connection) -> rusqlite::Result<()> {
             outcome    TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS auth_audit_created_idx
-            ON auth_audit (created_at DESC);",
+            ON auth_audit (created_at DESC);
+        -- Anti-rollback generation token (audit finding #2/C4). Lives in the
+        -- plaintext wraps DB, which a backup restore does NOT replace, and is
+        -- compared against the token embedded in the encrypted main DB on open.
+        CREATE TABLE IF NOT EXISTS install_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );",
     )
+}
+
+/// Key under which the anti-rollback generation token is stored in `install_meta`
+/// (both this wraps DB and the main DB).
+const DB_GENERATION_KEY: &str = "db_generation";
+
+/// Read the install's generation token from the wraps DB, or `None` if unset.
+pub(crate) fn read_wraps_generation(app: &AppHandle) -> Option<String> {
+    let path = wraps_db_path(app).ok()?;
+    let conn = open_wraps_db(&path).ok()?;
+    conn.query_row(
+        "SELECT value FROM install_meta WHERE key = ?1",
+        params![DB_GENERATION_KEY],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Write (upsert) the install's generation token into the wraps DB.
+pub(crate) fn write_wraps_generation(app: &AppHandle, token: &str) -> Result<(), AppError> {
+    let path = wraps_db_path(app)?;
+    let conn = open_wraps_db(&path)?;
+    conn.execute(
+        "INSERT INTO install_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![DB_GENERATION_KEY, token],
+    )?;
+    Ok(())
 }
 
 // ── Authentication-event audit trail (HIPAA §164.312(b), audit finding H1) ──
@@ -489,6 +526,10 @@ pub(crate) const AUTH_AUDIT_EVENTS: &[&str] = &[
     // everything in tahlk.db.
     "restore_staged",
     "restore_applied",
+    // The record DB's embedded generation token did not match this install's
+    // (audit finding #2/C4): a possible out-of-band rollback/substitution of
+    // tahlk.db. Fail-open — recorded, not blocked.
+    "rollback_suspected",
 ];
 
 /// Valid `outcome` values.

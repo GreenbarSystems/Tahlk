@@ -16,7 +16,7 @@
 
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
@@ -215,6 +215,15 @@ const SCHEMA_TABLES: &str = "
     );
     CREATE INDEX IF NOT EXISTS pt_alias_idx ON patients (alias);
     CREATE INDEX IF NOT EXISTS pt_updated_idx ON patients (updated_at DESC);
+
+    -- Anti-rollback generation token (audit finding #2/C4). The counterpart to
+    -- the wraps DB's install_meta: on open, the token embedded here (inside the
+    -- SQLCipher boundary) is compared against the wraps token to detect an
+    -- out-of-band substitution of tahlk.db with an older snapshot.
+    CREATE TABLE IF NOT EXISTS install_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
 ";
 
 /// r2d2 connection customizer that runs on every fresh SQLite connection the
@@ -461,6 +470,113 @@ fn apply_pending_restore(
     std::fs::rename(pending, db_path).map_err(AppError::storage_from)?;
     log::info!("applied a staged backup restore");
     Ok(true)
+}
+
+// ── Anti-rollback generation token (audit finding #2/C4) ──────────────────────
+//
+// A random token is stamped into BOTH the encrypted main DB and the plaintext
+// wraps DB whenever a new legitimate database generation is established (fresh
+// create, plaintext migration, or a backup restore). On every open the two are
+// compared: a mismatch means the main DB is not the one this install last
+// stamped — e.g. an attacker swapped `tahlk.db` for an older captured snapshot.
+//
+// DETECTION, not prevention, and FAIL-OPEN: a mismatch records a durable
+// `rollback_suspected` auth-audit event and a loud log line, but the app still
+// opens (bricking a clinician's access on a heuristic would be worse than the
+// residual). It is effective specifically against an attacker WITHOUT the DEK:
+// the main-DB token lives inside the SQLCipher boundary, so an old ciphertext
+// `tahlk.db` carries its own old token that cannot be rewritten to match the
+// current wraps token without the key. The DEK holder can defeat it — the
+// accepted residual in AUDIT-RESIDUAL-RISK Item 3.
+
+const DB_GENERATION_KEY: &str = "db_generation";
+
+fn new_generation_token() -> String {
+    let mut buf = [0u8; 16];
+    // A failure here yields an all-zero token; still consistent when written to
+    // both sides in the same call, so it never causes a false mismatch.
+    let _ = getrandom::getrandom(&mut buf);
+    crate::hex::to_hex(&buf)
+}
+
+fn read_generation(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM install_meta WHERE key = ?1",
+        params![DB_GENERATION_KEY],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+fn write_generation(conn: &Connection, token: &str) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT INTO install_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![DB_GENERATION_KEY, token],
+    )?;
+    Ok(())
+}
+
+/// Pure decision for the generation reconcile, so the branching is unit-testable
+/// without a keychain or Tauri handle.
+#[derive(Debug, PartialEq)]
+enum GenAction {
+    /// Tokens match — no-op.
+    Ok,
+    /// Both present and differ — a possible rollback. Record + proceed.
+    Suspect,
+    /// Copy the main token into the wraps DB (heal a wraps that lost it).
+    SetWraps(String),
+    /// Establish a fresh generation in BOTH (fresh / legacy / restore).
+    SetBoth(String),
+}
+
+fn decide_generation(
+    main: Option<&str>,
+    wraps: Option<&str>,
+    fresh: &str,
+    restore_applied: bool,
+) -> GenAction {
+    if restore_applied {
+        // A restore installs a legitimately new generation; stamp both so the
+        // restored DB's old embedded token isn't mistaken for a rollback.
+        return GenAction::SetBoth(fresh.to_string());
+    }
+    match (main, wraps) {
+        (Some(m), Some(w)) if m != w => GenAction::Suspect,
+        (Some(_), Some(_)) => GenAction::Ok,
+        // Main has a token but wraps lost it (legacy wraps / wraps reset): adopt
+        // the main token rather than alarm.
+        (Some(m), None) => GenAction::SetWraps(m.to_string()),
+        // No token in the main DB yet (fresh install, or a DB predating this
+        // feature): establish one. Cannot distinguish this from a rollback to a
+        // pre-feature snapshot — inherent to any generation scheme.
+        (None, _) => GenAction::SetBoth(fresh.to_string()),
+    }
+}
+
+/// Reconcile the anti-rollback generation token between the main and wraps DBs.
+/// Best-effort and fail-open: any error is swallowed, never blocks opening.
+fn reconcile_db_generation(app: &AppHandle, conn: &Connection, restore_applied: bool) {
+    let main = read_generation(conn);
+    let wraps = crate::auth::read_wraps_generation(app);
+    let fresh = new_generation_token();
+    match decide_generation(main.as_deref(), wraps.as_deref(), &fresh, restore_applied) {
+        GenAction::Ok => {}
+        GenAction::Suspect => {
+            log::error!(
+                "possible database rollback: the record database's generation does not match this install"
+            );
+            crate::auth::record_auth_event(app, "rollback_suspected", "failure");
+        }
+        GenAction::SetWraps(token) => {
+            let _ = crate::auth::write_wraps_generation(app, &token);
+        }
+        GenAction::SetBoth(token) => {
+            let _ = write_generation(conn, &token);
+            let _ = crate::auth::write_wraps_generation(app, &token);
+        }
+    }
 }
 
 // Builds a fresh SQLCipher-encrypted copy of the legacy plaintext DB at
@@ -720,6 +836,10 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
         }
         crate::auth::record_auth_event(app, "restore_applied", "success");
     }
+
+    // Anti-rollback generation check (finding #2/C4). Runs after restore handling
+    // so a just-applied restore stamps a fresh generation rather than alarming.
+    reconcile_db_generation(app, &conn, restore_applied);
     drop(conn);
 
     // Clean up the pre-restore breadcrumb once the restored DB has opened and
@@ -862,6 +982,60 @@ mod tests {
             apply_pending_restore(&db, &dir.path().join("nope"), &dir.path().join("bak"), &key).unwrap();
         assert!(!applied, "no pending means nothing applied");
         assert_eq!(read_row(&db, &key), "current");
+    }
+
+    // ── Anti-rollback generation decision (finding #2/C4) ──────────────────────
+
+    #[test]
+    fn generation_matching_tokens_is_ok() {
+        assert_eq!(decide_generation(Some("abc"), Some("abc"), "new", false), GenAction::Ok);
+    }
+
+    #[test]
+    fn generation_mismatch_is_suspect() {
+        // The core detection: an old main-DB token vs the current wraps token.
+        assert_eq!(decide_generation(Some("old"), Some("current"), "new", false), GenAction::Suspect);
+    }
+
+    #[test]
+    fn restore_always_establishes_a_fresh_generation_in_both() {
+        assert_eq!(
+            decide_generation(Some("old"), Some("current"), "new", true),
+            GenAction::SetBoth("new".into())
+        );
+        // Even when the tokens currently match, a restore mints a new generation.
+        assert_eq!(
+            decide_generation(Some("same"), Some("same"), "new", true),
+            GenAction::SetBoth("new".into())
+        );
+    }
+
+    #[test]
+    fn missing_wraps_token_heals_from_main_without_alarming() {
+        assert_eq!(decide_generation(Some("m"), None, "new", false), GenAction::SetWraps("m".into()));
+    }
+
+    #[test]
+    fn missing_main_token_establishes_both() {
+        // Fresh install or a DB predating the feature — never a false alarm.
+        assert_eq!(decide_generation(None, None, "new", false), GenAction::SetBoth("new".into()));
+        assert_eq!(decide_generation(None, Some("w"), "new", false), GenAction::SetBoth("new".into()));
+    }
+
+    #[test]
+    fn generation_read_write_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("tahlk.db");
+        let key = fixed_key();
+        let conn = Connection::open(&db).unwrap();
+        apply_key(&conn, &key).unwrap();
+        conn.execute_batch("CREATE TABLE install_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        assert_eq!(read_generation(&conn), None, "no token before it is written");
+        write_generation(&conn, "tok-123").unwrap();
+        assert_eq!(read_generation(&conn).as_deref(), Some("tok-123"));
+        write_generation(&conn, "tok-456").unwrap(); // upsert overwrites
+        assert_eq!(read_generation(&conn).as_deref(), Some("tok-456"));
     }
 
     #[test]
