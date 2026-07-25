@@ -446,7 +446,7 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
                 _ => {
                     log::error!(
                         "note_audit migration: unparseable/non-array blob for {}, skipping that half",
-                        encounter_id
+                        crate::log_safety::cap_len(&encounter_id)
                     );
                 }
             }
@@ -481,7 +481,7 @@ pub(crate) fn migrate_from_kv(conn: &mut Connection) -> rusqlite::Result<()> {
             ) {
                 log::error!(
                     "note_audit migration: insert failed for {} seq {}: {}, aborting this encounter",
-                    encounter_id, seq, crate::log_safety::cap_len(&e.to_string())
+                    crate::log_safety::cap_len(&encounter_id), seq, crate::log_safety::cap_len(&e.to_string())
                 );
                 ok = false;
                 break;
