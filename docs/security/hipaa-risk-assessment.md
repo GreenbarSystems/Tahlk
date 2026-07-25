@@ -69,23 +69,32 @@ more areas that audit found entirely undocumented.
 
 **What it is.** `transcribe_audio` (`src-tauri/src/whisper.rs`) shells out to
 the bundled whisper.cpp sidecar binary, which can only read/write real files
-on disk — not in-memory buffers. So session audio is decrypted to a
-transient plaintext `.wav`, and the sidecar's output lands as a transient
-plaintext `.txt`. Both are the actual patient-conversation content.
+on disk — not in-memory buffers. So there are **three** transient plaintext
+scratch artifacts (`whisper::SCRATCH_EXTS` = `[".wav", ".txt", ".json"]`):
+session audio is decrypted to a `.wav`, and the sidecar writes both a `.txt`
+(`--output-txt`) and a token-level `.json` (`--output-json-full`). All three
+are the actual patient-conversation content — the `.json` carries the same
+transcript text as the `.txt`, so it is exactly as sensitive.
 
 **Risk classification:** Accepted residual risk (not eliminated in code).
 
 **Mitigations in place (independently re-verified this pass):**
-- Both scratch files are clamped to owner-only `chmod 0600` immediately after
-  creation, before any read (`whisper.rs:141` for audio, `whisper.rs:178` for
-  transcript, the latter directly preceding `read_to_string` at `:180`).
-- Both are wrapped in `Drop`-based RAII guards (`WavCleanup`, `TxtCleanup`)
-  registered immediately after each file is created/produced — `WavCleanup`
-  at `:137` (before the sidecar call at `:157`), `TxtCleanup` at `:167`
-  (before the `output.status` check at `:169`, deliberately, since the
-  sidecar can write the `.txt` even on a non-zero exit) — so every exit path,
-  including panics, unlinks the file.
+- All three scratch files are clamped to owner-only `0600` before any read —
+  the `.wav` via `write_0600_unix` at creation; the sidecar-written `.txt` and
+  `.json` via `chmod_0600_unix` before `read_to_string`.
+- All three are wrapped in `Drop`-based RAII guards — the unified
+  `TempFileCleanup` struct (which superseded the earlier separate
+  `WavCleanup`/`TxtCleanup`/`ScratchFileCleanup` types): `_wav_cleanup`
+  registered right after the `.wav` is written (before the sidecar call), and
+  `_cleanup` (`.txt`) + `_json_cleanup` (`.json`) registered right after the
+  sidecar returns (before the `output.status` check, deliberately, since the
+  sidecar can write partial output even on a non-zero exit) — so every exit
+  path, including panics, unlinks the file.
 - Filenames use a random suffix so concurrent transcriptions can't collide.
+- On an **unclean** shutdown (`SIGKILL`, power cut) `Drop` cannot run, so a
+  startup sweep `audio::purge_transcription_scratch` removes all three artifact
+  kinds on both startup paths and logs a `destruction_log` entry — see
+  `AUDIT-RESIDUAL-RISK.md` Item 2 (HITECH audit H-1).
 - A CI static-analysis guardrail (`scripts/check_log_phi.sh`, added `065b7ff`)
   blocks any `log::` call site that references PHI-named tokens
   (`transcript|note|content|patient|provider_name|chief_complaint`), so this

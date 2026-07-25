@@ -14,7 +14,7 @@
 | ID | Item | Category | Owner | Target | Status |
 |----|------|----------|-------|--------|--------|
 | ENG-1 | Accounting of disclosures (§164.528) | Engineering | Claude Code | this cycle | ☑ |
-| ENG-2 | Document the third transcription scratch artifact | Engineering / docs | _tbd_ | _tbd_ | ☐ |
+| ENG-2 | Document the third transcription scratch artifact | Engineering / docs | Claude Code | this cycle | ☑ |
 | ENG-3 | Wire the JS audit actor to the provider profile | Engineering | _tbd_ | _tbd_ | ☐ |
 | LEG-1 | State scope determinations (counsel sign-off) | Legal | _counsel_ | _tbd_ | ☐ |
 | LEG-2 | State-conditional consent authorization language | Legal + Eng | _counsel_ | _tbd_ | ☐ |
@@ -37,14 +37,14 @@
 - [x] Tests: patient-scoping/ordering, NULL-exclusion, and the legacy-table migration round-trip.
 **Closed by:** this cycle (see PR). **References:** `src-tauri/src/llm_audit.rs`, `src-tauri/src/notes.rs`, `src-tauri/src/encounters.rs` (`patient_id_for`).
 
-### ENG-2 — Document the third transcription scratch artifact &nbsp; ☐
+### ENG-2 — Document the third transcription scratch artifact &nbsp; ☑ done
 **Finding:** Documentation currency — an undocumented plaintext scratch file.
-**What / why:** Transcription now also writes a JSON sidecar (`--output-json-full`) alongside the `.wav`/`.txt` scratch files. The control is intact (RAII `TempFileCleanup` + owner-only permissions + random suffix), so this is **not** an active leak — but the accepted-residual-risk paper trail still names only two files and references guard structs (`WavCleanup`/`TxtCleanup`) that were unified into `TempFileCleanup`. An undocumented PHI data flow is not, by our own discipline, an "accepted" one.
+**What / why:** Transcription also writes a JSON sidecar (`--output-json-full`) alongside the `.wav`/`.txt`. The control is intact (RAII `TempFileCleanup` + owner-only permissions + random suffix + the unclean-shutdown sweep), so this was **not** an active leak — but the accepted-residual-risk paper trail's primary description still named only two files and referenced guard structs (`WavCleanup`/`TxtCleanup`) that had been unified into `TempFileCleanup`.
 **Acceptance criteria:**
-- [ ] `AUDIT-RESIDUAL-RISK.md` Item 2 and `hipaa-risk-assessment.md` Flow B name the `.json` sidecar explicitly.
-- [ ] Guard-struct references updated to `TempFileCleanup`.
-- [ ] The "no new unguarded write path" checklist re-run against {wav, txt, json}.
-**References:** `src-tauri/src/whisper.rs`, `AUDIT-RESIDUAL-RISK.md`, `docs/security/hipaa-risk-assessment.md` (Flow B).
+- [x] `AUDIT-RESIDUAL-RISK.md` Item 2 and `hipaa-risk-assessment.md` Flow B name the `.json` sidecar explicitly, as one of three artifacts (`SCRATCH_EXTS`).
+- [x] Guard-struct references updated to the unified `TempFileCleanup` (`_wav_cleanup` / `_cleanup` / `_json_cleanup`); the pre-release checklist's stale `WavCleanup`/`TxtCleanup` items and test names corrected.
+- [x] The "no unguarded write path" checklist item clarified — the sidecar-written `.txt`/`.json` are covered by the guard/predicate + `SCRATCH_EXTS`/`is_scratch_artifact` pairing, not by the `fs::write` grep.
+**Closed by:** this cycle (see PR). **References:** `src-tauri/src/whisper.rs`, `AUDIT-RESIDUAL-RISK.md`, `docs/security/hipaa-risk-assessment.md` (Flow B).
 
 ### ENG-3 — Wire the JS audit actor to the provider profile &nbsp; ☐
 **Finding:** §164.312(a)(2)(i) / §164.312(b) — JS-side audit actor attribution.
