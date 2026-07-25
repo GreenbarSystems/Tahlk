@@ -258,6 +258,27 @@ export async function renderSettings() {
         <div id="s-retention-result" class="settings-desc" style="margin-top:8px"></div>
       </section>
 
+      <section class="settings-section">
+        <h3>Encrypted backup</h3>
+        <p class="settings-desc">
+          Export an <strong>encrypted</strong> copy of your entire record database to a location you choose —
+          your safeguard against a lost, stolen, or failed device (there is otherwise no way to recover your
+          records). The backup is encrypted with a passphrase you set here, <strong>separate from your login
+          password</strong>. Keep the passphrase somewhere safe: without it the backup cannot be opened, and
+          Tahlk cannot recover it for you. Save the backup file only to an encrypted drive or a secure location.
+        </p>
+        <div class="field-row">
+          <label for="s-backup-pass">Backup passphrase</label>
+          <input type="password" id="s-backup-pass" autocomplete="new-password" placeholder="At least 12 characters" />
+        </div>
+        <div class="field-row">
+          <label for="s-backup-pass2">Confirm passphrase</label>
+          <input type="password" id="s-backup-pass2" autocomplete="new-password" />
+        </div>
+        <button class="btn btn-primary" id="s-backup-export">Export encrypted backup</button>
+        <div id="s-backup-result" class="settings-desc" style="margin-top:8px"></div>
+      </section>
+
       <section class="settings-section settings-section--muted">
         <h3>Where your data is stored</h3>
         <p class="settings-desc">
@@ -664,6 +685,38 @@ export function wireSettings() {
     } catch (err) {
       e.target.checked = !active;
       toast(`Could not update hold: ${userMessage(err, 'unknown error')}`);
+    }
+  });
+
+  // Encrypted backup export (OPS-3). Passphrase-encrypted copy of the whole
+  // record database to a provider-chosen location; the passphrase is separate
+  // from the login password and never leaves the device except as the backup
+  // file's own KDF input.
+  document.getElementById('s-backup-export')?.addEventListener('click', async () => {
+    const p1 = document.getElementById('s-backup-pass')?.value || '';
+    const p2 = document.getElementById('s-backup-pass2')?.value || '';
+    const resultEl = document.getElementById('s-backup-result');
+    const setResult = msg => { if (resultEl) resultEl.textContent = msg; };
+    if (p1.length < 12) { setResult('Passphrase must be at least 12 characters.'); return; }
+    if (p1 !== p2) { setResult('Passphrases do not match.'); return; }
+    const btn = document.getElementById('s-backup-export');
+    if (btn) btn.disabled = true;
+    setResult('Choose where to save the backup…');
+    try {
+      const suggestedName = `tahlk-backup-${new Date().toISOString().slice(0, 10)}.tahlkbackup`;
+      const wrote = await invoke('export_encrypted_backup', { passphrase: p1, suggestedName });
+      if (wrote) {
+        setResult('Encrypted backup saved. Keep the file and its passphrase somewhere safe — you need both to restore.');
+        toast('Encrypted backup saved.');
+        const a = document.getElementById('s-backup-pass'); if (a) a.value = '';
+        const b = document.getElementById('s-backup-pass2'); if (b) b.value = '';
+      } else {
+        setResult('Backup canceled.');
+      }
+    } catch (e) {
+      setResult(`Could not create backup: ${userMessage(e, 'unknown error')}`);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   });
 

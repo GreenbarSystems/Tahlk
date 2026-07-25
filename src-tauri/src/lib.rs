@@ -7,6 +7,7 @@
 //!   - `secrets`       — guarded KV namespaces + provider-profile write path.
 //!   - `kv`            — generic key/value store commands (secret_* namespace blocked).
 //!   - `baa`           — Anthropic BAA acknowledgment gate (audit finding C2).
+//!   - `backup`        — encrypted database backup export (§164.308(a)(7) contingency).
 //!   - `breach_scope`  — read-only incident-scoping report (who/what PHI, §164.404).
 //!   - `encounters`    — encounter CRUD, sign-off, stats.
 //!   - `note_history`  — relational note-history append-log + KV→table migration.
@@ -40,6 +41,7 @@ mod audio_crypto;
 mod audit_mac;
 mod auth;
 mod baa;
+mod backup;
 mod breach_scope;
 mod config_audit;
 mod crypto;
@@ -287,6 +289,7 @@ pub fn run() {
             llm_audit::llm_audit_list,
             llm_audit::llm_audit_list_for_patient,
             export::data_location,
+            backup::export_encrypted_backup,
             encounters::list_encounters,
             encounters::get_encounter,
             encounters::encounter_stats,
