@@ -175,6 +175,21 @@ pub fn run() {
                 default_hook(info);
             }));
 
+            // Reconcile the ADR-0004 invariant that once auth is configured the
+            // plaintext DEK is NOT left in the OS keychain (finding #6).
+            // auth_set_password deletes it best-effort; if that failed (transient
+            // keychain error, or a crash mid-setup) nothing else revisited it.
+            // Actively remove a leftover on every launch, and escalate to error
+            // level if it is present but undeletable — a louder signal than the
+            // warn-and-forget the setup-time delete used to be. Non-fatal: a
+            // degraded defense-in-depth control must not brick access to records.
+            if let Err(e) = db_key::reconcile_keychain_dek_absent() {
+                log::error!(
+                    "keychain data-key reconcile failed: {}",
+                    log_safety::cap_len(&e.to_string())
+                );
+            }
+
             // When auth is already configured the keychain DEK entry has been
             // removed (by auth_set_password) and the DB can only be opened with
             // the DEK unwrapped from the user's password. Defer opening to
