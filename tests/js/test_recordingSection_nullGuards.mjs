@@ -103,7 +103,9 @@ const { encountersRepo } = await import('../../src/data/encountersRepo.js');
 function makeCtx() {
   const subs = {};
   return {
-    currentEncounter: { id: 'enc-1', status: 'draft', audio_path: null },
+    // recording_consent pre-satisfied: these tests exercise the null-guard
+    // paths, not the S1 consent gate (covered by test_consentModal.mjs).
+    currentEncounter: { id: 'enc-1', status: 'draft', audio_path: null, recording_consent: { consented: true } },
     sub: (name, fn) => { subs[name] = fn; },
     onEncounterUpdated: () => {},
     _emit: (name, payload) => subs[name]?.(payload),

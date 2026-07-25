@@ -320,6 +320,7 @@ pub fn run() {
             note_audit::audit_log_note_signed,
             note_audit::audit_log_audio_deleted,
             note_audit::audit_log_note_exported,
+            note_audit::audit_log_recording_consent,
             note_audit::audit_log_records_listed,
             note_audit::verify_audit_macs,
             breach_scope::breach_scope,
