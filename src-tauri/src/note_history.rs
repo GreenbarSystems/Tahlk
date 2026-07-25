@@ -439,6 +439,17 @@ pub(crate) fn verify_history_macs(
     crate::audit_mac::verify_table_chain(&conn, "note_history", &encounter_id)
 }
 
+/// Verify the keyed-MAC anchor for EVERY note-history chain in one sweep. The
+/// per-encounter `verify_history_macs` only ran on a panel open, so an encounter
+/// signed once and never reopened never had its authoritative (substitution-
+/// detecting) check run. Wired to the Settings "Check note records" action and a
+/// launch-time background sweep (audit finding #3).
+#[tauri::command]
+pub(crate) fn verify_all_history_macs(state: State<'_, DbState>) -> Result<Value, AppError> {
+    let conn = state.conn()?;
+    crate::audit_mac::verify_all_chains(&conn, "note_history")
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit-level coverage for the note-history insert path (insert_history_row

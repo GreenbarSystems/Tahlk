@@ -11,7 +11,7 @@ import { PICKER_SPECIALTIES } from '../domain/specialties.js';
 import { US_STATES, stateName } from '../domain/jurisdictions.js';
 import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
 import { retentionRepo } from '../data/retentionRepo.js';
-import { verifyAllChains } from '../domain/historyChain.js';
+import { verifyAllRecordIntegrity } from '../domain/recordIntegrity.js';
 import { checkLlmAuditDrift, describeDrift } from '../domain/llmAuditDrift.js';
 import { iconCheck } from './icons.js';
 // In-app dialogs, not the browser-native confirm()/prompt(). Those block the
@@ -913,7 +913,7 @@ export function wireSettings() {
     idleLabel: 'Check note records',
     failPrefix: 'Could not check note records',
     run: async resultEl => {
-      const { ok, checked, broken } = await verifyAllChains();
+      const { ok, checked, broken } = await verifyAllRecordIntegrity();
       if (checked === 0) {
         if (resultEl) resultEl.textContent = 'No saved notes yet — nothing to check.';
       } else if (ok) {
@@ -921,7 +921,7 @@ export function wireSettings() {
         toast('Note records check passed.');
       } else {
         const detail = broken
-          .map(b => `${escapeHtml(b.encounterId)} (${escapeHtml(b.reason || 'unknown')}${b.brokenAt != null ? `, entry #${Number(b.brokenAt)}` : ''})`)
+          .map(b => `${escapeHtml(b.encounterId)} — ${escapeHtml(b.kind || 'note history')} (${escapeHtml(b.reason || 'unknown')}${b.brokenAt != null ? `, entry #${Number(b.brokenAt)}` : ''})`)
           .join('; ');
         if (resultEl) {
           resultEl.innerHTML = `<strong style="color:var(--danger)">${broken.length} of ${checked} note record${checked === 1 ? '' : 's'} show a change:</strong> ${detail}`;
