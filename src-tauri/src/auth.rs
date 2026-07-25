@@ -51,6 +51,7 @@ use ring::hkdf;
 use ring::pbkdf2;
 use rusqlite::{params, Connection, OptionalExtension};
 use tauri::{AppHandle, Manager, State};
+use zeroize::Zeroizing;
 
 use crate::DbState;
 
@@ -591,7 +592,11 @@ fn wraps_db_path(app: &AppHandle) -> Result<std::path::PathBuf, AppError> {
 /// Held as hex to match the existing DEK plumbing (`to_hex` at the unlock
 /// sites, `PRAGMA key = "x'..'"`, `derive_audio_key(&str)`); this adds no
 /// plaintext-key exposure the process did not already have.
-static SESSION_DEK_HEX: RwLock<Option<String>> = RwLock::new(None);
+/// Stored as `Zeroizing<String>` so the 64-byte hex DEK is overwritten in place
+/// when the slot is cleared or replaced — not merely deallocated (audit finding
+/// #4). Without this, idle-lock's `*slot = None` freed the heap buffer but left
+/// the DEK plaintext readable in freed memory until reallocated.
+static SESSION_DEK_HEX: RwLock<Option<Zeroizing<String>>> = RwLock::new(None);
 
 /// Throttle scopes. Kept distinct so a lockout on the destructive path cannot
 /// lock a provider out of their own records, and vice versa.
@@ -603,18 +608,25 @@ const THROTTLE_NUKE: &str = "auth_nuke";
 /// and password change.
 pub(crate) fn set_session_dek_hex(hex: &str) {
     if let Ok(mut slot) = SESSION_DEK_HEX.write() {
-        *slot = Some(hex.to_string());
+        // Assigning a new value drops the old `Zeroizing<String>`, wiping any
+        // prior session key (e.g. after nuke-and-reinstall mints a new DEK).
+        *slot = Some(Zeroizing::new(hex.to_string()));
     }
 }
 
-/// The current session's DEK hex, or `None` before unlock.
+/// The current session's DEK hex, or `None` before unlock. Returns a plain
+/// `String` copy for transient use at the call site (PRAGMA keying, audio-key
+/// derivation) — the same exposure the callers already had; only the long-lived
+/// *stored* copy is zeroizing.
 pub(crate) fn session_dek_hex() -> Option<String> {
-    SESSION_DEK_HEX.read().ok().and_then(|s| s.clone())
+    SESSION_DEK_HEX.read().ok().and_then(|s| s.as_ref().map(|z| z.to_string()))
 }
 
 /// Zero the in-memory session DEK. Called by the idle-lock path (M4) so the
 /// key no longer lives in process memory once the screen locks; re-unlock
-/// (`auth_unlock_password`) re-derives and re-publishes it.
+/// (`auth_unlock_password`) re-derives and re-publishes it. Dropping the stored
+/// `Zeroizing<String>` overwrites the hex bytes in place before freeing, so the
+/// key does not survive in freed heap (audit finding #4).
 pub(crate) fn clear_session_dek() {
     if let Ok(mut slot) = SESSION_DEK_HEX.write() {
         *slot = None;
@@ -700,16 +712,18 @@ pub(crate) fn set_password(
     // Derive password KEK.
     let mut pw_salt = [0u8; SALT_LEN];
     getrandom::getrandom(&mut pw_salt).map_err(AppError::internal_from)?;
-    let pw_kek = derive_kek(password, &pw_salt)?;
+    // KEKs are wrapped in Zeroizing so the derived key material is wiped from
+    // the stack on drop, not merely dropped (audit finding #4).
+    let pw_kek = Zeroizing::new(derive_kek(password, &pw_salt)?);
     let pw_wrapped = wrap_dek(&pw_kek, dek)?;
 
     // Generate recovery codes and wrap DEK under each recovery KEK.
     let (rc1, seed1) = generate_recovery_code()?;
     let (rc2, seed2) = generate_recovery_code()?;
     let (rc3, seed3) = generate_recovery_code()?;
-    let rw1 = wrap_dek(&derive_recovery_kek(&seed1)?, dek)?;
-    let rw2 = wrap_dek(&derive_recovery_kek(&seed2)?, dek)?;
-    let rw3 = wrap_dek(&derive_recovery_kek(&seed3)?, dek)?;
+    let rw1 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed1)?), dek)?;
+    let rw2 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed2)?), dek)?;
+    let rw3 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed3)?), dek)?;
 
     // Write all four rows atomically.
     let mut conn = open_wraps_db(wraps_db_path)?;
@@ -767,7 +781,7 @@ pub(crate) fn unlock_with_password(
     let salt = from_hex(&salt_hex).ok_or_else(|| AppError::Storage("invalid salt hex".into()))?;
     let wrapped =
         from_hex(&ciph_hex).ok_or_else(|| AppError::Storage("invalid ciphertext hex".into()))?;
-    let kek = derive_kek(password, &salt)?;
+    let kek = Zeroizing::new(derive_kek(password, &salt)?);
     unwrap_dek(&kek, &wrapped)
 }
 
@@ -782,7 +796,7 @@ pub(crate) fn unlock_with_recovery_code(
     wraps_db_path: &Path,
 ) -> Result<[u8; DEK_BYTES], AppError> {
     let seed = parse_recovery_code(code_input)?;
-    let kek = derive_recovery_kek(&seed)?;
+    let kek = Zeroizing::new(derive_recovery_kek(&seed)?);
 
     let conn = open_wraps_db(wraps_db_path)?;
     let mut stmt = conn.prepare(
@@ -816,12 +830,12 @@ pub(crate) fn change_password(
     wraps_db_path: &Path,
 ) -> Result<(), AppError> {
     // Verify + unwrap before any writes so we hold the DEK before mutating.
-    let dek = unlock_with_password(old_password, wraps_db_path)?;
+    let dek = Zeroizing::new(unlock_with_password(old_password, wraps_db_path)?);
     validate_password(new_password)?;
 
     let mut new_salt = [0u8; SALT_LEN];
     getrandom::getrandom(&mut new_salt).map_err(AppError::internal_from)?;
-    let new_kek = derive_kek(new_password, &new_salt)?;
+    let new_kek = Zeroizing::new(derive_kek(new_password, &new_salt)?);
     let new_wrapped = wrap_dek(&new_kek, &dek)?;
 
     let conn = open_wraps_db(wraps_db_path)?;
@@ -843,14 +857,14 @@ pub(crate) fn generate_new_recovery_codes(
     current_password: &str,
     wraps_db_path: &Path,
 ) -> Result<[RecoveryCode; 3], AppError> {
-    let dek = unlock_with_password(current_password, wraps_db_path)?;
+    let dek = Zeroizing::new(unlock_with_password(current_password, wraps_db_path)?);
 
     let (rc1, seed1) = generate_recovery_code()?;
     let (rc2, seed2) = generate_recovery_code()?;
     let (rc3, seed3) = generate_recovery_code()?;
-    let rw1 = wrap_dek(&derive_recovery_kek(&seed1)?, &dek)?;
-    let rw2 = wrap_dek(&derive_recovery_kek(&seed2)?, &dek)?;
-    let rw3 = wrap_dek(&derive_recovery_kek(&seed3)?, &dek)?;
+    let rw1 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed1)?), &dek)?;
+    let rw2 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed2)?), &dek)?;
+    let rw3 = wrap_dek(&Zeroizing::new(derive_recovery_kek(&seed3)?), &dek)?;
 
     let mut conn = open_wraps_db(wraps_db_path)?;
     let now = utc_now_iso();
@@ -922,7 +936,7 @@ pub(crate) fn reset_password_with_recovery_code(
     new_password: &str,
     wraps_db_path: &Path,
 ) -> Result<[RecoveryCode; 3], AppError> {
-    let dek = unlock_with_recovery_code(code, wraps_db_path)?;
+    let dek = Zeroizing::new(unlock_with_recovery_code(code, wraps_db_path)?);
     // set_password uses INSERT OR REPLACE, so this atomically overwrites all
     // 4 rows (password + 3 recovery) and updates auth_password_hash.
     set_password(new_password, &dek, wraps_db_path)
@@ -947,10 +961,10 @@ pub(crate) fn auth_is_configured() -> bool {
 #[tauri::command]
 pub(crate) fn auth_set_password(app: AppHandle, password: String) -> Result<Vec<String>, AppError> {
     let r = (|| -> Result<Vec<String>, AppError> {
-        let dek_hex = crate::db_key::load_or_generate_dek()?;
+        let dek_hex = Zeroizing::new(crate::db_key::load_or_generate_dek()?);
         let dek_vec =
-            from_hex(&dek_hex).ok_or_else(|| AppError::internal_from("DEK hex malformed"))?;
-        let mut dek = [0u8; DEK_BYTES];
+            Zeroizing::new(from_hex(&dek_hex).ok_or_else(|| AppError::internal_from("DEK hex malformed"))?);
+        let mut dek = Zeroizing::new([0u8; DEK_BYTES]);
         dek.copy_from_slice(&dek_vec);
         let path = wraps_db_path(&app)?;
         let codes = set_password(&password, &dek, &path)?;
@@ -992,12 +1006,12 @@ pub(crate) fn auth_unlock_password(
     crate::throttle::check(THROTTLE_UNLOCK).inspect_err(|_| {
         record_auth_event(&app, "unlock_password", "throttled");
     })?;
-    let dek = unlock_with_password(&password, &path).inspect_err(|_| {
+    let dek = Zeroizing::new(unlock_with_password(&password, &path).inspect_err(|_| {
         crate::throttle::record_failure(THROTTLE_UNLOCK);
         record_auth_event(&app, "unlock_password", "failure");
-    })?;
+    })?);
     crate::throttle::record_success(THROTTLE_UNLOCK);
-    let hex_key = to_hex(&dek);
+    let hex_key = Zeroizing::new(to_hex(&dek[..]));
     // Publish before the audio migration below, which calls audio_key().
     set_session_dek_hex(&hex_key);
 
@@ -1078,12 +1092,12 @@ pub(crate) fn auth_unlock_recovery(app: AppHandle, code: String) -> Result<(), A
     crate::throttle::check(THROTTLE_UNLOCK).inspect_err(|_| {
         record_auth_event(&app, "unlock_recovery", "throttled");
     })?;
-    let dek = unlock_with_recovery_code(&code, &path).inspect_err(|_| {
+    let dek = Zeroizing::new(unlock_with_recovery_code(&code, &path).inspect_err(|_| {
         crate::throttle::record_failure(THROTTLE_UNLOCK);
         record_auth_event(&app, "unlock_recovery", "failure");
-    })?;
+    })?);
     crate::throttle::record_success(THROTTLE_UNLOCK);
-    set_session_dek_hex(&to_hex(&dek));
+    set_session_dek_hex(&Zeroizing::new(to_hex(&dek[..])));
     record_auth_event(&app, "unlock_recovery", "success");
     Ok(())
 }

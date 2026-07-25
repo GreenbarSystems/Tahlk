@@ -85,6 +85,13 @@ futures-util = "0.3"
 # macOS Keychain / Linux Secret Service) — keeps the key off plaintext disk.
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 
+# In-memory key-material zeroization (audit finding #4). Already present in the
+# tree as a transitive dep of `ring`; promoted to a direct dep so the DEK/KEK
+# and the session-DEK hex are wiped from freed heap on drop rather than merely
+# deallocated. `Zeroizing<String>`/`Zeroizing<Vec<u8>>` need the `alloc` feature
+# (requested explicitly rather than relying on defaults).
+zeroize = { version = "1", features = ["alloc"] }
+
 # Test-only deps. `tempfile` scopes each SQLCipher round-trip test to its
 # own directory so parallel `cargo test` runs don't stomp on each other.
 # `http` builds fixture reqwest::Response values in notes.rs's
