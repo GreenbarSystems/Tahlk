@@ -164,6 +164,12 @@ export async function renderSettings() {
           </div>
           <p class="auth-error" id="s-auth-pw-error" hidden></p>
           <button class="btn btn-secondary" id="s-auth-change-pw">Change password</button>
+          <p class="settings-desc" style="margin-top:8px">
+            Changing your password updates the lock on your data key — it does not
+            re-encrypt your existing records or replace your recovery codes
+            (regenerate those below). If you believe your device or its key may
+            have been exposed, a password change alone will not undo that.
+          </p>
         </div>
 
         <div class="settings-subsection" style="margin-top:16px">

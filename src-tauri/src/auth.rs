@@ -824,6 +824,19 @@ pub(crate) fn unlock_with_recovery_code(
 ///
 /// Verifies the old password, re-wraps the DEK under the new password KEK, and
 /// updates the keychain hash. Recovery code rows are left untouched.
+///
+/// NOT a compromise-recovery mechanism (audit finding #5). The DEK is
+/// unchanged: this only re-wraps the SAME key under a new password. An attacker
+/// who already holds the DEK (memory scrape) or a captured ciphertext `tahlk.db`
+/// keeps full access to past and future data after a password change, and the
+/// three recovery codes minted at setup stay valid. A true key reset requires a
+/// fresh DEK — see `nuke_and_reinstall` (which destroys the existing records).
+///
+/// The DEK is deliberately not rotated in place here because the audio-at-rest
+/// key is derived from it (`audio_crypto::derive_audio_key`), so rotating the
+/// DEK would orphan every existing `.wav.enc` unless all audio were
+/// re-encrypted in the same crash-safe pass — a data migration tracked
+/// separately, not a side effect of a password change.
 pub(crate) fn change_password(
     old_password: &str,
     new_password: &str,

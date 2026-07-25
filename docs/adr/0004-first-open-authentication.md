@@ -258,6 +258,32 @@ Every launch after the first, before the app shell renders:
   (multiple clinicians on multiple installs sharing a practice-level
   identity space); this ADR is device-scoped and does not address that.
 
+### Password change is not compromise recovery (audit finding #5)
+
+Changing the master password (`change_password`) re-wraps the **same DEK** under
+a new password KEK and updates the keychain hash. It does **not** rotate the DEK,
+re-encrypt stored records, or invalidate the setup-time recovery codes. So a
+password change does not help against a threat that has already obtained the DEK
+(a memory scrape) or a captured ciphertext `tahlk.db`: that attacker retains
+access to past and future data.
+
+This is a deliberate, documented limitation rather than a fix, for one concrete
+reason: the audio-at-rest key is **derived from the DEK**
+(`audio_crypto::derive_audio_key`), so rotating the DEK in place would orphan
+every existing `.wav.enc` unless all audio were re-encrypted in the same
+crash-safe pass. True DEK rotation is therefore a data-migration feature, tracked
+separately, not a side effect of a credential change.
+
+The mechanisms that *do* rotate credential material today:
+- **Regenerate recovery codes** (`generate_new_recovery_codes`) — replaces all
+  three recovery wraps immediately; old codes stop working.
+- **Nuke and reinstall** (`nuke_and_reinstall`) — mints a fresh DEK, but destroys
+  the existing encrypted records. This is the only current path to a genuinely
+  new key, and it is destructive by design.
+
+The Settings "Change password" UI states this plainly so a provider does not
+mistake a password change for a key reset.
+
 ## Consequences
 
 ### Positive
