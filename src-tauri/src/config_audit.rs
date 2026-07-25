@@ -41,6 +41,15 @@ pub(crate) const VALID_ACTIONS: &[&str] = &[
     // copy's own hash-chains verify clean either way. This row is that marker
     // (audit finding #2). Written into the restored DB itself.
     "database_restored",
+    // The provider profile NAME is the actor stamped on every patient audit
+    // entry (kv_ops::provider_id). A silent change to it makes prior and later
+    // rows attribute actions to different identities with no linking event
+    // (audit finding, Low) — so the change itself is now recorded.
+    "provider_identity_changed",
+    // BAA acknowledgment accept/decline/clear lifecycle (audit finding, Low):
+    // the ack row is overwrite-only, so without this the accept→revoke→re-accept
+    // history is not reconstructable independent of actual PHI-egress calls.
+    "baa_ack_changed",
 ];
 
 pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -246,6 +255,21 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].0, "database_restored");
         assert_eq!(r[0].2, "restored from encrypted backup");
+    }
+
+    #[test]
+    fn identity_and_baa_actions_are_accepted() {
+        // The two Tier-4 audit-completeness actions must be recordable in the
+        // same trail (findings: provider-name change; BAA-ack lifecycle).
+        let conn = fresh_db();
+        append(&conn, "provider_identity_changed", Some("provider"), "Dr. Chen", "Dr. Chen").unwrap();
+        append(&conn, "baa_ack_changed", None, "acknowledged", "Dr. Chen").unwrap();
+        append(&conn, "baa_ack_changed", Some("acknowledged"), "cleared", "Dr. Chen").unwrap();
+        let r = rows(&conn);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].0, "provider_identity_changed");
+        assert_eq!(r[1].2, "acknowledged");
+        assert_eq!(r[2].2, "cleared");
     }
 
     #[test]
