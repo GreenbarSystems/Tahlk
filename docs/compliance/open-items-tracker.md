@@ -16,12 +16,12 @@
 | ENG-1 | Accounting of disclosures (§164.528) | Engineering | Claude Code | this cycle | ☑ |
 | ENG-2 | Document the third transcription scratch artifact | Engineering / docs | Claude Code | this cycle | ☑ |
 | ENG-3 | Wire the JS audit actor to the provider profile | Engineering | Claude Code | this cycle | ☑ |
-| LEG-1 | State scope determinations (counsel sign-off) | Legal | _counsel_ | _tbd_ | ☐ |
-| LEG-2 | State-conditional consent authorization language | Legal + Eng | _counsel_ | _tbd_ | ☐ |
-| LEG-3 | Patient privacy notice — finalize & adopt | Legal + Product | _tbd_ | _tbd_ | ☐ |
-| OPS-1 | Endpoint-hygiene setup requirements | Operational | _practice_ | ongoing | ☐ |
-| OPS-2 | Screen-share / on-screen content protection | Engineering / Ops | _tbd_ | _tbd_ | ☐ |
-| OPS-3 | Encrypted backup & recovery | Engineering / Ops | _tbd_ | _tbd_ | ☐ |
+| LEG-1 | State scope determinations (counsel sign-off) | Legal | _counsel_ | _tbd_ | ⊘ |
+| LEG-2 | State-conditional consent authorization language | Legal + Eng | _counsel_ | _tbd_ | ⊘ |
+| LEG-3 | Patient privacy notice — finalize & adopt | Legal + Product | _tbd_ | _tbd_ | ⊘ |
+| OPS-1 | Endpoint-hygiene setup requirements | Operational | _practice_ | ongoing | ◐ |
+| OPS-2 | Screen-share / on-screen content protection | Engineering / Ops | Claude Code | this cycle | ☑ |
+| OPS-3 | Encrypted backup & recovery | Engineering / Ops | _tbd_ | _tbd_ | ◐ |
 
 ---
 
@@ -59,7 +59,7 @@
 
 ## Legal / counsel-dependent
 
-### LEG-1 — State scope determinations (counsel sign-off) &nbsp; ☐
+### LEG-1 — State scope determinations (counsel sign-off) &nbsp; ⊘ blocked on counsel (drafts ready)
 **Finding:** State privacy law — S2/S3 determinations are drafts pending counsel.
 **What / why:** Two scope-determination drafts exist as working positions. They need a licensed-counsel opinion, keyed to the states where Tahlk providers actually practice (now capturable via the provider practice-state field).
 **Acceptance criteria:**
@@ -68,7 +68,7 @@
 - [ ] Sign-off checkboxes in each doc completed; any redlines folded in.
 **References:** `docs/compliance/state-consumer-health-data-scope-determination.md`, `docs/compliance/state-behavioral-health-confidentiality.md`.
 
-### LEG-2 — State-conditional consent authorization language &nbsp; ☐
+### LEG-2 — State-conditional consent authorization language &nbsp; ⊘ blocked on counsel
 **Finding:** S3 — some states require specific authorization to disclose MH records to a third party.
 **What / why:** The S1 consent gate captures patient **consent to record**. Strict-consent states may additionally require a patient **authorization to disclose** mental-health information for AI note generation. Where counsel confirms this, extend the consent flow with approved wording.
 **Acceptance criteria:**
@@ -77,7 +77,7 @@
 - [ ] Tests for the state-conditional branch.
 **References:** `src/solo/consentModal.js`, `src/solo/encounter/recordingSection.js`, `docs/compliance/state-behavioral-health-confidentiality.md`.
 
-### LEG-3 — Patient privacy notice — finalize & adopt &nbsp; ☐
+### LEG-3 — Patient privacy notice — finalize & adopt &nbsp; ⊘ blocked on counsel/product (template ready)
 **Finding:** S7 — no patient-facing privacy notice.
 **What / why:** A provider-adoptable template exists. It needs practice/counsel finalization and a distribution path, and its accuracy about third-party processing must match the real (separately-tracked) contractual state before distribution.
 **Acceptance criteria:**
@@ -89,28 +89,29 @@
 
 ## Operational controls (practice)
 
-### OPS-1 — Endpoint-hygiene setup requirements &nbsp; ☐
+### OPS-1 — Endpoint-hygiene setup requirements &nbsp; ◐ documented; practice attestation open
 **Finding:** Multiple areas — controls Tahlk cannot enforce depend on the device.
 **What / why:** OS login, full-disk encryption (FileVault/BitLocker), screen-lock-on-idle, and no shared/guest accounts are required complements to the in-app controls. These are the practice's responsibility and should be a documented, checked setup step.
-**Acceptance criteria:**
-- [ ] Setup/onboarding docs state these as required steps (not suggestions).
-- [ ] A practice attests to them at deployment.
+**Status:**
+- [x] Documented as required operational controls in `hipaa-risk-assessment.md` §3.1 (OS login boundary), §3.3 (screen-lock complement), §3.4 (screen-capture caution), and §5 (FDE via backup guidance).
+- [ ] *Open (practice-side):* surface as an explicit checked setup step in provider onboarding docs, and capture a practice attestation at deployment. Cannot be closed in the codebase — it is an operational control the practice owns.
 **References:** `GETTING_STARTED.md`, `docs/security/hipaa-risk-assessment.md` §3.
 
-### OPS-2 — Screen-share / on-screen content protection &nbsp; ☐
+### OPS-2 — Screen-share / on-screen content protection &nbsp; ☑ done (decision + documented)
 **Finding:** Desktop risk — no on-screen content-protection flag; screen-share/remote-support tools can capture on-screen PHI.
-**What / why:** Evaluate a platform content-protection option (e.g., Tauri window content protection) to exclude the window from capture, and/or document the exposure as an operational caution until/if implemented.
+**Outcome:** decision recorded in [ADR 0007](../adr/0007-window-content-protection.md) and the exposure documented as an operational caution. Enabling Tauri content protection is a real control but a product-level behavior change (blanks the window to *all* screen capture, including legitimate telehealth/support; no-op on Linux), so it is **not** force-enabled.
 **Acceptance criteria:**
-- [ ] Decision recorded: implement content-protection flag, or accept + document the residual.
-- [ ] If accepted, the caution is stated in provider-facing docs.
-**References:** Solo desktop window configuration; `docs/security/hipaa-risk-assessment.md`.
+- [x] Decision recorded — ADR 0007: ship an **opt-in** Settings toggle (default off) rather than force-enable or config-only default-on; document the residual meanwhile.
+- [x] Operational caution stated in provider-facing docs — `hipaa-risk-assessment.md` §3.4.
+- [ ] *Follow-up (tracked, not blocking this item's close):* implement the opt-in toggle (`set_content_protected` wrapper + Settings persistence).
+**Closed by:** ADR 0007 + §3.4 this cycle. **References:** `docs/adr/0007-window-content-protection.md`, `docs/security/hipaa-risk-assessment.md` §3.4.
 
-### OPS-3 — Encrypted backup & recovery &nbsp; ☐
+### OPS-3 — Encrypted backup & recovery &nbsp; ◐ documented; export feature open
 **Finding:** Contingency (§164.308(a)(7)) — the encrypted database is the single critical asset with no in-app backup.
 **What / why:** Loss of the device or the key is unrecoverable without a provider-maintained backup. Planned remediation is an in-app "export encrypted backup" feature; until then, the practice must maintain and periodically test an encrypted backup.
-**Acceptance criteria:**
-- [ ] Interim: backup responsibility + restore-test documented for the practice.
-- [ ] Planned: encrypted-backup export feature scoped and tracked.
+**Status:**
+- [x] Interim: backup responsibility, disaster-recovery, and restore-testing are documented for the practice in `hipaa-risk-assessment.md` §5 (Contingency plan).
+- [ ] *Open (engineering enhancement):* the in-app "export encrypted backup" feature is scoped in §5's planned remediation but not built. Tracked here as the remaining sub-part.
 **References:** `docs/security/hipaa-risk-assessment.md` §5.
 
 ---

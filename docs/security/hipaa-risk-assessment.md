@@ -439,6 +439,27 @@ required safeguard is therefore provable — see §4.
 reasonable defence-in-depth complement, but is no longer the primary control —
 the in-app cryptographic lock above is.
 
+### 3.4 On-screen content exposure to screen capture (desktop residual)
+
+**Current state:** Tahlk displays PHI on screen and does **not** exclude its
+window from screen capture, so any screen-recording, screen-sharing, or
+remote-support tool running on the device can capture PHI off the screen. This
+is a desktop-specific exposure ([ADR 0007](../adr/0007-window-content-protection.md),
+open-item OPS-2).
+
+**Decision (ADR 0007):** ship on-screen content protection (Tauri
+`set_content_protected` — macOS `NSWindowSharingType`, Windows
+`WDA_EXCLUDEFROMCAPTURE`; **no effect on Linux**) as an **opt-in** Settings
+toggle, default off, so legitimate telehealth/screen-share and remote support
+are not silently broken. The toggle is a tracked follow-up.
+
+**Operational caution (primary safeguard, required now and after the toggle
+ships):** providers must not screen-share or screen-record a device showing PHI
+to an unauthorized audience, and should treat any remote-support session on a
+device running Tahlk as a potential PHI-exposure event. Because the eventual
+control is opt-in and unsupported on Linux, this operational caution — not the
+toggle — remains the load-bearing safeguard.
+
 ---
 
 ## 4. Audit controls (§164.312(b), required)
