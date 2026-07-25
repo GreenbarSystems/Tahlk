@@ -88,13 +88,14 @@ test('onboarding has two numbered steps (provider profile + BAA/EULA)', () => {
 });
 
 // Drive the real wireOnboarding click handler with a minimal DOM.
-function mountDom({ name = 'Dr. Jane Smith', baaChecked = true } = {}) {
+function mountDom({ name = 'Dr. Jane Smith', baaChecked = true, state = 'CA' } = {}) {
   const handlers = {};
   const els = {
     'ob-finish': { addEventListener: (ev, fn) => { handlers[ev] = fn; } },
     'ob-name': { value: name },
     'ob-creds': { value: '' },
     'ob-specialty': { value: 'podiatry' },
+    'ob-state': { value: state },
     'ob-baa': { checked: baaChecked },
   };
   globalThis.document = {
@@ -119,6 +120,7 @@ test('completing onboarding records a BAA ack so first note generation is unbloc
   const setProfile = calls.find(c => c.command === 'set_provider_profile');
   assert.ok(setProfile, 'set_provider_profile must be invoked');
   assert.equal(setProfile.args.profile.name, 'Dr. Jane Smith');
+  assert.equal(setProfile.args.profile.state, 'CA', 'practice state must be captured (finding S4)');
 
   const ack = calls.find(c => c.command === 'baa_ack_set');
   assert.ok(ack, 'onboarding must record a BAA ack via baa_ack_set');
@@ -140,6 +142,15 @@ test('gate: missing name blocks completion (and writes nothing)', async () => {
   await dom.fire();
   assert.equal(completed, false, 'onComplete must not run without a name');
   assert.equal(calls.length, 0, 'nothing should be written without a name');
+});
+
+test('gate: missing/invalid practice state blocks completion (and writes nothing)', async () => {
+  let completed = false;
+  const dom = mountDom({ state: '' });
+  await wireOnboarding(() => { completed = true; });
+  await dom.fire();
+  assert.equal(completed, false, 'onComplete must not run without a valid practice state');
+  assert.equal(calls.length, 0, 'nothing should be written without a state (finding S4)');
 });
 
 test('gate: unchecked BAA blocks completion and records no ack', async () => {

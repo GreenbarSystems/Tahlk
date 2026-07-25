@@ -8,6 +8,7 @@ import * as telemetry from '../core/telemetry.js';
 import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
+import { US_STATES, stateName } from '../domain/jurisdictions.js';
 import { getAudioRetention, setAudioRetention } from '../domain/retention.js';
 import { retentionRepo } from '../data/retentionRepo.js';
 import { verifyAllChains } from '../domain/historyChain.js';
@@ -74,6 +75,16 @@ export async function renderSettings() {
         <div class="field-row">
           <label>Credentials</label>
           <input type="text" id="s-creds" value="${escapeHtml(provider.credentials || '')}" placeholder="MD, PMHNP-BC…" />
+        </div>
+        <div class="field-row">
+          <label>Practice state</label>
+          <select id="s-state">
+            <option value="">Select your state…</option>
+            ${US_STATES.map(s =>
+              `<option value="${s.value}" ${provider.state === s.value ? 'selected' : ''}>${escapeHtml(s.label)}</option>`
+            ).join('')}
+          </select>
+          <p class="settings-desc">Drives your record-retention, recording-consent, and breach rules — all state-specific.</p>
         </div>
         <div class="field-row">
           <label>Specialty</label>
@@ -221,8 +232,9 @@ export async function renderSettings() {
       <section class="settings-section">
         <h3>Privacy &amp; data retention</h3>
         <p class="settings-desc">
-          HIPAA requires covered entities to retain records for at least 6 years; many state laws require
-          7 or 10. Set your practice's retention window here. Tahlk can identify encounter records that have
+          HIPAA requires covered entities to retain records for at least 6 years; state law often requires
+          longer, and minors' records longer still.${provider.state ? ` Your practice state is set to <strong>${escapeHtml(stateName(provider.state))}</strong> — confirm your window against ${escapeHtml(stateName(provider.state))} law.` : ` <strong>Set your practice state in the Provider profile above</strong> so this reflects your state's rule.`}
+          Set your practice's retention window here. Tahlk can identify encounter records that have
           aged past that window so you can permanently destroy them. A <strong>litigation hold</strong>
           suspends all retention-based deletion when legal matters require preserving records beyond the
           normal window.
@@ -533,6 +545,7 @@ export function wireSettings() {
       name:        document.getElementById('s-name')?.value.trim() || '',
       credentials: document.getElementById('s-creds')?.value.trim() || '',
       specialty:   document.getElementById('s-specialty')?.value || 'psychiatry',
+      state:       document.getElementById('s-state')?.value || '',
     };
     // Use the dedicated set_provider_profile command (C3 fix). Generic kv_set
     // is write-blocked for this key to prevent audit-identity forgery.

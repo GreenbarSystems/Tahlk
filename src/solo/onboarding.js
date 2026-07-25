@@ -20,6 +20,7 @@ import { keys } from '../data/keys.js';
 import { toast, escapeHtml } from '../utils/format.js';
 import { userMessage } from '../platform/appError.js';
 import { PICKER_SPECIALTIES } from '../domain/specialties.js';
+import { US_STATES, isValidState } from '../domain/jurisdictions.js';
 import { baaRepo } from '../data/baa.js';
 import { LOGO_SVG_LG } from './logoSvg.js';
 
@@ -61,6 +62,16 @@ export function renderOnboarding() {
                   ).join('')}
                 </select>
               </div>
+              <div class="field-row">
+                <label>Practice state <span class="req">*</span></label>
+                <select id="ob-state">
+                  <option value="">Select your state…</option>
+                  ${US_STATES.map(s =>
+                    `<option value="${s.value}">${escapeHtml(s.label)}</option>`
+                  ).join('')}
+                </select>
+                <p class="field-hint">Sets your record-retention, recording-consent, and breach rules. Tahlk cannot tailor these correctly without it.</p>
+              </div>
             </div>
           </div>
 
@@ -101,6 +112,11 @@ export async function wireOnboarding(onComplete) {
     const name = document.getElementById('ob-name')?.value.trim();
     if (!name) { toast('Provider name is required.'); return; }
 
+    // Practice state is required: it drives retention floors, recording-consent
+    // rules, and breach obligations, which are all state-specific (finding S4).
+    const state = document.getElementById('ob-state')?.value || '';
+    if (!isValidState(state)) { toast('Please select the state where you practice.'); return; }
+
     // The BAA/EULA acknowledgment is a hard gate: onboarding cannot complete
     // without it, because the Rust gate (baa::require_ack) would otherwise
     // reject the user's first note generation with an opaque BaaRequired error.
@@ -114,6 +130,7 @@ export async function wireOnboarding(onComplete) {
       name,
       credentials: document.getElementById('ob-creds')?.value.trim() || '',
       specialty:   document.getElementById('ob-specialty')?.value || 'psychiatry',
+      state,
     };
     try {
       await invoke('set_provider_profile', { profile });
