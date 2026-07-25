@@ -24,6 +24,12 @@ import { hashHistoryEntry, verifyHistoryChain } from '../utils/contentHash.js';
 import { keys } from '../data/keys.js';
 import { nowISO } from '../utils/format.js';
 import { invoke, isTauri } from '../platform/tauri.js';
+import { mapLimit } from '../utils/asyncPool.js';
+
+// How many per-encounter integrity checks run concurrently during a full-DB
+// sweep. Bounded so a large record set doesn't fan out into unbounded in-flight
+// IPC; high enough to hide per-call latency.
+const CHAIN_SWEEP_CONCURRENCY = 16;
 
 // In-memory mirror of note_history rows keyed by encounterId. Populated by
 // loadHistory(); mutated on successful appendHistoryEntry(). Without this,
@@ -138,8 +144,10 @@ export async function verifyAllChains() {
       .map(k => k.slice(prefix.length));
   }
 
-  const results = [];
-  for (const encounterId of encounterIds) {
+  // Bounded-concurrency sweep instead of one strictly-sequential IPC round-trip
+  // per encounter (audit perf finding #12): the per-encounter fetch+verify are
+  // independent, so up to CHAIN_SWEEP_CONCURRENCY run at once.
+  const results = await mapLimit(encounterIds, CHAIN_SWEEP_CONCURRENCY, async encounterId => {
     let history;
     if (isTauri) {
       // Deliberately not loadHistory(): that reads through the in-memory
@@ -150,8 +158,8 @@ export async function verifyAllChains() {
       history = kvGet(keys.noteHistory(encounterId)) || [];
     }
     const verdict = await verifyHistoryChain(history);
-    results.push({ encounterId, ...verdict });
-  }
+    return { encounterId, ...verdict };
+  });
 
   const broken = results.filter(r => !r.ok);
   return {

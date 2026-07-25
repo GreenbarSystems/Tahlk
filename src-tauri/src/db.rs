@@ -199,6 +199,10 @@ const SCHEMA_TABLES: &str = "
     CREATE INDEX IF NOT EXISTS enc_date_idx ON encounters (encounter_date DESC);
     CREATE INDEX IF NOT EXISTS enc_status_idx ON encounters (status);
     CREATE INDEX IF NOT EXISTS enc_created_idx ON encounters (created_at DESC);
+    -- patient_id is filtered by the destroy-preview count and the cascade-destroy
+    -- collection (patients.rs: count_linked_encounters / destroy_patient_records),
+    -- which otherwise full-scan encounters (audit perf finding, Low-Medium).
+    CREATE INDEX IF NOT EXISTS enc_patient_idx ON encounters (patient_id);
 
     CREATE TABLE IF NOT EXISTS patients (
         id         TEXT PRIMARY KEY,
