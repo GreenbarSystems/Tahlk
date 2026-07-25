@@ -21,7 +21,7 @@
 | LEG-3 | Patient privacy notice — finalize & adopt | Legal + Product | _tbd_ | _tbd_ | ⊘ |
 | OPS-1 | Endpoint-hygiene setup requirements | Operational | _practice_ | ongoing | ◐ |
 | OPS-2 | Screen-share / on-screen content protection | Engineering / Ops | Claude Code | this cycle | ☑ |
-| OPS-3 | Encrypted backup & recovery | Engineering / Ops | _tbd_ | _tbd_ | ◐ |
+| OPS-3 | Encrypted backup & recovery | Engineering / Ops | Claude Code | this cycle | ☑ |
 
 ---
 
@@ -106,13 +106,14 @@
 - [ ] *Follow-up (tracked, not blocking this item's close):* implement the opt-in toggle (`set_content_protected` wrapper + Settings persistence).
 **Closed by:** ADR 0007 + §3.4 this cycle. **References:** `docs/adr/0007-window-content-protection.md`, `docs/security/hipaa-risk-assessment.md` §3.4.
 
-### OPS-3 — Encrypted backup & recovery &nbsp; ◐ documented; export feature open
+### OPS-3 — Encrypted backup & recovery &nbsp; ☑ done (export shipped; restore is a follow-up)
 **Finding:** Contingency (§164.308(a)(7)) — the encrypted database is the single critical asset with no in-app backup.
-**What / why:** Loss of the device or the key is unrecoverable without a provider-maintained backup. Planned remediation is an in-app "export encrypted backup" feature; until then, the practice must maintain and periodically test an encrypted backup.
+**Outcome:** the in-app **encrypted backup export** is built (Settings → Encrypted backup; [ADR 0008](../adr/0008-encrypted-backup-export.md)) — a single passphrase-encrypted SQLCipher file via `sqlcipher_export`, recoverable with the passphrase alone. Practice responsibility (store securely, remember passphrase, test recovery) is documented.
 **Status:**
-- [x] Interim: backup responsibility, disaster-recovery, and restore-testing are documented for the practice in `hipaa-risk-assessment.md` §5 (Contingency plan).
-- [ ] *Open (engineering enhancement):* the in-app "export encrypted backup" feature is scoped in §5's planned remediation but not built. Tracked here as the remaining sub-part.
-**References:** `docs/security/hipaa-risk-assessment.md` §5.
+- [x] Interim guidance documented (`hipaa-risk-assessment.md` §5).
+- [x] In-app "export encrypted backup" feature built — `backup.rs` (`export_encrypted_backup`), Settings UI, ADR 0008. Passphrase-keyed, separate from the login password, refuses to overwrite the live DB, metadata-only audit log. Tests: passphrase validation, SQL escaping, and a SQLCipher export→reopen round-trip (incl. wrong-passphrase rejection).
+- [ ] *Follow-up (tracked, not blocking this close):* an in-app **restore** flow (import a backup + re-wrap the DEK under the install's password). The exported file is a standard SQLCipher DB, recoverable with the passphrase meanwhile.
+**Closed by:** this cycle (see PR). **References:** `src-tauri/src/backup.rs`, `docs/adr/0008-encrypted-backup-export.md`, `docs/security/hipaa-risk-assessment.md` §5.
 
 ---
 

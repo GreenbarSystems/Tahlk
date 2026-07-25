@@ -597,16 +597,18 @@ profile name exists, which onboarding requires. Hash-chaining makes the
 here for the first time.**
 
 **Data backup plan (required):** Tahlk Solo has no Tahlk-operated backend
-and no built-in backup mechanism — the entire patient record for every
+and no Tahlk-operated backend — the entire patient record for every
 encounter (signed notes, transcripts, audit history, provider/patient
-records) lives in a single SQLCipher database file on one device. **The
-provider/practice is responsible for backing up this file** using their own
-encrypted backup solution (e.g., an encrypted external drive, encrypted
-cloud backup software the practice has separately vetted for HIPAA
-suitability). Tahlk does not currently provide an in-app export mechanism
-for a portable *encrypted* backup (the only export paths today — Flow C —
-produce unencrypted note files, not a full encrypted database backup, and are
-not a substitute for this).
+records) lives in a single SQLCipher database file on one device. Tahlk now
+provides an in-app **encrypted backup export** (Settings → Encrypted backup;
+[ADR 0008](../adr/0008-encrypted-backup-export.md)): a single, self-contained
+SQLCipher file keyed under a provider-chosen backup passphrase, produced via
+`sqlcipher_export`, recoverable with that passphrase alone (independent of the
+device's key/keychain/wraps). This is distinct from the Flow C note exports,
+which are unencrypted and not a full-database backup. **The provider/practice
+remains responsible for running the export regularly, storing the file
+securely (encrypted drive or vetted encrypted cloud), remembering the backup
+passphrase (Tahlk cannot recover it), and periodically testing recovery.**
 
 **Disaster recovery plan (required):** If the device is lost, stolen, or
 suffers disk failure, or if the OS keychain entry holding the database
@@ -633,11 +635,11 @@ equivalent to losing every patient record the practice has in Tahlk. No
 other component (whisper model, app binary, config) contains PHI or is
 irreplaceable by reinstalling.
 
-**Planned remediation (tracked, not yet built):** an in-app "export encrypted
-backup" feature producing a portable, still-encrypted copy of the database to
-a provider-chosen destination, distinct from the unencrypted note-export flow
-in Flow C — improving real-world recoverability without contradicting the
-local-first architecture.
+**Shipped (ADR 0008):** the in-app encrypted backup export described above.
+**Remaining follow-up:** an in-app *restore* flow (importing a backup into an
+install and re-wrapping the DEK under that install's password). Until it ships,
+the exported file is a standard passphrase-encrypted SQLCipher database,
+recoverable with SQLCipher tooling in a recovery scenario.
 
 ---
 
