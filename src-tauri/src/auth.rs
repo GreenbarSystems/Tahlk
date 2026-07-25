@@ -470,6 +470,15 @@ pub(crate) const AUTH_AUDIT_EVENTS: &[&str] = &[
     "pin_cleared",              // idle-lock PIN removed (also disables the lock)
     "session_locked",           // idle-lock activation (auto-logoff)
     "nuke_reinstall",           // irreversible wipe attempt
+    // Backup restore (ADR 0009, audit finding #2). `restore_staged` is written
+    // by the Settings command while the session is healthy and unlocked — the
+    // reliable, compliance-grade record that a provider initiated a full-record
+    // restore. `restore_applied` is written best-effort at the next launch when
+    // the staged copy is actually swapped in. Both live in the wraps DB, which
+    // restore does NOT replace, so they survive the swap that overwrites
+    // everything in tahlk.db.
+    "restore_staged",
+    "restore_applied",
 ];
 
 /// Valid `outcome` values.

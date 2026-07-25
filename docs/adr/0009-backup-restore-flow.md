@@ -64,14 +64,40 @@ enhancement to both export and restore.
 ### Confirmation
 
 Restore requires the backup **passphrase** and a **typed `RESTORE` confirmation**
-in the UI. A `.pre-restore.bak` safety copy of the prior database is kept.
+in the UI. A `.pre-restore.bak` safety copy of the prior database is kept only
+until the restored DB opens cleanly, then zeroed and removed.
+
+### Accountability (audit finding #2)
+
+A restore replaces the **entire** record DB — every table and every audit
+trail. Because the restored copy is a legitimate prior export, its internal
+hash-chains verify clean, so the chains alone cannot distinguish a normal launch
+from a substitution of an older, more favourable record set. Restore is
+therefore recorded on two independent surfaces, neither of which the swap itself
+overwrites:
+
+- **`restore_staged`** — written to the wraps DB (`tahlk_auth.db`) by the
+  Settings command while the session is healthy and unlocked. This is the
+  reliable, compliance-grade record that a provider initiated a full-record
+  restore (recorded on failed attempts too). The wraps DB is not part of the
+  swap, so it survives.
+- **`database_restored`** — a `config_audit` row written into the **restored DB
+  itself** at the next launch when the staged copy is applied, plus a
+  best-effort `restore_applied` wraps-DB event. This marks the live DB an
+  auditor inspects as having been installed via restore.
+
+Detecting a *filesystem-level* substitution of `tahlk.db` (an attacker with no
+DEK swapping in an older ciphertext DB out-of-band) is a separate control
+tracked as anti-rollback detection; see AUDIT-RESIDUAL-RISK.md.
 
 ## Consequences
 
-- The §164.308(a)(7) contingency plan now has both halves: export and restore.
+- The §164.308(a)(7) contingency plan now has both halves: export and restore,
+  and a restore is durably accounted for (finding #2).
 - Recovery depends on the provider remembering the backup passphrase.
-- A `.pre-restore.bak` accumulates after a restore (safe — SQLCipher-encrypted
-  under the DEK); cleaning it up is a minor future nicety.
+- The `.pre-restore.bak` is bounded to the session in which the restore applied
+  rather than retained indefinitely, so a full DEK-encrypted copy of the prior
+  record set does not linger outside the retention/destruction machinery.
 - Rejected: **immediate in-session swap** (destructive step runs live, untestable
   here); **replacing `tahlk_auth.db` too** (the backup has no wraps and the
   passphrase is not the login password); **restore-into-fresh-install with a new
