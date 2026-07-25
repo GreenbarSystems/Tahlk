@@ -112,8 +112,9 @@
 **Status:**
 - [x] Interim guidance documented (`hipaa-risk-assessment.md` §5).
 - [x] In-app "export encrypted backup" feature built — `backup.rs` (`export_encrypted_backup`), Settings UI, ADR 0008. Passphrase-keyed, separate from the login password, refuses to overwrite the live DB, metadata-only audit log. Tests: passphrase validation, SQL escaping, and a SQLCipher export→reopen round-trip (incl. wrong-passphrase rejection).
-- [ ] *Follow-up (tracked, not blocking this close):* an in-app **restore** flow (import a backup + re-wrap the DEK under the install's password). The exported file is a standard SQLCipher DB, recoverable with the passphrase meanwhile.
-**Closed by:** this cycle (see PR). **References:** `src-tauri/src/backup.rs`, `docs/adr/0008-encrypted-backup-export.md`, `docs/security/hipaa-risk-assessment.md` §5.
+- [x] In-app **restore** built ([ADR 0009](../adr/0009-backup-restore-flow.md)) — `stage_backup_restore` (non-destructive) re-keys the backup into this install's DEK; a crash-safe staged swap in `db::open_database_with_dek` (`apply_pending_restore`) applies it on next launch, keeping a `.pre-restore.bak`. Passphrase + typed-`RESTORE` confirmation in Settings. **Records only** — audio is not in the backup (documented). Tests: re-key round-trip, wrong-passphrase rejection, swap-keeps-bak, unreadable-pending-discarded, no-op-without-pending.
+- [ ] *Optional future enhancements:* bundle audio into export/restore; auto-clean the `.pre-restore.bak`.
+**Closed by:** this cycle (see PRs). **References:** `src-tauri/src/backup.rs`, `src-tauri/src/db.rs`, `docs/adr/0008-encrypted-backup-export.md`, `docs/adr/0009-backup-restore-flow.md`, `docs/security/hipaa-risk-assessment.md` §5.
 
 ---
 
