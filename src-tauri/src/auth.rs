@@ -1011,7 +1011,7 @@ pub(crate) fn auth_unlock_password(
         record_auth_event(&app, "unlock_password", "failure");
     })?);
     crate::throttle::record_success(THROTTLE_UNLOCK);
-    let hex_key = Zeroizing::new(to_hex(&dek));
+    let hex_key = Zeroizing::new(to_hex(&dek[..]));
     // Publish before the audio migration below, which calls audio_key().
     set_session_dek_hex(&hex_key);
 
@@ -1097,7 +1097,7 @@ pub(crate) fn auth_unlock_recovery(app: AppHandle, code: String) -> Result<(), A
         record_auth_event(&app, "unlock_recovery", "failure");
     })?);
     crate::throttle::record_success(THROTTLE_UNLOCK);
-    set_session_dek_hex(&Zeroizing::new(to_hex(&dek)));
+    set_session_dek_hex(&Zeroizing::new(to_hex(&dek[..])));
     record_auth_event(&app, "unlock_recovery", "success");
     Ok(())
 }
