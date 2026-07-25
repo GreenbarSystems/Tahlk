@@ -196,8 +196,34 @@ pub(crate) fn baa_ack_set(
         attestation_version: ATTESTATION_VERSION,
     };
     let json = serde_json::to_string(&ack).map_err(AppError::internal_from)?;
-    let conn = state.conn()?;
-    crate::kv_ops::upsert_json(&conn, BAA_ACK_KEY, &json)
+    let mut conn = state.conn()?;
+    let tx = conn.transaction()?;
+    // Record the accept/decline in the same transaction as the write so the ack
+    // LIFECYCLE (not just current state) is reconstructable (audit finding, Low).
+    let old = current_ack_label(&tx);
+    crate::kv_ops::upsert_json(&tx, BAA_ACK_KEY, &json)?;
+    let actor = crate::kv_ops::provider_id(&tx);
+    crate::config_audit::append(
+        &tx,
+        "baa_ack_changed",
+        old.as_deref(),
+        if acknowledged { "acknowledged" } else { "declined" },
+        &actor,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Current ack state as a short label for a config-audit `old_value`, or `None`
+/// when no ack row exists. Best-effort: a malformed row reads as no prior state.
+fn current_ack_label(conn: &rusqlite::Connection) -> Option<String> {
+    let json: String = conn
+        .query_row("SELECT value FROM kv WHERE key = ?1", params![BAA_ACK_KEY], |r| r.get(0))
+        .optional()
+        .ok()
+        .flatten()?;
+    let ack: BaaAck = serde_json::from_str(&json).ok()?;
+    Some(if ack.acknowledged { "acknowledged".to_string() } else { "declined".to_string() })
 }
 
 /// #[tauri::command] wrapper — clears the ack. Idempotent (no error if
@@ -205,8 +231,17 @@ pub(crate) fn baa_ack_set(
 /// re-attest after a BAA renegotiation, or by uninstall/reset flows.
 #[tauri::command]
 pub(crate) fn baa_ack_clear(state: State<DbState>) -> Result<(), AppError> {
-    let conn = state.conn()?;
-    crate::kv_ops::delete_by_key(&conn, BAA_ACK_KEY)?;
+    let mut conn = state.conn()?;
+    let tx = conn.transaction()?;
+    let old = current_ack_label(&tx);
+    crate::kv_ops::delete_by_key(&tx, BAA_ACK_KEY)?;
+    // Only record a clear when there was an ack to clear — an idempotent clear of
+    // an already-absent row is not a lifecycle transition worth a row.
+    if old.is_some() {
+        let actor = crate::kv_ops::provider_id(&tx);
+        crate::config_audit::append(&tx, "baa_ack_changed", old.as_deref(), "cleared", &actor)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 

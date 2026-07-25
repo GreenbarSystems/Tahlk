@@ -177,16 +177,34 @@ pub(crate) fn guard_key(key: &str) -> Result<(), AppError> {
 /// cache warmup path (`kvGet()` in JS) is undisturbed.
 #[tauri::command]
 pub(crate) fn set_provider_profile(state: State<DbState>, profile: Value) -> Result<(), AppError> {
-    match profile["name"].as_str() {
-        Some(n) if !n.trim().is_empty() => {}
+    let new_name = match profile["name"].as_str() {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => return Err(AppError::invalid("provider profile name is required")),
-    }
+    };
     let json = serde_json::to_string(&profile).map_err(AppError::internal_from)?;
     if json.len() > crate::kv::MAX_KV_VALUE_BYTES {
         return Err(AppError::invalid("provider profile value too large"));
     }
-    let conn = state.conn()?;
-    crate::kv_ops::upsert_json(&conn, NOTE_PROVIDER_PROFILE_KEY, &json)
+    let mut conn = state.conn()?;
+    let tx = conn.transaction()?;
+    // The provider name is the actor stamped on every patient audit entry
+    // (kv_ops::provider_id). Record a change to it in the same transaction as the
+    // write, so the audit trail carries a linking event rather than silently
+    // switching attribution (audit finding, Low). `provider_id` reads the CURRENT
+    // (pre-write) name, falling back to "provider" when none is set yet.
+    let old_name = crate::kv_ops::provider_id(&tx);
+    crate::kv_ops::upsert_json(&tx, NOTE_PROVIDER_PROFILE_KEY, &json)?;
+    if old_name != new_name {
+        crate::config_audit::append(
+            &tx,
+            "provider_identity_changed",
+            Some(&old_name),
+            &new_name,
+            &new_name,
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
