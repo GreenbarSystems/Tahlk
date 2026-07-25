@@ -97,6 +97,52 @@ pub(crate) fn dek_entry_exists() -> bool {
         .is_ok()
 }
 
+/// Reconcile the ADR-0004 invariant that, once auth is configured, the plaintext
+/// DEK is **not** left in the OS keychain (audit finding #6).
+///
+/// `auth_set_password` deletes the keychain DEK only best-effort: a transient
+/// keychain error, or a crash after the wraps rows commit but before the delete,
+/// leaves the plaintext DEK in the keychain, and — because `is_auth_configured`
+/// is then already true — nothing ever revisited it. That silently voids the
+/// core "device theft + keychain export no longer yields the DB" property.
+///
+/// Run this on every launch. When auth is configured and the entry is still
+/// present it is removed here (so a setup-time failure self-heals on the next
+/// launch); a leftover that is present but **cannot** be removed is escalated to
+/// the caller as an error rather than swallowed as a warning. A keychain that is
+/// merely unreadable (backend unreachable) is not treated as a leftover — we
+/// cannot confirm the key is present, and blocking startup on a flaky keychain
+/// would be worse than the residual it guards against.
+pub(crate) fn reconcile_keychain_dek_absent() -> Result<(), AppError> {
+    // Before first-open setup, the keychain DEK is the legitimate storage
+    // location — nothing to reconcile.
+    if !crate::auth::is_auth_configured() {
+        return Ok(());
+    }
+    let entry = keyring_entry()?;
+    match entry.get_password() {
+        // Present: a setup-time delete didn't stick. Remove it now; if it still
+        // cannot be removed, surface that as an error (finding #6).
+        Ok(_) => {
+            entry.delete_credential().map_err(|e| {
+                AppError::internal_from(format!(
+                    "auth is configured but the plaintext database key is still in the OS \
+                     keychain and could not be removed: {e}"
+                ))
+            })?;
+            log::warn!("removed a leftover plaintext keychain data key (post-setup reconcile)");
+            Ok(())
+        }
+        // Confirmed absent — the invariant already holds.
+        Err(keyring::Error::NoEntry) => Ok(()),
+        // Backend unreadable — cannot confirm presence; do not block startup.
+        Err(e) => {
+            log::warn!("keychain data-key reconcile: could not read the keychain: {e}");
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
