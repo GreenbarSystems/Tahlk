@@ -238,6 +238,15 @@ the underlying event occurred):
 | HHS | §164.408 | Annual log if <500 individuals; without unreasonable delay (≤60 days) if ≥500 |
 | Covered entity (if Greenbar is acting as a business associate for the affected flow) | §164.410 | Without unreasonable delay, no later than 60 days |
 
+**State law adds to this table — do not stop at HIPAA.** All 50 states have
+their own breach-notification statutes, several with **shorter deadlines** (30
+or 45 days) and **state Attorney-General** notice thresholds HIPAA does not
+impose. State law is keyed to the affected individuals' **state of residence**,
+and the most protective obligation generally governs. Work through the
+[state breach-notification decision aid](./state-breach-notification-matrix.md)
+for every implicated state before the clock in the table above is your only
+deadline (finding S5).
+
 **Division of responsibility** (per hipaa-risk-assessment.md §6). Two facts
 set who owes what, and they now point in different directions depending on
 where the incident sits:
