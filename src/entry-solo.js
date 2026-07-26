@@ -91,10 +91,6 @@ async function bootstrap() {
   await kvWarmup();
   installSoloCapabilities();
   await wireClipboardClearOnExit();
-  // Idle lock is ON by default now (M4). Start the watcher unconditionally;
-  // it re-reads isLockEnabled() on every tick, so a provider disabling it in
-  // Settings takes effect without a restart.
-  startIdleWatcher(() => { handleIdleLock(); });
   await telemetry.init();   // opt-in gated; subscribes to the bus, records nothing unless enabled
 
   const authConfigured = await authRepo.isConfigured();
@@ -109,6 +105,18 @@ async function bootstrap() {
   } else {
     await new Promise(resolve => showSignInScreen(resolve));
   }
+
+  // Idle lock is ON by default now (M4), but it must not arm until the startup
+  // auth flow above has actually finished. Armed earlier, the timer could fire
+  // while first-open setup was still on screen and swap it for a sign-in prompt
+  // asking for a password that does not exist yet — an un-configured provider
+  // would be stuck there until they restarted the app. There is also nothing to
+  // protect before this point: the session DEK is only derived once the flow
+  // above resolves, so no PHI is reachable while those screens are up.
+  // Still started unconditionally from here on: the watcher re-reads
+  // isLockEnabled() on every tick, so a provider disabling it in Settings takes
+  // effect without a restart.
+  startIdleWatcher(() => { handleIdleLock(); });
 
   if (!isOnboarded()) {
     document.getElementById('app').innerHTML = renderOnboarding();
