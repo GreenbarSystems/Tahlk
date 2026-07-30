@@ -383,8 +383,15 @@ mod tests {
     // publish a session DEK race each other — a split version passed a full run
     // and failed under `--exact` filtering. Sequencing the whole scenario in a
     // single test makes the assertions deterministic.
+    //
+    // Collapsing to one test was necessary but not sufficient: `auth`'s
+    // clear_session_dek test drives the same global from another module, so the
+    // shared lock below is what actually serializes them. Without it, a clear()
+    // landing mid-test sends audio_key() to the OS keychain — which in CI can
+    // block indefinitely on D-Bus.
     #[test]
     fn audio_key_resolves_from_session_dek_and_survives_password_setup() {
+        let _guard = crate::auth::session_dek_test_lock();
         // 1. Resolution order: with a session DEK published, audio_key() must
         //    derive from it and never consult the keychain.
         crate::auth::set_session_dek_hex(&test_dek());

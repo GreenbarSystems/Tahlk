@@ -703,6 +703,23 @@ pub(crate) fn session_dek_hex() -> Option<String> {
 /// Zero the in-memory session DEK. Called by the idle-lock path (M4) so the
 /// key no longer lives in process memory once the screen locks; re-unlock
 /// (`auth_unlock_password`) re-derives and re-publishes it. Dropping the stored
+/// Serializes every test that reads or writes the process-global
+/// `SESSION_DEK_HEX`, across modules.
+///
+/// `cargo test` runs tests on multiple threads by default, so `auth`'s
+/// clear-the-DEK test and `audio_crypto`'s key-resolution test were racing on
+/// the same static. The loser saw `None` and fell through to the OS keychain —
+/// a real hazard rather than a flaky assertion, because in CI that path can
+/// block indefinitely on D-Bus (see the `Run Rust tests` comment in ci.yml).
+///
+/// Recovers from poisoning rather than propagating it: a panic in one test
+/// must not cascade into unrelated failures that obscure the original.
+#[cfg(test)]
+pub(crate) fn session_dek_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// `Zeroizing<String>` overwrites the hex bytes in place before freeing, so the
 /// key does not survive in freed heap (audit finding #4).
 pub(crate) fn clear_session_dek() {
@@ -1929,7 +1946,15 @@ mod tests {
 
     #[test]
     fn clear_session_dek_removes_the_in_memory_key() {
-        // Serialized implicitly: this is the only test touching SESSION_DEK_HEX.
+        // Was "the only test touching SESSION_DEK_HEX" — that was wrong.
+        // audio_crypto's key-resolution test drives the same global, and cargo
+        // runs them on different threads. If this clear() landed between that
+        // test's set_session_dek_hex() and its audio_key(), the call fell
+        // through to the OS keychain — which in CI is the D-Bus path that can
+        // block indefinitely (see the "Run Rust tests" comment in ci.yml). So
+        // this was not only test hygiene: it was one contributor to the
+        // intermittent CI hang.
+        let _guard = session_dek_test_lock();
         set_session_dek_hex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
         assert!(session_dek_hex().is_some(), "DEK must be present after publish");
         clear_session_dek();
