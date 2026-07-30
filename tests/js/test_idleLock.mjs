@@ -205,3 +205,88 @@ test('re-enabling after being disabled at start requires a fresh activity event 
   assert.equal(fired, false, 'enabling alone does not retroactively arm an unarmed timer');
   stop();
 });
+
+// ── Wall-clock watchdog: sleep / hibernate / throttled timers ───────────────
+//
+// A pending setTimeout does not run while the machine is suspended, so the
+// idle timer alone cannot be relied on to have fired. The heartbeat detects
+// the resume as a gap in real time and locks — this is the case the OS sleep
+// setting was previously covering by itself.
+
+test('resuming after a long suspend locks, whichever guard notices first', t => {
+  installFakeDocument();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  setLockEnabled(true);
+  setLockTimeoutMinutes(5);
+
+  let reason = null;
+  const stop = startIdleWatcher(r => { reason = r; });
+
+  // Jump the clock WITHOUT running timers — this is what suspend looks like:
+  // real time passed, our callbacks did not run.
+  t.mock.timers.setTime(Date.now() + 30 * 60_000);
+  t.mock.timers.tick(15_000);
+
+  // The reason is 'idle' here, not 'suspend', and that is correct: an overdue
+  // setTimeout runs as soon as the platform resumes it, so the idle timer wins
+  // the race. Asserting 'suspend' would pin an ordering that is neither
+  // guaranteed nor important — what matters is that the session locked.
+  assert.ok(reason, 'a resumed machine must not still be unlocked');
+  stop();
+});
+
+// The heartbeat's own path, isolated. Leaving setTimeout REAL means the idle
+// timer cannot fire inside a synchronous test, so only the watchdog can lock —
+// which is precisely the production case it exists for: a WebView that drops
+// or indefinitely throttles background timers rather than merely delaying
+// them. Without the heartbeat, that app resumes hours later still unlocked.
+test('the watchdog locks on a clock jump even when the idle timer never fires', t => {
+  installFakeDocument();
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+  setLockEnabled(true);
+  setLockTimeoutMinutes(5);
+
+  let reason = null;
+  const stop = startIdleWatcher(r => { reason = r; });
+
+  t.mock.timers.setTime(Date.now() + 30 * 60_000);
+  t.mock.timers.tick(15_000);
+
+  assert.equal(reason, 'suspend', 'the heartbeat must lock on its own when setTimeout is unreliable');
+  stop();
+});
+
+test('a short wall-clock gap inside the idle window does not lock', t => {
+  installFakeDocument();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  setLockEnabled(true);
+  setLockTimeoutMinutes(60);
+
+  let reason = null;
+  const stop = startIdleWatcher(r => { reason = r; });
+
+  // A 5-minute suspend is well inside a 60-minute idle tolerance. Reusing the
+  // provider's own setting means there is one number to reason about, not two.
+  t.mock.timers.setTime(Date.now() + 5 * 60_000);
+  t.mock.timers.tick(15_000);
+
+  assert.equal(reason, null, 'a gap shorter than the provider-configured idle window is not a lock event');
+  stop();
+});
+
+test('the watchdog never locks out from under an active recording', t => {
+  installFakeDocument();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  setLockEnabled(true);
+  setLockTimeoutMinutes(2);
+
+  let reason = null;
+  const stop = startIdleWatcher(r => { reason = r; });
+  emit('scribe:recording_started', {});
+
+  t.mock.timers.setTime(Date.now() + 60 * 60_000);
+  t.mock.timers.tick(15_000);
+
+  assert.equal(reason, null, 'a recording defers the watchdog exactly as it defers the idle timer');
+  stop();
+});
