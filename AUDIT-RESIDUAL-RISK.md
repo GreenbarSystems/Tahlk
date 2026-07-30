@@ -123,6 +123,39 @@ which the app forces on next launch.
 
 The `note_history` and `note_audit` audit chains are integrity-protected in two layers: a SHA-256 hash chain (each row commits to its payload and the prior row's hash) and a keyed HMAC per row (`audit_mac.rs`, keyed by an HKDF-derived value rooted in the SQLCipher DEK). Together these detect **substitution** and **edit** of any stored row. They do **not** detect **truncation** of the newest rows: a MAC-valid prefix of a chain is still MAC-valid, so an actor who drops the trailing entries leaves a chain that verifies clean.
 
+### Update — a bypass that was never accepted, and an acceptance that was too broad
+
+An external architecture audit's tampering cases were re-executed against this
+codebase rather than reasoned about. Two findings resulted.
+
+**First, a bypass nobody had accepted.** Both `verifyAuditChain` and
+`verifyHistoryChain` carried a "legacy" exemption skipping an entry that lacked
+`entryHash` before the chain started. Stripping the field from *every* entry
+meant the chain never started, every row was skipped, and the whole log
+verified clean. Deleting the integrity metadata was a way to satisfy the
+integrity check — no key, no forgery, no cryptography. Both hatches are now
+removed; a missing `entryHash` is a broken chain wherever it appears. Pinned by
+`tests/js/test_auditChain_tampering.mjs`.
+
+**Second, this acceptance conflated two threats.** The reasoning below — that
+the tamperer and the key-holder are the same party on a single-user local-first
+app — is sound for *deliberate* tampering. It does not cover **accidental
+loss**: a partial write, a failed restore, a truncated backup, a sync that
+dropped rows. There nobody is attacking anything, and a short or emptied
+history simply read as clean, because the chain has no idea how long it is
+supposed to be.
+
+`verifyAuditChain` now accepts `{ expectedCount, expectedHead }` and fails when
+either disagrees with the log. **Remaining work: persist that anchor on the
+encounter row and pass it at every call site.** Until that lands, truncation
+detection is available but not enforced end to end, and the acceptance below
+still governs in practice.
+
+What genuinely remains accepted is forgery by an actor holding the DEK.
+`entryHash` is an unkeyed SHA-256 over public fields, so key access permits
+recomputing the chain; `audit_mac.rs` raises the bar to "needs the key" but
+cannot go further on a device where the key lives.
+
 ### Why it is accepted, not fixed
 
 An external "tip anchor" (a sidecar file recording each signed chain's expected tail) was prototyped to close this and then **removed as over-engineered for this deployment model**, for two reasons:

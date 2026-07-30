@@ -51,12 +51,13 @@ export async function verifyHistoryChain(history) {
   let legacySkipped = 0;
   for (let i = 0; i < history.length; i++) {
     const e = history[i];
+    // Same removal as verifyAuditChain's, for the same reason and with the
+    // same evidence. This verifier carried an identical "legacy" hatch, so
+    // stripping entryHash from every history row also downgraded the whole
+    // chain to a clean pass. Hardening one verifier and leaving its twin open
+    // would have been worse than fixing neither, because it would look done.
     if (!e.entryHash) {
-      if (chainStarted) {
-        return { ok: false, brokenAt: i, reason: 'missing entryHash after chain start', legacySkipped };
-      }
-      legacySkipped++;
-      continue;
+      return { ok: false, brokenAt: i, reason: 'missing entryHash', legacySkipped };
     }
     const expected = await hashHistoryEntry(e, e.prevHash ?? null);
     if (expected !== e.entryHash) {
@@ -133,9 +134,38 @@ export async function hashAuditEntry(entry, prevHash) {
 // external anchor instead of requiring it to be null. Full end-to-end
 // verification (detecting whether that external anchor is itself correct)
 // requires walking archive+live together, e.g. verifyAuditChain([...archive, ...live]).
+// options.expectedCount / options.expectedHead: the anchor. A hash chain
+// cannot detect its own truncation — a valid prefix of a valid chain is itself
+// a valid chain, so dropping the newest entries leaves something that verifies
+// clean, and an emptied log verifies cleanest of all. Detecting removal needs
+// a value recorded OUTSIDE the log: how many entries there should be, and what
+// the head should hash to. Callers holding those (persisted on the encounter
+// row) should pass them; the check degrades to linkage-only without them,
+// which is what every pre-anchor caller already got.
+//
+// This matters for accidental loss as much as for tampering — a partial write,
+// a failed restore, a truncated backup. Without the anchor a short history is
+// indistinguishable from a complete one, and nothing surfaces the discrepancy.
 export async function verifyAuditChain(log, options = {}) {
   const allowPartial = options.allowPartial ?? false;
-  if (!Array.isArray(log) || !log.length) return { ok: true, legacySkipped: 0, scrubbedSkipped: 0 };
+  const expectedCount = options.expectedCount ?? null;
+  const expectedHead = options.expectedHead ?? null;
+
+  if (!Array.isArray(log)) {
+    return { ok: false, brokenAt: 0, reason: 'audit log is not an array', legacySkipped: 0, scrubbedSkipped: 0 };
+  }
+  // Anchor check first: an emptied or shortened log must fail before the loop
+  // gets a chance to find nothing wrong with it.
+  if (expectedCount !== null && log.length !== expectedCount) {
+    return {
+      ok: false,
+      brokenAt: Math.min(log.length, expectedCount),
+      reason: `entry count ${log.length} does not match the recorded ${expectedCount}`,
+      legacySkipped: 0,
+      scrubbedSkipped: 0,
+    };
+  }
+  if (!log.length) return { ok: true, legacySkipped: 0, scrubbedSkipped: 0 };
   let prevHash = null;
   let chainStarted = false;
   let legacySkipped = 0;
@@ -145,12 +175,23 @@ export async function verifyAuditChain(log, options = {}) {
   let scrubbedSkipped = 0;
   for (let i = 0; i < log.length; i++) {
     const e = log[i];
+    // A missing entryHash is a broken chain, wherever it appears.
+    //
+    // This used to be a "legacy" escape hatch: an unhashed entry before the
+    // chain started was skipped, on the theory that pre-upgrade rows predate
+    // hashing. That made removing integrity metadata a way to SATISFY the
+    // integrity check — strip entryHash from every entry and the loop never
+    // starts, so every row is skipped and the whole log verifies clean. An
+    // attacker did not have to forge the chain or hold any key; they deleted
+    // it and the hatch waved the remains through. The same trick prepended
+    // fabricated rows in front of a genuine chain.
+    //
+    // The hatch is gone. Legacy rows, if any are ever found, must be migrated
+    // explicitly with a recorded migration event rather than silently excused
+    // at verification time — an exemption that cannot be distinguished from an
+    // attack is not an exemption worth having.
     if (!e.entryHash) {
-      if (chainStarted) {
-        return { ok: false, brokenAt: i, reason: 'missing entryHash after chain start', legacySkipped, scrubbedSkipped };
-      }
-      legacySkipped++;
-      continue;
+      return { ok: false, brokenAt: i, reason: 'missing entryHash', legacySkipped, scrubbedSkipped };
     }
     // A scrubbed row's entry_json is the destruction tombstone: the content
     // the hash covers was lawfully wiped, so it CANNOT be recomputed and a
@@ -165,7 +206,14 @@ export async function verifyAuditChain(log, options = {}) {
     // whole chain, since entryHash is a plain SHA-256 over public fields with
     // no signing key. This chain detects accidental corruption and casual
     // tampering, not a deliberate rewrite by someone holding the DEK.
-    if (e.scrubbed) {
+    // The exemption is limited to rows that actually look like destruction
+    // tombstones. `scrubbed` alone was a blanket waiver: setting it on a
+    // REWRITTEN row exempted that rewrite from content verification while its
+    // linkage still checked out, so the result read as a clean pass. Requiring
+    // the destruction marker means the flag can only excuse a row that claims
+    // to be what the exemption exists for. A row wearing `scrubbed` without it
+    // is content-verified like any other, and fails if it was altered.
+    if (e.scrubbed && e.destroyed === true) {
       scrubbedSkipped++;
     } else {
       const expected = await hashAuditEntry(e, e.prevHash ?? null);
@@ -182,6 +230,17 @@ export async function verifyAuditChain(log, options = {}) {
     }
     chainStarted = true;
     prevHash = e.entryHash;
+  }
+  // The head must match the recorded anchor. Count alone is not sufficient:
+  // removing one entry and appending a fabricated one preserves the count.
+  if (expectedHead !== null && prevHash !== expectedHead) {
+    return {
+      ok: false,
+      brokenAt: log.length - 1,
+      reason: 'chain head does not match the recorded head',
+      legacySkipped,
+      scrubbedSkipped,
+    };
   }
   return { ok: true, legacySkipped, scrubbedSkipped };
 }
