@@ -28,14 +28,26 @@ const MAX_TIMEOUT_MINUTES = 60;
 // mouse, a stuck key, or a screen-sharing tool keeps producing events. This is
 // the control that bounds how long a single unlock is worth.
 //
-// Deliberately a CONSTANT, not a setting. The idle timeout is tunable because
-// clinics legitimately differ on it; a hard ceiling is a compliance floor, and
-// making it configurable would mean a third audited Rust setter plus a
-// protected KV key whose only purpose is letting someone raise the ceiling. A
-// value the renderer cannot reach is a value a compromised WebView cannot
-// weaken. Eight hours is a clinical day: long enough never to interrupt normal
-// use, short enough that an unattended session cannot outlive the shift.
-export const MAX_SESSION_MINUTES = 480;
+// Provider-configurable, because shift lengths genuinely differ — an eight-hour
+// default that silently locks a clinician mid-day is a control they will turn
+// off entirely, which is strictly worse than one set to a length they can live
+// with.
+//
+// Configurability costs something, and it is paid rather than waved away: the
+// value is reachable from the renderer, so it is written only through the
+// audited `lock_max_session_set` command and its KV key is in
+// `secrets::WRITE_ONLY_PROTECTED_KEYS`. A generic `kv_set` cannot raise the
+// ceiling, and every change lands in `config_audit`. Raising this extends how
+// long a stolen unlocked device stays useful, so it belongs in the
+// tamper-evident record as much as turning the lock off does.
+//
+// There is a cap on the cap. Unbounded would let the control read as
+// "configured" while meaning "never". 24h is longer than any shift; the
+// 15-minute floor only rejects nonsense, since shorter is always safer. These
+// bounds are mirrored in lock.rs — the Rust side is the enforcing copy.
+export const DEFAULT_SESSION_MINUTES = 480;
+const MIN_SESSION_MINUTES = 15;
+const MAX_SESSION_MINUTES = 1440;
 
 // How often the wall-clock watchdog runs. Short enough that a resumed machine
 // locks promptly; long enough to be free.
@@ -65,6 +77,25 @@ export function getLockTimeoutMinutes() {
   const n = Number(v);
   if (!Number.isFinite(n)) return DEFAULT_TIMEOUT_MINUTES;
   return Math.min(MAX_TIMEOUT_MINUTES, Math.max(MIN_TIMEOUT_MINUTES, Math.round(n)));
+}
+
+// Absolute session ceiling, in minutes. Clamped on read as well as on write:
+// the stored value could predate a bounds change, or have been written by an
+// older build, and the watcher must never act on an out-of-range ceiling.
+export function getMaxSessionMinutes() {
+  const n = Number(kvGet(keys.lockMaxSessionMinutes()));
+  if (!Number.isFinite(n)) return DEFAULT_SESSION_MINUTES;
+  return Math.min(MAX_SESSION_MINUTES, Math.max(MIN_SESSION_MINUTES, Math.round(n)));
+}
+
+export function setMaxSessionMinutes(minutes) {
+  // Same NaN-vs-zero care as setLockTimeoutMinutes: `Number(x) || DEFAULT`
+  // would turn a deliberate 0 into the default instead of clamping it to the
+  // floor. Only a genuinely non-numeric input falls back.
+  const raw = Number(minutes);
+  const base = Number.isFinite(raw) ? raw : DEFAULT_SESSION_MINUTES;
+  const n = Math.min(MAX_SESSION_MINUTES, Math.max(MIN_SESSION_MINUTES, Math.round(base)));
+  persistLockSetting(keys.lockMaxSessionMinutes(), n, 'lock_max_session_set', { minutes: n });
 }
 
 export function setLockTimeoutMinutes(minutes) {
@@ -176,7 +207,9 @@ export function startIdleWatcher(onLock) {
       lock('suspend');
       return;
     }
-    if (now - sessionStart > MAX_SESSION_MINUTES * 60_000) {
+    // Read the ceiling each tick rather than caching it at start, so a change
+    // in Settings takes effect on the current session instead of the next one.
+    if (now - sessionStart > getMaxSessionMinutes() * 60_000) {
       lock('session_cap');
     }
   }

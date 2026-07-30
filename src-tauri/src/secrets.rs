@@ -101,6 +101,10 @@ pub(crate) const WRITE_ONLY_PROTECTED_KEYS: &[&str] = &[
     // warmup → kvGet() idle-watcher path is unchanged.
     crate::lock::KV_LOCK_ENABLED,
     crate::lock::KV_LOCK_TIMEOUT,
+    // The absolute session ceiling. Governs how long one unlock stays valid
+    // regardless of activity, so a generic write raising it weakens auto-logoff
+    // with no config_audit row — the same reason the other two are here.
+    crate::lock::KV_MAX_SESSION,
 ];
 
 /// True when `key` names a value that must live in the OS keychain and is
@@ -292,6 +296,7 @@ mod tests {
                 crate::retention::KV_LITIGATION_HOLD,
                 crate::lock::KV_LOCK_ENABLED,
                 crate::lock::KV_LOCK_TIMEOUT,
+                crate::lock::KV_MAX_SESSION,
             ],
             "WRITE_ONLY_PROTECTED_KEYS changed — review carefully and update this pin."
         );
@@ -302,7 +307,11 @@ mod tests {
     // config_audit row) while staying readable for the JS warmup → kvGet path.
     #[test]
     fn idle_lock_setting_keys_are_write_blocked_but_readable() {
-        for key in [crate::lock::KV_LOCK_ENABLED, crate::lock::KV_LOCK_TIMEOUT] {
+        for key in [
+            crate::lock::KV_LOCK_ENABLED,
+            crate::lock::KV_LOCK_TIMEOUT,
+            crate::lock::KV_MAX_SESSION,
+        ] {
             assert!(
                 guard_write_key(key).is_err(),
                 "{key} must not be writable via generic kv_set — it would skip the config_audit row"

@@ -33,6 +33,7 @@ export const keys = {
   // same "never the kv table" discipline as the API key and the DEK.
   lockEnabled:        () => 'note_settings_v1::lock_enabled',
   lockTimeoutMinutes: () => 'note_settings_v1::lock_timeout_minutes',
+  lockMaxSessionMinutes: () => 'note_settings_v1::lock_max_session_minutes',
 };
 
 // Per-encounter keys pulled into cache lazily when an encounter is opened.

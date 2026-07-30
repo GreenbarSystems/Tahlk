@@ -290,3 +290,43 @@ test('the watchdog never locks out from under an active recording', t => {
   assert.equal(reason, null, 'a recording defers the watchdog exactly as it defers the idle timer');
   stop();
 });
+
+// ── Provider-configurable session ceiling ──────────────────────────────────
+
+test('the session ceiling is clamped to its bounds on both write and read', () => {
+  const { setMaxSessionMinutes, getMaxSessionMinutes, DEFAULT_SESSION_MINUTES } = idleLock;
+
+  setMaxSessionMinutes(5);         // below the 15-minute floor
+  assert.equal(getMaxSessionMinutes(), 15, 'a too-short ceiling clamps up to the floor');
+
+  setMaxSessionMinutes(99_999);    // above the 24-hour cap
+  assert.equal(getMaxSessionMinutes(), 1440, 'the cap on the cap must hold — unbounded would mean "never"');
+
+  setMaxSessionMinutes('not a number');
+  assert.equal(getMaxSessionMinutes(), DEFAULT_SESSION_MINUTES, 'non-numeric input falls back to the default');
+
+  setMaxSessionMinutes(240);
+  assert.equal(getMaxSessionMinutes(), 240, 'a value inside the bounds is kept verbatim');
+});
+
+test('the session ceiling locks despite continuous activity', t => {
+  const doc = installFakeDocument();
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  setLockEnabled(true);
+  setLockTimeoutMinutes(60);            // idle window far longer than we advance
+  idleLock.setMaxSessionMinutes(15);    // shortest permitted ceiling
+
+  let reason = null;
+  const stop = startIdleWatcher(r => { reason = r; });
+
+  // Keep interacting the whole time — this is the case the idle timer alone
+  // cannot catch, and the entire reason the ceiling exists. Steps are well
+  // under the 60-minute idle window so the idle path can never be what fires.
+  for (let i = 0; i < 40; i++) {
+    t.mock.timers.tick(30_000);
+    doc._fire('keydown');
+  }
+
+  assert.equal(reason, 'session_cap', 'activity must not be able to hold a session open past its ceiling');
+  stop();
+});
