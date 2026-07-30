@@ -3,8 +3,74 @@
 How to produce a distributable Tahlk installer. The bundling (sidecar exe + 12
 whisper DLLs + 144 MB model, co-located at the resource root) is done and
 verified. Code signing infrastructure (Azure Trusted Signing account +
-`release.yml`, below) is wired up — **the remaining GA gate is running the
-first signed build and the clean-VM QA pass**, not acquiring a certificate.
+`release.yml`, below) is wired up. **The first signed build is done** — see the
+build record immediately below. **The remaining GA gates are the clean-VM QA
+pass and the publisher/certificate mismatch** recorded there.
+
+## Build record — first signed build
+
+| | |
+|---|---|
+| **Tag** | `v0.1.2-rc.1` |
+| **Date** | 2026-07-30 |
+| **Run** | [30569774916](https://github.com/GreenbarSystems/Tahlk/actions/runs/30569774916) — success |
+| **Artifact** | `Tahlk_0.1.2_x64-setup.exe`, 129.1 MB |
+| **Authenticode** | `Status: Valid` |
+| **Signer** | `CN=Ryan Moore, O=Ryan Moore, L=Goodyear, S=az, C=US` |
+| **Clean-VM QA** | ☐ **not yet run** — see the QA gate below |
+
+The signing pipeline is proven end to end: Azure credential validation,
+`artifact-signing-cli` install and self-test, artifact checksums, tag/version
+agreement, bundling, Authenticode verification, and draft-release upload all
+passed on the first attempt. The RBAC 403 warned about in the signing section
+below did not occur.
+
+### ⚠ Open issue — the publisher string does not match the certificate
+
+`tauri.conf.json` sets `bundle.publisher` to **"Greenbar Systems"**, but the
+certificate subject is **"Ryan Moore"** — an individual, not an organization.
+The installer will therefore display a publisher that the signature does not
+corroborate. That mismatch is precisely the thing that makes a legitimate
+installer look untrustworthy to a cautious clinician, and it must be resolved
+before any build reaches a tester. Two consistent options:
+
+1. **Set `publisher` to `"Ryan Moore"`** to match the certificate. Free and
+   immediate, but a medical app whose publisher is a personal name invites the
+   question of who is actually behind it.
+2. **Obtain an organization-validated certificate issued to Greenbar Systems**
+   and leave `publisher` as-is. Costs money and validation time, and is the
+   answer that matches how the product is marketed and how the BAA names the
+   covered entity's business associate.
+
+Do not "fix" this by removing the `publisher` field — Tauri then derives it
+from the identifier, which is a third, different string.
+
+### Expect SmartScreen anyway, at first
+
+The certificate appears to be individual/OV rather than EV. SmartScreen
+reputation for a non-EV certificate accrues over download volume, so early
+builds can still trigger the warning despite being validly signed. Note the
+consequence for `docs/BETA_SETUP.md`, which now instructs testers to **stop and
+report** a SmartScreen prompt rather than click through it: if the warning is
+expected for the first N downloads, that instruction needs to say so, or every
+tester will report it as a defect. Confirm behaviour during the clean-VM pass
+before sending anything out.
+
+## Pinned build inputs
+
+The whisper artifacts are fetched at build time and end up inside the signed
+binary, so both are pinned and checksummed in `release.yml`. Verified passing in
+the run above. To roll either forward, update the source **and** the hash in the
+same commit.
+
+| Artifact | Source | SHA-256 |
+|---|---|---|
+| `whisper-bin-x64.zip` | whisper.cpp release **v1.9.1** | `7D8BE46ECD31828E1EB7A2ECDD0D6B314FEAFD82163038AB6092594B0A063539` |
+| `ggml-base.en.bin` | HuggingFace `ggerganov/whisper.cpp` commit **`5359861c739e955e79d9a303bcbc70fb988958b1`** | `A03779C86DF3323075F5E796CB2CE5029F00EC8869EEE3FDFB897AFE36C6D002` |
+
+The model is 147,964,211 bytes; a size check runs before the hash check so a
+truncated download or an LFS pointer served in place of the blob reports as
+itself rather than as an opaque hash mismatch.
 
 ## Build the installer
 
