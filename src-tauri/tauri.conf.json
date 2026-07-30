@@ -43,6 +43,7 @@
     ],
     "category": "Medical",
     "copyright": "© Tahlk",
+    "publisher": "Greenbar Systems",
     "longDescription": "Ambient AI scribe for independent behavioral health and psychiatry practices. Listens to patient encounters, generates structured clinical notes, and requires physician sign-off before finalization. Audio stays on your device.",
     "shortDescription": "Privacy-first AI scribe for behavioral health",
     "externalBin": ["binaries/whisper-cpp"],
@@ -51,7 +52,10 @@
     },
     "windows": {
       "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.digicert.com"
+      "timestampUrl": "http://timestamp.digicert.com",
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

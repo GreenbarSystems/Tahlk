@@ -1,69 +1,106 @@
 # Welcome to the Tahlk Beta
 
-Thank you for helping test Tahlk. This guide will get you up and running.
+Thank you for helping test Tahlk. This guide gets you up and running.
 
-> **Please use test data only during the beta.** Don't enter real patient
-> information yet — the agreements that cover real patient use aren't in place
-> during this phase (see below).
+> **Please use test data only during the beta.** Do not enter real patient
+> information yet. The agreements that cover real patient use are not in place
+> during this phase.
 
-## What you'll need first
+## What you'll need
 
-Before you install Tahlk, please have this ready:
+Nothing to prepare in advance. Tahlk is a single installer with everything
+inside it — including the speech-recognition model, which is why the download is
+around 160 MB. There is no API key to obtain and no account to create first.
 
-1. **An Anthropic API key** (a temporary beta step). Tahlk uses Anthropic's
-   Claude AI to turn your conversation into a clinical note. For the beta you
-   supply an Anthropic key — Tahlk walks you through getting one during setup.
-   In the full version, Greenbar Systems (the maker of Tahlk) handles the
-   connection to Anthropic for you, so you won't need your own key.
+You will need:
 
-For real patient use later, you'll also have a **Business Associate Agreement
-(BAA)** and an **End User License Agreement (EULA)** with **Greenbar Systems** —
-not with Anthropic; Greenbar handles the Anthropic side. These aren't required
-for the test-data-only beta.
+- **Windows 10 or 11**, 64-bit.
+- **A microphone** your computer can already record from.
+- **About 500 MB of free disk space.**
 
 ## Installing Tahlk
 
-1. Open the installer file you were sent (or the link your contact gave you)
-   and run it.
-2. Windows may show a blue security pop-up the first time, since Tahlk is a
-   new publisher. Click **More info**, then **Run anyway**, to continue.
-   This is expected and safe.
-3. Once installation finishes, open **Tahlk** from your Start menu.
+1. Run the installer you were given.
+2. Tahlk installs **for your user account only**, so it will not ask for
+   administrator rights.
+3. When it finishes, open **Tahlk** from your Start menu.
 
-## Setting up your account
+> If Windows shows a blue "Windows protected your PC" pop-up, please stop and
+> tell us before clicking through. The release you were given is
+> digitally signed, so that warning should not appear — if it does, we want to
+> know rather than have you work around it.
 
-The first time you open Tahlk, it will walk you through two quick steps:
+## Setting up
 
-1. **Your profile** — your name, credentials (e.g. MD, LCSW), and specialty.
-2. **Your Anthropic API key** — paste in the key from above.
+The first launch walks you through three things. All three are required.
 
-Then click **Start using Tahlk** and you're ready to go. (There's no agreement
-step during the beta — that's for real patient use later, and you'll record it
-under **Settings → Agreements** when the time comes.)
+**1. Create your password.** This password encrypts every note, transcript, and
+recording on your device. Tahlk cannot recover it for you and there is no reset
+link — the encryption is the point.
 
-## Recording your first session
+**2. Save your three recovery codes.** Tahlk shows them one at a time and lets
+you save each to a file. **Save all three, somewhere separate from your
+computer.** Any one of them can get you back in if you forget your password. If
+you lose the password *and* all three codes, your notes cannot be recovered by
+anyone, including us.
 
-Here's the flow for each patient visit:
+**3. Your profile and agreements.** Enter your name, credentials (e.g. MD,
+LCSW), and your **practice state** — the state determines your record-retention
+window, recording-consent rules, and breach-notification requirements, so please
+set it accurately. Then read and accept the BAA and EULA covering how Tahlk
+processes protected health information.
 
-1. Click **+ New Session** to start.
-2. Click **Start Recording**, and **Stop Recording** when the visit is over.
-3. Click **Transcribe** to turn the recording into text.
-4. Click **Generate Note** to draft your clinical note.
-5. Review and edit the note as needed — it's fully editable.
-6. Click **Sign & Attest Note** once it's ready. This locks in the final
-   version.
-7. Optionally, export or copy the note for your records.
+There is no API-key step. Tahlk connects to the note-generation service on your
+behalf; nothing to paste, nothing to configure.
 
-## A few things worth knowing
+## Recording a session
 
-- Your audio and transcripts stay on your own computer.
-- Only the text of the transcript is sent to Anthropic, and only when you
-  click Generate Note.
-- Nothing is ever sent to Tahlk's own servers.
-- Notes are saved securely on your device once signed.
+1. **+ New Session** to start.
+2. **Start Recording**, then **Stop Recording** when the visit is over.
+3. **Transcribe** turns the recording into text. This runs entirely on your own
+   computer and works offline — a long session takes a few minutes.
+4. **Generate Note** drafts the clinical note.
+5. **Review and edit.** The draft is fully editable, and reviewing it is your
+   clinical responsibility — the note is a draft until you sign it.
+6. **Sign & Attest Note** locks in the final version.
+7. Optionally export or copy the note into your EHR.
 
-## Questions or issues?
+## Where your data goes
 
-Please reach out directly to your contact with any questions, feedback, or
-anything that doesn't work as expected. As an early tester, your feedback is
-especially valuable right now.
+- **Audio and transcripts never leave your computer.** Recording and
+  transcription are entirely local.
+- **Notes, transcripts, recordings, and the audit trail are encrypted at rest**
+  on your device, under your password.
+- **When you click Generate Note**, the transcript text is sent to Greenbar
+  Systems' processing service, which passes it to Anthropic under agreements
+  that cover protected health information. Nothing else is sent — not the
+  patient name, not the date of birth, not your roster, not previous notes.
+- **Exported files are not encrypted.** Once you save a note as .txt or .pdf,
+  protecting that file is up to you — save exports only somewhere secure.
+
+## Things worth knowing
+
+**Tahlk locks itself.** After a period of inactivity (2 minutes by default) it
+locks and asks for your password again, and it will always lock after a maximum
+session length regardless of activity. Both are adjustable in
+**Settings → Screen lock**. It will not lock in the middle of a recording.
+
+**Updates are manual.** There is no auto-update during the beta. If we ship a
+fix, we will send you a new installer to run over the top.
+
+## If something goes wrong
+
+Please tell us — especially anything that looks like data loss, a note that
+appears wrong, or a warning message you did not expect.
+
+It helps enormously if you include the diagnostics log. It is **off by default**
+and contains no patient information — only technical events. To send it:
+
+**Settings → Diagnostics → turn on Diagnostics → reproduce the problem →
+Export Log**, then attach the file.
+
+## Known limits during this beta
+
+- **Windows only.** No macOS build yet.
+- **Test data only.** See the note at the top.
+- **English only** for transcription.
