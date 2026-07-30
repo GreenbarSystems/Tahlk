@@ -8,14 +8,14 @@ This guide is written for clinicians. It walks through what you need, how to
 open the app, what the first-run setup asks for, and how to go from a recording
 to a signed note. You do not need any programming or IT background to follow it.
 
-> **Please read first — early access still needs a hand from your technical
-> contact.** Tahlk does not yet ship as a click-to-install app with a signed
-> installer. Right now, getting Tahlk running on your machine the first time
-> requires a developer or IT person to build and launch it using the steps in
-> [SETUP.md](SETUP.md). A one-click installer is planned but not available yet,
-> so we won't pretend the install is push-button today. Once someone has Tahlk
-> open on your computer, **everything below describes the app experience itself**
-> — and that part is designed for you, not for a developer.
+> **If you are a beta tester, start with [docs/BETA_SETUP.md](docs/BETA_SETUP.md)
+> instead.** Tahlk now ships as a signed Windows installer that you run
+> yourself — no developer or IT help needed, and nothing to configure. That
+> guide covers installing, the first-run setup, and where your data goes.
+> Everything below describes the app experience itself and applies either way.
+>
+> Building from source (for developers) is still documented in
+> [SETUP.md](SETUP.md).
 
 > **Beta note:** Tahlk is currently in a test-data-only beta — please do not
 > enter real patient information yet. The steps below describe the full app
