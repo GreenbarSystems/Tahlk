@@ -84,14 +84,62 @@ jobs:
           npm run test:build
           npm run test:js
 
-      # The whisper sidecar, its DLLs, and the model are gitignored (see
-      # SETUP.md) and not hosted anywhere else yet — CI fetches the same
-      # public releases a developer would grab by hand.
-      - name: Download whisper.cpp sidecar + DLLs
+      # test:build proves the three in-repo versions agree with each other. It
+      # cannot see the git tag, and the tag is what names the GitHub Release
+      # and what a tester will quote back in a bug report. A tag that disagrees
+      # with the version stamped into the installer means the release is
+      # labelled one thing and reports itself as another — with no auto-update
+      # channel, that ambiguity survives for the whole life of the build.
+      #
+      # Pre-release suffixes are allowed on the tag and only on the tag:
+      # v0.1.2-rc.1 is a legitimate way to exercise this workflow without
+      # claiming to be 0.1.2, and NSIS cannot carry the suffix anyway.
+      - name: Tag matches the packaged version
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $tag = '${{ github.ref_name }}'
+          $packaged = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $stripped = $tag -replace '^v', '' -replace '-.*$', ''
+          if ($stripped -ne $packaged) {
+            Write-Host "::error::tag $tag implies version $stripped but tauri.conf.json packages $packaged"
+            Write-Host "::error::Bump package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json to match the tag, or retag."
+            exit 1
+          }
+          Write-Host "tag $tag matches packaged version $packaged"
+
+      # The whisper sidecar, its DLLs, and the model are gitignored (see
+      # SETUP.md) and not hosted anywhere else yet — CI fetches the same
+      # public releases a developer would grab by hand.
+      #
+      # Both downloads are PINNED and CHECKSUMMED, because the artifacts they
+      # fetch end up inside a binary we then Authenticode-sign. The model alone
+      # is 147 MB of the ~160 MB installer. Fetching it from a mutable URL and
+      # signing whatever came back would make the signature attest to bytes
+      # nobody chose — the certificate would vouch for a supply chain we do not
+      # control. A signature over unverified content is worse than no
+      # signature, because it looks like assurance.
+      #
+      # The model URL is pinned to an immutable HuggingFace commit rather than
+      # `main`; a GitHub release asset can also be replaced in place, so the
+      # zip is hashed too. If either hash moves, the build FAILS rather than
+      # quietly shipping different bytes under the same version number.
+      #
+      # Hashes are recorded in docs/RELEASE.md. To roll the model forward:
+      # update the commit, download it, hash it, update both places together.
+      - name: Download whisper.cpp sidecar + DLLs
+        shell: pwsh
+        env:
+          WHISPER_ZIP_SHA256: '7D8BE46ECD31828E1EB7A2ECDD0D6B314FEAFD82163038AB6092594B0A063539'
+        run: |
+          $ErrorActionPreference = 'Stop'
           Invoke-WebRequest -Uri 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip' -OutFile whisper-bin-x64.zip
+          $actual = (Get-FileHash whisper-bin-x64.zip -Algorithm SHA256).Hash
+          if ($actual -ne $env:WHISPER_ZIP_SHA256) {
+            Write-Host "::error::whisper-bin-x64.zip checksum mismatch. expected=$($env:WHISPER_ZIP_SHA256) actual=$actual"
+            Write-Host "::error::Refusing to sign an installer containing unverified third-party binaries."
+            exit 1
+          }
           Expand-Archive -Path whisper-bin-x64.zip -DestinationPath whisper-extracted
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item whisper-extracted/Release/whisper-cli.exe src-tauri/binaries/whisper-cpp-x86_64-pc-windows-msvc.exe
@@ -99,10 +147,28 @@ jobs:
 
       - name: Download Whisper base.en model
         shell: pwsh
+        env:
+          # HuggingFace repo commit for ggerganov/whisper.cpp, resolved via the
+          # HF API. Immutable, unlike `main`.
+          MODEL_COMMIT: '5359861c739e955e79d9a303bcbc70fb988958b1'
+          MODEL_SHA256: 'A03779C86DF3323075F5E796CB2CE5029F00EC8869EEE3FDFB897AFE36C6D002'
+          MODEL_BYTES: '147964211'
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
-          Invoke-WebRequest -Uri 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin' -OutFile src-tauri/resources/ggml-base.en.bin
+          $uri = "https://huggingface.co/ggerganov/whisper.cpp/resolve/$($env:MODEL_COMMIT)/ggml-base.en.bin"
+          Invoke-WebRequest -Uri $uri -OutFile src-tauri/resources/ggml-base.en.bin
+          $size = (Get-Item src-tauri/resources/ggml-base.en.bin).Length
+          if ($size -ne [int64]$env:MODEL_BYTES) {
+            Write-Host "::error::model size mismatch. expected=$($env:MODEL_BYTES) actual=$size (a truncated download, or an LFS pointer served instead of the blob)"
+            exit 1
+          }
+          $actual = (Get-FileHash src-tauri/resources/ggml-base.en.bin -Algorithm SHA256).Hash
+          if ($actual -ne $env:MODEL_SHA256) {
+            Write-Host "::error::ggml-base.en.bin checksum mismatch. expected=$($env:MODEL_SHA256) actual=$actual"
+            Write-Host "::error::Refusing to sign an installer containing an unverified 147 MB model blob."
+            exit 1
+          }
 
       # trusted-signing-cli is deprecated in favor of artifact-signing-cli
       # (same maintainer/repo, same flags) following Microsoft's Trusted
