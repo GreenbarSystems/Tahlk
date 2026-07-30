@@ -207,7 +207,7 @@ pub(crate) fn audit_log_note_exported(
 /// patient alias on the device in one call — the largest single bulk PHI
 /// access the app performs. "It was for compliance" is a claim the audit trail
 /// should carry, not one it should assume.
-pub(crate) const VALID_LIST_SCOPES: &[&str] = &["sessions", "patients", "breach_scope"];
+pub(crate) const VALID_LIST_SCOPES: &[&str] = &["sessions", "patients", "breach_scope", "backup"];
 
 /// Record that a roster/list of records was displayed to the provider — the
 /// list-view counterpart to `record_viewed` (which covers a single-encounter

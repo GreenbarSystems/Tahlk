@@ -85,6 +85,26 @@ jobs:
             --ignore RUSTSEC-2026-0195
       - run: cargo audit --file server/Cargo.lock
 
+      # An ignore with no expiry is how a suppression list rots: in a year
+      # nobody knows whether these are still unfixable or merely still
+      # ignored, and "revisit on the next Tauri release" is a person
+      # remembering, not a control.
+      #
+      # Re-run WITHOUT the ignores and report the result without failing the
+      # job. When the tree finally resolves quick-xml >= 0.41.0 this step goes
+      # quiet, which is the signal to delete the two --ignore flags above. If
+      # a NEW advisory appears against src-tauri it is caught by the gating
+      # run above, not here, so this step staying green-but-noisy never masks
+      # a real finding.
+      - name: Report whether the ignored advisories are still unavoidable
+        continue-on-error: true
+        run: |
+          if cargo audit --file src-tauri/Cargo.lock --quiet; then
+            echo "::warning::RUSTSEC-2026-0194/0195 no longer fire — remove the --ignore flags in ci.yml."
+          else
+            echo "Ignored advisories still present; the --ignore flags above are still required."
+          fi
+
   server:
     name: server (tahlk-sync)
     runs-on: ubuntu-latest

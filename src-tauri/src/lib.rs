@@ -40,6 +40,7 @@ mod audio_crypto;
 mod audit_mac;
 mod auth;
 mod baa;
+mod backup;
 mod breach_scope;
 mod config_audit;
 mod crypto;
@@ -323,6 +324,7 @@ pub fn run() {
             note_audit::audit_log_records_listed,
             note_audit::verify_audit_macs,
             breach_scope::breach_scope,
+            backup::export_encrypted_backup,
             whisper::transcribe_audio,
             notes::generate_note,
             export::export_note_to_file,
