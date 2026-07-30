@@ -116,15 +116,22 @@ test('detects a broken prevHash link (a chain that was spliced/reordered)', asyn
   assert.equal(result.broken[0].encounterId, 'enc-spliced');
 });
 
-test('an encounter with only legacy (pre-hash-chain) entries is not flagged broken', async () => {
-  // Legacy rows migrated from the old KV blob may have empty entry_hash;
-  // verifyHistoryChain treats these as "legacySkipped", not a failure.
+test('an encounter whose entries have no entryHash IS flagged broken', async () => {
+  // REVERSED DELIBERATELY, mirroring the same reversal in test_auditLog.mjs.
+  // verifyHistoryChain carried the identical "legacy" exemption as
+  // verifyAuditChain, so an empty entry_hash on every row downgraded the whole
+  // chain to a clean pass — deleting the integrity metadata satisfied the
+  // integrity check, with no key and no forgery required.
+  //
+  // Nothing in the wild depends on the old leniency: the beta has not shipped,
+  // so no installed base carries pre-chain rows. If any are ever found, the
+  // answer is a recorded one-time migration, not a standing exemption that an
+  // attacker can invoke by deleting a field.
   fakeTable.set('enc-legacy', [
     { action: 'generated', actor: 'AI', timestamp: '2025-01-01T00:00:00Z', contentHash: 'c0', notes: '', entryHash: '' },
   ]);
   const result = await verifyAllChains();
-  assert.equal(result.ok, true);
-  assert.equal(result.results[0].legacySkipped, 1);
+  assert.equal(result.ok, false, 'an unhashed history row must not verify');
 });
 
 // Bug-inject-and-revert: prove this test suite would actually fail if

@@ -200,17 +200,27 @@ test('a reordered (swapped) pair of entries is detected', async () => {
   assert.equal(verdict.ok, false);
 });
 
-test('legacy (pre-hash-chain) entries with no entryHash are not flagged broken', async () => {
-  // Entries written by the OLD appendAudit (before this fix) have no
-  // entryHash/prevHash at all. verifyAuditChain must treat these as
-  // legacySkipped, matching verifyHistoryChain's semantics, not report the
-  // whole log as tampered just because it predates hash-chaining.
-  const legacyLog = [
+test('an entry with no entryHash is reported broken, even as the first entry', async () => {
+  // REVERSED DELIBERATELY. This test previously asserted the opposite — that a
+  // leading un-hashed entry is "legacy" and skipped — and that leniency was a
+  // live vulnerability, demonstrated in test_auditChain_tampering.mjs: strip
+  // entryHash from EVERY entry and the chain never starts, so every row is
+  // skipped and the whole log verifies clean. Deleting the integrity metadata
+  // was a way to satisfy the integrity check, needing no key and no forgery.
+  //
+  // The exemption existed for entries written before hash-chaining shipped.
+  // Nothing in the wild relies on it: the beta has not been distributed (the
+  // signed build is an unpublished draft, gated on ZDR), so there is no
+  // installed base carrying pre-chain rows. Were such rows ever found, the
+  // answer is an explicit one-time migration that records what it converted —
+  // not a permanent verifier exemption that is indistinguishable from an
+  // attack.
+  const unhashed = [
     { actor: 'provider', actorId: null, action: 'note_edited', timestamp: '2026-01-01T00:00:00Z', encounterId: 'enc-legacy' },
   ];
-  const verdict = await verifyAuditChain(legacyLog);
-  assert.equal(verdict.ok, true);
-  assert.equal(verdict.legacySkipped, 1);
+  const verdict = await verifyAuditChain(unhashed);
+  assert.equal(verdict.ok, false, 'a missing entryHash is a broken chain wherever it appears');
+  assert.equal(verdict.reason, 'missing entryHash');
 });
 
 test('a legacy entry appearing AFTER the chain has started is reported broken, not skipped', async () => {
