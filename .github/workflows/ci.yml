@@ -178,9 +178,49 @@ jobs:
       - name: Install keyring backend for tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
 
+      # The hang this guards against (diagnosed 2026-07-24, from the logs of
+      # runs 30123854563 and 30127946308):
+      #
+      # If the `--unlock`ed daemon is no longer the owner of
+      # `org.freedesktop.secrets` when the first keychain call arrives — which
+      # is ~2 minutes in, after cargo finishes compiling — D-Bus *activates a
+      # replacement*. That replacement never received the `echo ""` password,
+      # so its collection is LOCKED. Serving the request then needs a GUI
+      # unlock prompt; `gcr-prompter` dies instantly with "cannot open
+      # display", and the client (keyring -> dbus-secret-service -> dbus)
+      # blocks with no timeout. Observed stalling 44+ minutes.
+      #
+      # The tell is unambiguous and worth knowing: the string
+      # "Activating service name='org.freedesktop.secrets'" appeared in 2/2
+      # hung runs and 0/4 passing runs. Activation only happens when nobody
+      # owns the name, so its presence means the daemon had died — whether or
+      # not that run went on to hang. The canary step below fails the job on
+      # it, which turns every run into a signal instead of only the ~1 in 3
+      # that stalled visibly.
+      #
+      # Three layers, because no single one is sufficient:
+      #   1. `eval` the daemon's own output. It prints the control-socket and
+      #      agent env vars, which were previously discarded — exporting them
+      #      keeps clients pointed at the daemon we unlocked.
+      #   2. `gdbus wait` gates on the name actually being claimed, so a
+      #      daemon that failed to start fails here, fast and legibly, instead
+      #      of at an arbitrary point mid-suite.
+      #   3. `timeout` bounds the stall regardless of cause. Neither 1 nor 2
+      #      can stop a daemon that dies *during* the run, so this is the
+      #      backstop that converts a 40-minute stall into a 10-minute failure.
       - name: Run Rust tests
         run: |
           dbus-run-session -- sh -c '
-            echo "" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --manifest-path src-tauri/Cargo.toml --locked
-          '
+            eval "$(echo "" | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK
+            gdbus wait --session --timeout 30 org.freedesktop.secrets
+            timeout 600 cargo test --manifest-path src-tauri/Cargo.toml --locked
+          ' 2>&1 | tee rust-test.log
+          # Fail loudly if the daemon died and a locked replacement was
+          # activated, even when the suite happened to finish anyway. A green
+          # run that tripped this is a hang that got lucky on timing.
+          if grep -q "Activating service name='org.freedesktop.secrets'" rust-test.log; then
+            echo "::error::gnome-keyring died mid-run; D-Bus activated a LOCKED replacement."
+            echo "::error::This is the CI hang signature — see the comment above this step."
+            exit 1
+          fi
