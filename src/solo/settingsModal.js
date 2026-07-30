@@ -28,6 +28,9 @@ import {
   setLockEnabled,
   getLockTimeoutMinutes,
   setLockTimeoutMinutes,
+  DEFAULT_SESSION_MINUTES,
+  getMaxSessionMinutes,
+  setMaxSessionMinutes,
 } from '../core/idleLock.js';
 
 const PROVIDER_KEY = keys.provider();
@@ -60,6 +63,7 @@ export async function renderSettings() {
   const pinSet = await lockRepo.isPinSet().catch(() => false);
   const lockOn = isLockEnabled();
   const lockTimeout = getLockTimeoutMinutes();
+  const maxSession = getMaxSessionMinutes();
   const retentionYears = await retentionRepo.getYears().catch(() => 7);
   const retentionHold = await retentionRepo.getHold().catch(() => false);
   return `
@@ -133,6 +137,18 @@ export async function renderSettings() {
                  ${pinSet ? '' : 'disabled'} />
         </div>
         <p class="settings-desc">Default: ${DEFAULT_TIMEOUT_MINUTES} minutes.</p>
+
+        <div class="field-row">
+          <label>Always lock after (minutes)</label>
+          <input type="number" id="s-lock-max-session" min="15" max="1440" value="${Number(maxSession)}"
+                 ${pinSet ? '' : 'disabled'} />
+        </div>
+        <p class="settings-desc">
+          A hard limit on how long one unlock lasts, even while you are actively working.
+          The inactivity timer above cannot catch a session held open by continuous
+          activity. Default: ${DEFAULT_SESSION_MINUTES} minutes (${DEFAULT_SESSION_MINUTES / 60} hours).
+          Allowed: 15 minutes to 24 hours. Pauses while you are recording.
+        </p>
       </section>
 
       <section class="settings-section">
@@ -412,7 +428,7 @@ function setLockPinUiState(hasPin) {
 
   // The enable toggle and timeout are meaningless without a PIN to unlock
   // with, so they follow the PIN's presence.
-  for (const id of ['s-lock-enabled', 's-lock-timeout']) {
+  for (const id of ['s-lock-enabled', 's-lock-timeout', 's-lock-max-session']) {
     const el = document.getElementById(id);
     if (!el) continue;
     if (hasPin) el.removeAttribute('disabled');
@@ -910,6 +926,21 @@ export function wireSettings() {
     setLockTimeoutMinutes(n);
     e.target.value = getLockTimeoutMinutes();
     toast(`Lock timeout set to ${getLockTimeoutMinutes()} minute${getLockTimeoutMinutes() === 1 ? '' : 's'}.`);
+  });
+
+  document.getElementById('s-lock-max-session')?.addEventListener('change', e => {
+    setMaxSessionMinutes(Number(e.target.value));
+    // Read back rather than echoing the input: the value is clamped to
+    // 15..1440, so an out-of-range entry must show what was actually stored
+    // instead of leaving the provider believing they set something else.
+    const stored = getMaxSessionMinutes();
+    e.target.value = stored;
+    const hours = stored / 60;
+    toast(
+      hours >= 1 && Number.isInteger(hours)
+        ? `Sessions will always lock after ${hours} hour${hours === 1 ? '' : 's'}.`
+        : `Sessions will always lock after ${stored} minutes.`
+    );
   });
 
   wireAsyncActionButton({

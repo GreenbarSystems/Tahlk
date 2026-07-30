@@ -232,6 +232,47 @@ pub(crate) fn lock_timeout_set(state: State<DbState>, minutes: i64) -> Result<()
     )
 }
 
+/// Bounds on the absolute session ceiling, in minutes.
+///
+/// The ceiling is the longest a single unlock stays valid regardless of
+/// activity, so unlike the idle timeout there must be a cap on the cap: an
+/// unbounded value would let the control be set to "never" while still
+/// appearing configured. 24 hours is the ceiling on the ceiling — longer than
+/// any clinical shift, so it never obstructs legitimate use, and short enough
+/// that a session cannot outlive a day. The 15-minute floor exists only to
+/// reject nonsense; shorter is always safer, so the low end is permissive.
+pub(crate) const MIN_SESSION_MINUTES: i64 = 15;
+pub(crate) const MAX_SESSION_MINUTES: i64 = 1440;
+
+/// KV key for the provider-configured session ceiling. Write-protected in
+/// `secrets::WRITE_ONLY_PROTECTED_KEYS` alongside the other two lock settings —
+/// it governs how long an unlocked session is worth, so a generic `kv_set`
+/// raising it would weaken auto-logoff with no `config_audit` row to show for
+/// it. Reads stay open for the idle watcher.
+pub(crate) const KV_MAX_SESSION: &str = "note_settings_v1::lock_max_session_minutes";
+
+/// Set the absolute session ceiling in minutes.
+///
+/// Same atomic KV-write + `config_audit` as the other two lock setters. This
+/// one carries more weight than the idle timeout: raising the ceiling extends
+/// how long a stolen unlocked device stays useful, so the change belongs in the
+/// tamper-evident record every bit as much as turning the lock off does.
+#[tauri::command]
+pub(crate) fn lock_max_session_set(state: State<DbState>, minutes: i64) -> Result<(), AppError> {
+    if !(MIN_SESSION_MINUTES..=MAX_SESSION_MINUTES).contains(&minutes) {
+        return Err(AppError::invalid(format!(
+            "session limit must be between {MIN_SESSION_MINUTES} and {MAX_SESSION_MINUTES} minutes"
+        )));
+    }
+    let mut conn = state.conn()?;
+    crate::retention::set_policy_value(
+        &mut conn,
+        KV_MAX_SESSION,
+        &minutes.to_string(),
+        "lock_max_session_changed",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
