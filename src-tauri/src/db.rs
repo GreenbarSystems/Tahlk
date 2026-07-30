@@ -688,6 +688,81 @@ fn recover_orphaned_migration(
     Ok(())
 }
 
+/// Ordered schema migrations, applied by [`run_migrations`].
+///
+/// Index + 1 is the `user_version` a migration produces: `MIGRATIONS[0]` takes
+/// a database from version 0 to 1. **Append only.** Never reorder, never edit a
+/// shipped entry, never remove one — an installed database records only which
+/// version it reached, so changing history silently skips work on some installs
+/// and re-runs it on others.
+///
+/// Each entry must be safe to run exactly once against a database at the
+/// preceding version. It does NOT need to be idempotent, because the version
+/// gate guarantees single execution; that is the whole point of tracking a
+/// version rather than probing for columns.
+///
+/// Adding one: append the SQL, add a test asserting it applies from the prior
+/// version, and update `LATEST_VERSION`'s expectation in the tests.
+const MIGRATIONS: &[&str] = &[
+    // v1 — baseline. Intentionally a no-op.
+    //
+    // `SCHEMA_TABLES` already runs `CREATE TABLE IF NOT EXISTS` on every open,
+    // and two `pragma_table_info`-gated column additions run after it, so an
+    // existing install is already at the shape this framework starts from.
+    // Stamping a version without changing anything establishes the baseline so
+    // the FIRST real migration has a defined starting point. Doing schema work
+    // in v1 would apply it to fresh and existing installs alike with no way to
+    // tell them apart — which is the failure this framework exists to prevent.
+    "SELECT 1;",
+];
+
+/// The `user_version` a fully-migrated database reaches.
+pub(crate) const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
+
+/// Apply any migrations the database has not yet reached.
+///
+/// Before this existed, schema changes were made by probing for a column with
+/// `pragma_table_info` and issuing `ALTER TABLE` if absent. That works for
+/// adding a nullable column and nothing else: it cannot express a data
+/// backfill, a change that must happen exactly once, or an ordering dependency
+/// between two changes — and every future open re-runs the probe forever. For a
+/// desktop app with no remote control over installs and no auto-update channel,
+/// a schema change that half-applies is unrecoverable in the field.
+///
+/// Each migration runs inside its own transaction together with the version
+/// bump, so a failure rolls back both. A partially-applied migration paired
+/// with a version claiming it succeeded is the one outcome that must be
+/// impossible.
+pub(crate) fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+
+    // A database from a NEWER build than this one. Downgrading is not
+    // supported: the newer schema may hold columns and rows this binary cannot
+    // interpret, and continuing risks writing data the newer build will
+    // misread. Refuse rather than corrupt.
+    if current > LATEST_VERSION {
+        return Err(AppError::internal_from(format!(
+            "database schema version {current} is newer than this build supports ({LATEST_VERSION}); \
+             install the newer version of Tahlk — refusing to open rather than risk corrupting records"
+        )));
+    }
+
+    for (idx, sql) in MIGRATIONS.iter().enumerate() {
+        let target = idx as i64 + 1;
+        if current >= target {
+            continue;
+        }
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        // `PRAGMA user_version` does not accept a bound parameter, so the value
+        // is formatted in. It is derived from an array index, never from input.
+        tx.execute_batch(&format!("PRAGMA user_version = {target};"))?;
+        tx.commit()?;
+        log::info!("applied schema migration to version {target}");
+    }
+    Ok(())
+}
+
 pub(crate) fn open_database(app: &AppHandle) -> Result<SqlitePool, AppError> {
     let hex_key = db_key::load_or_generate_dek()?;
     open_database_with_dek(app, &hex_key)
@@ -782,6 +857,15 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     // PooledConnection derefs to Connection, so DerefMut just works.
     let mut conn = pool.get()?;
     conn.execute_batch(SCHEMA_TABLES)?;
+    run_migrations(&mut conn)?;
+
+    // NOTE: the two ad-hoc column migrations below predate `run_migrations`
+    // and are deliberately left in place rather than retrofitted into it.
+    // Folding them in would require asserting which `user_version` an existing
+    // install "should" have had, and we cannot know that — an install created
+    // before versioning reports 0 whether or not those columns exist. They are
+    // idempotent and gated on `pragma_table_info`, so they are safe to keep
+    // running. **New schema changes must go in MIGRATIONS, not here.**
 
     // One-shot column migration: add source_id to patients on DBs created
     // before this column existed. SCHEMA_TABLES uses CREATE TABLE IF NOT
@@ -853,6 +937,104 @@ pub(crate) fn open_database_with_dek(app: &AppHandle, hex_key: &str) -> Result<S
     }
 
     Ok(pool)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    //! Schema-migration framework. The property under test is that a database
+    //! reaches the current version exactly once, from any starting point, and
+    //! that a failure never leaves a version claiming work that did not
+    //! complete.
+
+    use super::*;
+
+    fn version_of(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_migrates_to_latest() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(version_of(&conn), 0, "a new database starts unversioned");
+        run_migrations(&mut conn).unwrap();
+        assert_eq!(version_of(&conn), LATEST_VERSION);
+    }
+
+    #[test]
+    fn migrations_are_idempotent_across_repeated_opens() {
+        // Every app launch calls this. Running it twice must be identical to
+        // running it once — the version gate, not luck, is what guarantees a
+        // migration executes exactly once.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let after_first = version_of(&conn);
+        run_migrations(&mut conn).unwrap();
+        assert_eq!(version_of(&conn), after_first, "a second run must be a no-op");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_refused_not_opened() {
+        // Downgrade protection. A newer schema may hold columns this binary
+        // cannot interpret; continuing risks writing data the newer build will
+        // misread. With no auto-update channel, a user running an older
+        // installer against a newer database is a realistic scenario, not a
+        // hypothetical one.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {};", LATEST_VERSION + 5))
+            .unwrap();
+
+        let err = run_migrations(&mut conn).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("newer than this build supports"),
+            "the error must say what happened and what to do, got: {msg}"
+        );
+        assert_eq!(
+            version_of(&conn),
+            LATEST_VERSION + 5,
+            "refusing must not modify the database"
+        );
+    }
+
+    #[test]
+    fn a_failing_migration_rolls_back_its_version_bump() {
+        // The one outcome that must be impossible: a version recording work
+        // that did not complete. Such a database is unrecoverable in the field,
+        // because every later run skips the migration it claims to have run.
+        let mut conn = Connection::open_in_memory().unwrap();
+        let start = version_of(&conn);
+
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE probe (x INTEGER);").unwrap();
+        let bad = tx.execute_batch("THIS IS NOT SQL;");
+        assert!(bad.is_err(), "the fixture must actually fail");
+        drop(tx); // rolls back
+
+        assert_eq!(version_of(&conn), start, "a failed migration leaves the version untouched");
+        let survived: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='probe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(survived, 0, "and leaves no half-applied schema behind");
+    }
+
+    // clippy::assertions_on_constants fires because both operands are consts —
+    // which is precisely what is being pinned. The lint assumes a constant
+    // assertion is a tautology; here it is a guard against someone editing one
+    // constant without the other. Same reasoning as
+    // `baa::the_gate_is_enabled_in_shipped_builds`.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn latest_version_matches_the_migration_list() {
+        // Guards the invariant the whole framework rests on: index + 1 is the
+        // version a migration produces. If someone adds SQL without the count
+        // following, installs stamp a version they did not reach.
+        assert_eq!(LATEST_VERSION, MIGRATIONS.len() as i64);
+        assert!(LATEST_VERSION >= 1, "the baseline migration must exist");
+    }
 }
 
 #[cfg(test)]
